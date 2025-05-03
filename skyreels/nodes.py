@@ -29,6 +29,7 @@ def generate_timestep_matrix(
         num_pre_ready=0,
         casual_block_size=1,
         shrink_interval_with_mask=False,
+        denoise_strength=1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple]]:
         step_matrix, step_index = [], []
         update_mask, valid_interval = [], []
@@ -50,9 +51,13 @@ def generate_timestep_matrix(
             ]
         )  # to handle the counter in row works starting from 1
         pre_row = torch.zeros(num_frames_block, dtype=torch.long)
+        initial_value = num_iterations - (num_iterations * denoise_strength)
+        # set all pre_row values to the initial value
+        pre_row[:] = initial_value
         if num_pre_ready > 0:
             pre_row[: num_pre_ready // casual_block_size] = num_iterations
 
+        row_count = 0
         while torch.all(pre_row >= (num_iterations - 1)) == False:
             new_row = torch.zeros(num_frames_block, dtype=torch.long)
             for i in range(num_frames_block):
@@ -63,13 +68,14 @@ def generate_timestep_matrix(
                 else:
                     new_row[i] = new_row[i - 1] - ar_step
             new_row = new_row.clamp(0, num_iterations)
-            print(f"generate_timestep_matrix new_row[{i}]: {new_row}")
+            print(f"generate_timestep_matrix new_row[{row_count}]: {new_row}")
             update_mask.append(
                 (new_row != pre_row) & (new_row != num_iterations)
             )  # False: no need to update， True: need to update
             step_index.append(new_row)
             step_matrix.append(step_template[new_row])
             pre_row = new_row
+            row_count += 1
 
         # for long video we split into several sequences, base_num_frames is set to the model max length (for training)
         terminal_flag = base_num_frames_block
@@ -147,24 +153,24 @@ class WanVideoDiffusionForcingSampler:
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         
-        steps = int(steps/denoise_strength)
+        timestep_steps = int(steps/denoise_strength)
 
         timesteps = None
         if 'unipc' in scheduler:
             sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
-            sample_scheduler.set_timesteps(steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
+            sample_scheduler.set_timesteps(timestep_steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
         elif 'euler' in scheduler:
             sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift, use_beta_sigmas=(scheduler == 'euler/beta'))
-            sample_scheduler.set_timesteps(steps, device=device)
+            sample_scheduler.set_timesteps(timestep_steps, device=device)
         elif 'lcm' in scheduler:
             sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
-            sample_scheduler.set_timesteps(steps, device=device) 
+            sample_scheduler.set_timesteps(timestep_steps, device=device) 
         
         
         init_timesteps = sample_scheduler.timesteps
-        
+        timesteps = init_timesteps[:]
         if denoise_strength < 1.0:
-            steps = int(steps * denoise_strength)
+            # steps = int(steps * denoise_strength)
             timesteps = timesteps[-(steps + 1):] 
         
         seed_g = torch.Generator(device=torch.device("cpu"))
@@ -256,20 +262,21 @@ class WanVideoDiffusionForcingSampler:
         ar_step = 0
         causal_block_size = 1
         step_matrix, _, step_update_mask, valid_interval = generate_timestep_matrix(
-                latent_video_length, init_timesteps, base_num_frames, ar_step, prefix_video_latent_length, causal_block_size
+                latent_video_length, init_timesteps, base_num_frames, ar_step, prefix_video_latent_length, causal_block_size,
+                shrink_interval_with_mask=False, denoise_strength=denoise_strength
             )
         
         sample_schedulers = []
         for _ in range(latent_video_length):
             if 'unipc' in scheduler:
                 sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
-                sample_scheduler.set_timesteps(steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
+                sample_scheduler.set_timesteps(timestep_steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
             elif 'euler' in scheduler:
                 sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift)
-                sample_scheduler.set_timesteps(steps, device=device)
+                sample_scheduler.set_timesteps(timestep_steps, device=device)
             elif 'lcm' in scheduler:
                 sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
-                sample_scheduler.set_timesteps(steps, device=device) 
+                sample_scheduler.set_timesteps(timestep_steps, device=device) 
             
             sample_schedulers.append(sample_scheduler)
         sample_schedulers_counter = [0] * latent_video_length
@@ -377,7 +384,7 @@ class WanVideoDiffusionForcingSampler:
             transformer.teacache_start_step = teacache_args["start_step"]
             transformer.teacache_cache_device = teacache_args["cache_device"]
             log.info(f"TeaCache: Using cache device: {transformer.teacache_state.cache_device}")
-            transformer.teacache_end_step = len(init_timesteps)-1 if teacache_args["end_step"] == -1 else teacache_args["end_step"]
+            transformer.teacache_end_step = len(timesteps)-1 if teacache_args["end_step"] == -1 else teacache_args["end_step"]
             transformer.teacache_use_coefficients = teacache_args["use_coefficients"]
             transformer.teacache_mode = teacache_args["mode"]
             transformer.teacache_state.clear_all()
@@ -422,7 +429,7 @@ class WanVideoDiffusionForcingSampler:
                     return latent_model_input*0, None
 
                 nonlocal patcher
-                current_step_percentage = idx / len(init_timesteps)
+                current_step_percentage = idx / len(timesteps)
                 control_lora_enabled = False
                 
                 image_cond_input = image_cond
@@ -513,49 +520,52 @@ class WanVideoDiffusionForcingSampler:
 
         #region main loop start
         for i, timestep_i in enumerate(tqdm(step_matrix)):
-            update_mask_i = step_update_mask[i]
-            valid_interval_i = valid_interval[i]
-            valid_interval_start, valid_interval_end = valid_interval_i
-            timestep = timestep_i[None, valid_interval_start:valid_interval_end].clone()
-            latent_model_input = latents[:, valid_interval_start:valid_interval_end, :, :].clone()
-            if addnoise_condition > 0 and valid_interval_start < prefix_video_latent_length:
-                noise_factor = 0.001 * addnoise_condition
-                timestep_for_noised_condition = addnoise_condition
-                latent_model_input[:, valid_interval_start:prefix_video_latent_length] = (
-                    latent_model_input[:, valid_interval_start:prefix_video_latent_length] * (1.0 - noise_factor)
-                    + torch.randn_like(latent_model_input[:, valid_interval_start:prefix_video_latent_length])
-                    * noise_factor
-                )
-                timestep[:, valid_interval_start:prefix_video_latent_length] = timestep_for_noised_condition
+            try:
+                update_mask_i = step_update_mask[i]
+                valid_interval_i = valid_interval[i]
+                valid_interval_start, valid_interval_end = valid_interval_i
+                timestep = timestep_i[None, valid_interval_start:valid_interval_end].clone()
+                latent_model_input = latents[:, valid_interval_start:valid_interval_end, :, :].clone()
+                if addnoise_condition > 0 and valid_interval_start < prefix_video_latent_length:
+                    noise_factor = 0.001 * addnoise_condition
+                    timestep_for_noised_condition = addnoise_condition
+                    latent_model_input[:, valid_interval_start:prefix_video_latent_length] = (
+                        latent_model_input[:, valid_interval_start:prefix_video_latent_length] * (1.0 - noise_factor)
+                        + torch.randn_like(latent_model_input[:, valid_interval_start:prefix_video_latent_length])
+                        * noise_factor
+                    )
+                    timestep[:, valid_interval_start:prefix_video_latent_length] = timestep_for_noised_condition
 
 
-            print("timestep", timestep)
-            noise_pred, self.teacache_state = predict_with_cfg(
-                latent_model_input.to(dtype), 
-                cfg[i], 
-                text_embeds["prompt_embeds"], 
-                text_embeds["negative_prompt_embeds"], 
-                timestep, i, image_cond, clip_fea, unianim_data=unianim_data, vace_data=vace_data,
-                teacache_state=self.teacache_state)
-            
-            print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
-            for idx in range(valid_interval_start, valid_interval_end):
-                if update_mask_i[idx].item():
-                    latents[:, idx] = sample_schedulers[idx].step(
-                        noise_pred[:, idx - valid_interval_start],
-                        timestep_i[idx],
-                        latents[:, idx],
-                        return_dict=False,
-                        generator=seed_g,
-                    )[0]
-                    sample_schedulers_counter[idx] += 1
+                print("timestep", timestep)
+                noise_pred, self.teacache_state = predict_with_cfg(
+                    latent_model_input.to(dtype), 
+                    cfg[i], 
+                    text_embeds["prompt_embeds"], 
+                    text_embeds["negative_prompt_embeds"], 
+                    timestep, i, image_cond, clip_fea, unianim_data=unianim_data, vace_data=vace_data,
+                    teacache_state=self.teacache_state)
+                
+                print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
+                for idx in range(valid_interval_start, valid_interval_end):
+                    if update_mask_i[idx].item():
+                        latents[:, idx] = sample_schedulers[idx].step(
+                            noise_pred[:, idx - valid_interval_start],
+                            timestep_i[idx],
+                            latents[:, idx],
+                            return_dict=False,
+                            generator=seed_g,
+                        )[0]
+                        sample_schedulers_counter[idx] += 1
 
-            x0 = latents.unsqueeze(0)
-            if callback is not None:
-                callback_latent = (latent_model_input - noise_pred.to(timestep_i[idx].device) * timestep_i[idx] / 1000).detach().permute(1,0,2,3)
-                callback(i, callback_latent, None, steps)
-            else:
-                pbar.update(1)
+                x0 = latents.unsqueeze(0)
+                if callback is not None:
+                    callback_latent = (latent_model_input - noise_pred.to(timestep_i[idx].device) * timestep_i[idx] / 1000).detach().permute(1,0,2,3)
+                    callback(i, callback_latent, None, steps)
+                else:
+                    pbar.update(1)
+            except Exception as e:
+                log.error(f"Error during sampling[{i}]: {e}")
 
         if teacache_args is not None:
             states = transformer.teacache_state.states
