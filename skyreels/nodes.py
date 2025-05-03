@@ -63,7 +63,7 @@ def generate_timestep_matrix(
                 else:
                     new_row[i] = new_row[i - 1] - ar_step
             new_row = new_row.clamp(0, num_iterations)
-
+            print(f"generate_timestep_matrix new_row[{i}]: {new_row}")
             update_mask.append(
                 (new_row != pre_row) & (new_row != num_iterations)
             )  # False: no need to update， True: need to update
@@ -95,6 +95,7 @@ def generate_timestep_matrix(
             step_matrix = step_matrix.unsqueeze(-1).repeat(1, 1, casual_block_size).flatten(1).contiguous()
             valid_interval = [(s * casual_block_size, e * casual_block_size) for s, e in valid_interval]
 
+        print(f"generate_timestep_matrix = step_matrix: {step_matrix.shape}, step_index: {step_index.shape}, step_update_mask: {step_update_mask.shape}, valid_interval: {valid_interval}")
         return step_matrix, step_index, step_update_mask, valid_interval
 
 #region Sampler
