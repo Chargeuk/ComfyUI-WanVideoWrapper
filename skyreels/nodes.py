@@ -41,6 +41,7 @@ def generate_timestep_matrix(
             min_ar_step = infer_step_num / gen_block
             assert ar_step >= min_ar_step, f"ar_step should be at least {math.ceil(min_ar_step)} in your setting"
         # print(num_frames, step_template, base_num_frames, ar_step, num_pre_ready, casual_block_size, num_frames_block, base_num_frames_block)
+        print(f"generate_timestep_matrix: num_frames:{num_frames}, num_iterations:{num_iterations}, step_template:{step_template.shape}, base_num_frames:{base_num_frames}, ar_step:{ar_step}, num_pre_ready:{num_pre_ready}, casual_block_size:{casual_block_size}, num_frames_block:{num_frames_block}, base_num_frames_block:{base_num_frames_block}")
         step_template = torch.cat(
             [
                 torch.tensor([999], dtype=torch.int64, device=step_template.device),
@@ -527,7 +528,7 @@ class WanVideoDiffusionForcingSampler:
                 timestep[:, valid_interval_start:prefix_video_latent_length] = timestep_for_noised_condition
 
 
-            #print("timestep", timestep)
+            print("timestep", timestep)
             noise_pred, self.teacache_state = predict_with_cfg(
                 latent_model_input.to(dtype), 
                 cfg[i], 
@@ -536,6 +537,7 @@ class WanVideoDiffusionForcingSampler:
                 timestep, i, image_cond, clip_fea, unianim_data=unianim_data, vace_data=vace_data,
                 teacache_state=self.teacache_state)
             
+            print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
             for idx in range(valid_interval_start, valid_interval_end):
                 if update_mask_i[idx].item():
                     latents[:, idx] = sample_schedulers[idx].step(
