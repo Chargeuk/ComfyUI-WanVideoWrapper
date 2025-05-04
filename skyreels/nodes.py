@@ -430,6 +430,7 @@ class WanVideoDiffusionForcingSampler:
 
                 nonlocal patcher
                 current_step_percentage = idx / len(timesteps)
+                print(f"current_step_percentage[{idx}]: {current_step_percentage}")
                 control_lora_enabled = False
                 
                 image_cond_input = image_cond
@@ -537,7 +538,7 @@ class WanVideoDiffusionForcingSampler:
                     timestep[:, valid_interval_start:prefix_video_latent_length] = timestep_for_noised_condition
 
 
-                print("timestep", timestep)
+                print(f"timestep[{i}]", timestep)
                 noise_pred, self.teacache_state = predict_with_cfg(
                     latent_model_input.to(dtype), 
                     cfg[i], 
