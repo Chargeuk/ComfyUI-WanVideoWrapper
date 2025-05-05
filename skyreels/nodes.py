@@ -651,11 +651,12 @@ class WanVideoLoopingDiffusionForcingSampler:
         # batch_length = int((batch_length - 1) / 4) + 1
         # overlap_length = int(overlap_length / 4)
 
-        sample_overlap_length = 0
+        prefix_sample_num_latents = 0
+        prefix_sample_num_frames = 0
 
         if (prefix_samples):
-            sample_num_frames = prefix_samples["samples"].shape[1]
-            sample_overlap_length = (sample_num_frames - 1) // vae_stride[0] + 1
+            prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
+            prefix_sample_num_frames = prefix_sample_num_latents * 4
 
         sample_shape = None
         if (samples):
@@ -672,7 +673,7 @@ class WanVideoLoopingDiffusionForcingSampler:
         latent_frames = image_embeds["target_shape"][1]
         total_frames = image_embeds["num_frames"]
 
-        print(f"latent_frames: {latent_frames}, total_frames: {total_frames}, batch_length: {batch_length}, overlap_length: {overlap_length}, sample_num_frames: {sample_num_frames}, sample_overlap_length: {sample_overlap_length}, sample_shape: {sample_shape}, prefix_sample_shape: {prefix_sample_shape}")
+        print(f"latent_frames: {latent_frames}, total_frames: {total_frames}, batch_length: {batch_length}, overlap_length: {overlap_length}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_sample_num_frames: {prefix_sample_num_frames}, sample_shape: {sample_shape}, prefix_sample_shape: {prefix_sample_shape}")
 
         # Initialize the final samples list
         final_samples = None
@@ -684,26 +685,29 @@ class WanVideoLoopingDiffusionForcingSampler:
             # Determine the end index for the current batch
             end_idx = min(start_idx + batch_length, total_frames)
             number_of_frames_for_batch = end_idx - start_idx
+            number_of_latents_for_batch = (number_of_frames_for_batch - 1) // vae_stride[0] + 1
+
             remaining_frames -= number_of_frames_for_batch
-            batch_overlap_length = (sample_overlap_length * 4)
 
             start_latent_index = int(start_idx / 4)
             end_latent_index = int(end_idx / 4)
 
             # adjust the number_of_frames_for_batch to take into account the overlap
-            # number_of_frames_for_batch += batch_overlap_length
+            number_of_frames_for_batch_embeds = number_of_frames_for_batch + prefix_sample_num_frames
+            number_of_latents_for_batch_embeds = (number_of_frames_for_batch_embeds - 1) // vae_stride[0] + 1
 
-            print(f"Processing batch {loop_count}: frames {start_idx} to {end_idx}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}, number_of_frames_for_batch {number_of_frames_for_batch}, overlap_length: {batch_overlap_length}, remaining_frames: {remaining_frames}")
+            print(f"Processing batch {loop_count} = frames {start_idx} to {end_idx} remaining_frames: {remaining_frames}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}")
+            print(f"Processing batch {loop_count} = number_of_frames_for_batch {number_of_frames_for_batch}, number_of_latents_for_batch: {number_of_latents_for_batch}, number_of_frames_for_batch_embeds: {number_of_frames_for_batch_embeds}, number_of_latents_for_batch_embeds: {number_of_latents_for_batch_embeds}, prefix_sample_num_latents: {prefix_sample_num_latents}, overlap_length: {overlap_length}")
 
             # Generate batch_image_embeds by slicing the target_shape and control_embeds
             target_shape = (16, 
-                            (number_of_frames_for_batch - 1) // vae_stride[0] + 1,
+                            number_of_latents_for_batch_embeds,
                             image_embeds["target_shape"][2],
                             image_embeds["target_shape"][3],)
 
             batch_image_embeds = {
                 "target_shape": target_shape,
-                "num_frames": number_of_frames_for_batch,
+                "num_frames": number_of_frames_for_batch_embeds,
                 "control_embeds": (
                     image_embeds["control_embeds"][:, start_latent_index:end_latent_index]
                     if image_embeds["control_embeds"] is not None
@@ -738,7 +742,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 scheduler=scheduler,
                 force_offload=force_offload,
                 samples=batch_samples,
-                # prefix_samples=prefix_samples,
+                prefix_samples=prefix_samples,
                 denoise_strength=denoise_strength,
                 slg_args=slg_args,
                 rope_function=rope_function,
@@ -752,17 +756,23 @@ class WanVideoLoopingDiffusionForcingSampler:
 
             # Merge the current batch samples into the final samples
             if final_samples is None:
-                final_samples = batch_result_samples
+                # Initialize final_samples with the first batch
+                final_samples = {
+                    "samples": batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
+                }
             else:
                 # Exclude the overlap region from the previous batch
-                non_overlapping_samples = batch_result_samples["samples"][:, :, sample_overlap_length:]
+                non_overlapping_samples = batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
                 final_samples = torch.cat((final_samples["samples"], non_overlapping_samples), dim=2)
 
-            sample_overlap_length = math.ceil(overlap_length / 4)
-            if (sample_overlap_length > 0):
+            prefix_sample_num_frames = overlap_length
+            prefix_sample_num_latents = (prefix_sample_num_frames - 1) // vae_stride[0] + 1
+            if (prefix_sample_num_latents > 0):
                 # Set the prefix_samples for the next iteration to the last overlap_length samples
-                prefix_samples = {"samples": batch_result_samples["samples"][:, -sample_overlap_length:]}
-            print(f"sample_overlap_length: {sample_overlap_length}")
+                prefix_samples = {"samples": batch_result_samples["samples"][:,  :,  -prefix_sample_num_latents:]}
+            else:
+                prefix_samples = None
+            print(f"calculated next loop = prefix_sample_num_frames: {prefix_sample_num_frames}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_samples: {prefix_samples}")
 
             # Increment the loop count
             loop_count += 1
