@@ -637,35 +637,137 @@ class WanVideoLoopingDiffusionForcingSampler:
     FUNCTION = "process"
     CATEGORY = "VTS"
 
+    # WanVideoLoopingDiffusionForcingSampler. total_samples: 16, total_prefix_samples: 16, total_frames: 26
+    # Processing batch 0: frames 0 to 26 (total 26)
+    # number of Bach image embeds: 3
+    # Batch samples shape: torch.Size([1, 16, 25, 58, 104])
+    # Prefix video of length: 2
+
     def process(self, vae, batch_length, overlap_length, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
-        force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
-        experimental_args=None, unianimate_poses=None):
+                force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
+                experimental_args=None, unianimate_poses=None):
+        vae_stride = (4, 8, 8)
+        # Adjust batch_length and overlap_length for latent frames
+        # batch_length = int((batch_length - 1) / 4) + 1
+        # overlap_length = int(overlap_length / 4)
+
+        sample_overlap_length = 0
+
+        if (prefix_samples):
+            sample_num_frames = prefix_samples["samples"].shape[1]
+            sample_overlap_length = (sample_num_frames - 1) // vae_stride[0] + 1
+
+        sample_shape = None
+        if (samples):
+            sample_shape = samples["samples"].shape
+
+        prefix_sample_shape = None
+        if (prefix_samples):
+            prefix_sample_shape = prefix_samples["samples"].shape
+
         # Create an instance of WanVideoDiffusionForcingSampler
         sampler = WanVideoDiffusionForcingSampler()
 
-        # Call the process method of WanVideoDiffusionForcingSampler and return the results
-        return sampler.process(
-            model=model,
-            text_embeds=text_embeds,
-            image_embeds=image_embeds,
-            shift=shift,
-            fps=fps,
-            steps=steps,
-            addnoise_condition=addnoise_condition,
-            cfg=cfg,
-            seed=seed,
-            scheduler=scheduler,
-            force_offload=force_offload,
-            samples=samples,
-            prefix_samples=prefix_samples,
-            denoise_strength=denoise_strength,
-            slg_args=slg_args,
-            rope_function=rope_function,
-            teacache_args=teacache_args,
-            experimental_args=experimental_args,
-            unianimate_poses=unianimate_poses
-        )
+        # Get the total number of frames to generate
+        latent_frames = image_embeds["target_shape"][1]
+        total_frames = image_embeds["num_frames"]
 
+        print(f"latent_frames: {latent_frames}, total_frames: {total_frames}, batch_length: {batch_length}, overlap_length: {overlap_length}, sample_num_frames: {sample_num_frames}, sample_overlap_length: {sample_overlap_length}, sample_shape: {sample_shape}, prefix_sample_shape: {prefix_sample_shape}")
+
+        # Initialize the final samples list
+        final_samples = None
+
+        loop_count = 0
+        remaining_frames = total_frames
+        # Loop through batches
+        for start_idx in range(0, total_frames, batch_length):
+            # Determine the end index for the current batch
+            end_idx = min(start_idx + batch_length, total_frames)
+            number_of_frames_for_batch = end_idx - start_idx
+            remaining_frames -= number_of_frames_for_batch
+            batch_overlap_length = (sample_overlap_length * 4)
+
+            start_latent_index = int(start_idx / 4)
+            end_latent_index = int(end_idx / 4)
+
+            # adjust the number_of_frames_for_batch to take into account the overlap
+            # number_of_frames_for_batch += batch_overlap_length
+
+            print(f"Processing batch {loop_count}: frames {start_idx} to {end_idx}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}, number_of_frames_for_batch {number_of_frames_for_batch}, overlap_length: {batch_overlap_length}, remaining_frames: {remaining_frames}")
+
+            # Generate batch_image_embeds by slicing the target_shape and control_embeds
+            target_shape = (16, 
+                            (number_of_frames_for_batch - 1) // vae_stride[0] + 1,
+                            image_embeds["target_shape"][2],
+                            image_embeds["target_shape"][3],)
+
+            batch_image_embeds = {
+                "target_shape": target_shape,
+                "num_frames": number_of_frames_for_batch,
+                "control_embeds": (
+                    image_embeds["control_embeds"][:, start_latent_index:end_latent_index]
+                    if image_embeds["control_embeds"] is not None
+                    else None
+                ),
+            }
+            batch_latent_frames = batch_image_embeds["target_shape"][1]
+            batch_num_frames = batch_image_embeds["num_frames"]
+            print(f"batch_latent_frames: {batch_latent_frames}, batch_num_frames: {batch_num_frames}")
+
+            # Slice the samples for the current batch if available
+            batch_samples = None
+            if samples is not None:
+                batch_samples = {
+                    "samples": samples["samples"][:, :, start_latent_index:end_latent_index]
+                }
+                # If the sliced samples are empty, set to None
+                if batch_samples["samples"].shape[2] == 0:
+                    batch_samples = None
+
+            # Call the process method of WanVideoDiffusionForcingSampler
+            batch_result = sampler.process(
+                model=model,
+                text_embeds=text_embeds,
+                image_embeds=batch_image_embeds,
+                shift=shift,
+                fps=fps,
+                steps=steps,
+                addnoise_condition=addnoise_condition,
+                cfg=cfg,
+                seed=seed,
+                scheduler=scheduler,
+                force_offload=force_offload,
+                samples=batch_samples,
+                # prefix_samples=prefix_samples,
+                denoise_strength=denoise_strength,
+                slg_args=slg_args,
+                rope_function=rope_function,
+                teacache_args=teacache_args,
+                experimental_args=experimental_args,
+                unianimate_poses=unianimate_poses
+            )
+
+            batch_result_samples = batch_result[0]
+
+
+            # Merge the current batch samples into the final samples
+            if final_samples is None:
+                final_samples = batch_result_samples
+            else:
+                # Exclude the overlap region from the previous batch
+                non_overlapping_samples = batch_result_samples["samples"][:, :, sample_overlap_length:]
+                final_samples = torch.cat((final_samples["samples"], non_overlapping_samples), dim=2)
+
+            sample_overlap_length = math.ceil(overlap_length / 4)
+            if (sample_overlap_length > 0):
+                # Set the prefix_samples for the next iteration to the last overlap_length samples
+                prefix_samples = {"samples": batch_result_samples["samples"][:, -sample_overlap_length:]}
+            print(f"sample_overlap_length: {sample_overlap_length}")
+
+            # Increment the loop count
+            loop_count += 1
+
+        return ({"samples": final_samples}),
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoDiffusionForcingSampler": WanVideoDiffusionForcingSampler,
