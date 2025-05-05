@@ -595,10 +595,83 @@ class WanVideoDiffusionForcingSampler:
         return ({
             "samples": x0.cpu(),
             }, )
+    
+
+class WanVideoLoopingDiffusionForcingSampler:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "vae": ("WANVAE",),
+                "batch_length": ("INT", {"default": 65, "min": 1, "step": 4, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
+                "overlap_length": ("INT", {"default": 6, "min": 1, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
+                "model": ("WANVIDEOMODEL",),
+                "text_embeds": ("WANVIDEOTEXTEMBEDS", ),
+                "image_embeds": ("WANVIDIMAGE_EMBEDS", ),
+                "addnoise_condition": ("INT", {"default": 10, "min": 0, "max": 1000, "tooltip": "Improves consistency in long video generation"}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.01}),
+                "steps": ("INT", {"default": 30, "min": 1}),
+                "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
+                "shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Moves the model to the offload device after sampling"}),
+                "scheduler": (["unipc", "unipc/beta", "euler", "euler/beta", "lcm", "lcm/beta"],
+                    {
+                        "default": 'unipc'
+                    }),
+            },
+            "optional": {
+                "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
+                "prefix_samples": ("LATENT", {"tooltip": "prefix latents"} ),
+                "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "teacache_args": ("TEACACHEARGS", ),
+                "slg_args": ("SLGARGS", ),
+                "rope_function": (["default", "comfy"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile"}),
+                "experimental_args": ("EXPERIMENTALARGS", ),
+                "unianimate_poses": ("UNIANIMATE_POSE", ),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", )
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "process"
+    CATEGORY = "VTS"
+
+    def process(self, vae, batch_length, overlap_length, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
+        force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
+        experimental_args=None, unianimate_poses=None):
+        # Create an instance of WanVideoDiffusionForcingSampler
+        sampler = WanVideoDiffusionForcingSampler()
+
+        # Call the process method of WanVideoDiffusionForcingSampler and return the results
+        return sampler.process(
+            model=model,
+            text_embeds=text_embeds,
+            image_embeds=image_embeds,
+            shift=shift,
+            fps=fps,
+            steps=steps,
+            addnoise_condition=addnoise_condition,
+            cfg=cfg,
+            seed=seed,
+            scheduler=scheduler,
+            force_offload=force_offload,
+            samples=samples,
+            prefix_samples=prefix_samples,
+            denoise_strength=denoise_strength,
+            slg_args=slg_args,
+            rope_function=rope_function,
+            teacache_args=teacache_args,
+            experimental_args=experimental_args,
+            unianimate_poses=unianimate_poses
+        )
+
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoDiffusionForcingSampler": WanVideoDiffusionForcingSampler,
+    "WanVideoLoopingDiffusionForcingSampler": WanVideoLoopingDiffusionForcingSampler,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoDiffusionForcingSampler": "WanVideo Diffusion Forcing Sampler",
+    "WanVideoLoopingDiffusionForcingSampler": "WanVideo Looping Diffusion Forcing Sampler",
     }
