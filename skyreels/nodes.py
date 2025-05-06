@@ -605,7 +605,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "vae": ("WANVAE",),
                 "batch_length": ("INT", {"default": 65, "min": 1, "step": 4, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
                 "overlap_length": ("INT", {"default": 6, "min": 1, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
-                "seed_adjust": ("INT", {"default": 0, "tooltip": "Adjust the seed for each batch"}),
+                "seed_adjust": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "tooltip": "Adjust the seed for each batch"}),
                 "model": ("WANVIDEOMODEL",),
                 "text_embeds": ("WANVIDEOTEXTEMBEDS", ),
                 "image_embeds": ("WANVIDIMAGE_EMBEDS", ),
@@ -671,8 +671,18 @@ class WanVideoLoopingDiffusionForcingSampler:
         latent_frames = image_embeds["target_shape"][1]
         total_frames = image_embeds["num_frames"]
 
-        print(f"latent_frames: {latent_frames}, total_frames: {total_frames}, batch_length: {batch_length}, overlap_length: {overlap_length}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_sample_num_frames: {prefix_sample_num_frames}, sample_shape: {sample_shape}, prefix_sample_shape: {prefix_sample_shape}")
+        initial_batch_length = batch_length
+        batch_length_no_addition = batch_length - 1
+        number_of_batches = math.ceil((total_frames - 1) / batch_length_no_addition) # ensure round up
+        batch_length = math.ceil((total_frames - 1) / number_of_batches) # ensure round up
 
+        # batch length needs to be a number divisible by 4, then we add 1
+        batch_length_div_4 = math.ceil(batch_length / 4)
+        batch_length = int(batch_length_div_4 * 4 + 1)
+
+        print(f"latent_frames: {latent_frames}, total_frames: {total_frames}, number_of_batches: {number_of_batches}, initial_batch_length: {initial_batch_length}, batch_length: {batch_length}, overlap_length: {overlap_length}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_sample_num_frames: {prefix_sample_num_frames}, sample_shape: {sample_shape}, prefix_sample_shape: {prefix_sample_shape}")
+
+        
         # Initialize the final samples list
         final_samples = None
 
