@@ -605,6 +605,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "vae": ("WANVAE",),
                 "batch_length": ("INT", {"default": 65, "min": 1, "step": 4, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
                 "overlap_length": ("INT", {"default": 6, "min": 1, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
+                "seed_adjust": ("INT", {"default": 0, "tooltip": "Adjust the seed for each batch"}),
                 "model": ("WANVIDEOMODEL",),
                 "text_embeds": ("WANVIDEOTEXTEMBEDS", ),
                 "image_embeds": ("WANVIDIMAGE_EMBEDS", ),
@@ -643,13 +644,10 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Batch samples shape: torch.Size([1, 16, 25, 58, 104])
     # Prefix video of length: 2
 
-    def process(self, vae, batch_length, overlap_length, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
+    def process(self, vae, batch_length, overlap_length, seed_adjust, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
                 experimental_args=None, unianimate_poses=None):
         vae_stride = (4, 8, 8)
-        # Adjust batch_length and overlap_length for latent frames
-        # batch_length = int((batch_length - 1) / 4) + 1
-        # overlap_length = int(overlap_length / 4)
 
         prefix_sample_num_latents = 0
         prefix_sample_num_frames = 0
@@ -750,6 +748,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 experimental_args=experimental_args,
                 unianimate_poses=unianimate_poses
             )
+
+            seed = (seed + seed_adjust) % 0xffffffffffffffff
 
             batch_result_samples = batch_result[0]
             non_overlapping_samples = batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
