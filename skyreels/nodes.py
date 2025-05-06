@@ -1,9 +1,11 @@
 import os
+import random
 import torch
 import gc
 from ..utils import log, print_memory, fourier_filter
 import math
 from tqdm import tqdm
+import numpy as np
 
 from ..wanvideo.modules.model import rope_params
 from ..wanvideo.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
@@ -606,6 +608,12 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "batch_length": ("INT", {"default": 65, "min": 1, "step": 4, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
                 "overlap_length": ("INT", {"default": 6, "min": 1, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
                 "seed_adjust": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "tooltip": "Adjust the seed for each batch"}),
+                "seed_batch_control": (["Seed Adjust", "Randomize"],
+                    {"default": "Seed Adjust"}
+                ),
+                "samples_control": (["No Repeat", "Repeat"],
+                    {"default": "No Repeat"}
+                ),
                 "model": ("WANVIDEOMODEL",),
                 "text_embeds": ("WANVIDEOTEXTEMBEDS", ),
                 "image_embeds": ("WANVIDIMAGE_EMBEDS", ),
@@ -644,7 +652,7 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Batch samples shape: torch.Size([1, 16, 25, 58, 104])
     # Prefix video of length: 2
 
-    def process(self, vae, batch_length, overlap_length, seed_adjust, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
+    def process(self, vae, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
                 experimental_args=None, unianimate_poses=None):
         vae_stride = (4, 8, 8)
@@ -657,8 +665,10 @@ class WanVideoLoopingDiffusionForcingSampler:
             prefix_sample_num_frames = prefix_sample_num_latents * 4
 
         sample_shape = None
+        number_of_sample_latents = 0
         if (samples):
             sample_shape = samples["samples"].shape
+            number_of_sample_latents = sample_shape[2]
 
         prefix_sample_shape = None
         if (prefix_samples):
@@ -724,18 +734,51 @@ class WanVideoLoopingDiffusionForcingSampler:
             }
             batch_latent_frames = batch_image_embeds["target_shape"][1]
             batch_num_frames = batch_image_embeds["num_frames"]
-            print(f"batch_latent_frames: {batch_latent_frames}, batch_num_frames: {batch_num_frames}")
+            print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = batch_latent_frames: {batch_latent_frames}, batch_num_frames: {batch_num_frames}")
 
+            # Slice the samples for the current batch if available
             # Slice the samples for the current batch if available
             batch_samples = None
             if samples is not None:
-                batch_samples = {
-                    "samples": samples["samples"][:, :, start_latent_index:end_latent_index]
-                }
-                # If the sliced samples are empty, set to None
+                start_sample_latent_index = start_latent_index % number_of_sample_latents
+                end_sample_latent_index = start_sample_latent_index + number_of_latents_for_batch
+                if samples_control == "Repeat":
+                    # Adjust indices to include overlap
+                    start_sample_latent_index = max(0, start_latent_index - overlap_length)
+                    end_sample_latent_index = min(sample_shape[2], end_latent_index + overlap_length)
+
+                # Slice the samples
+                sliced_samples = samples["samples"][:, :, start_sample_latent_index:end_sample_latent_index]
+
+                # Check if the sliced samples are fewer than needed
+                if samples_control == "Repeat" and sliced_samples.shape[2] < batch_latent_frames:
+                    # Calculate how many additional latents are needed
+                    additional_latents_needed = batch_latent_frames - sliced_samples.shape[2]
+
+                    # Loop back to the beginning of the samples to fill the gap
+                    while additional_latents_needed > 0:
+                        looped_samples = samples["samples"][:, :, :min(additional_latents_needed, sample_shape[2])]
+                        looped_samples = looped_samples.to(sliced_samples.device)  # Ensure device consistency
+                        sliced_samples = torch.cat((sliced_samples, looped_samples), dim=2)
+                        additional_latents_needed -= looped_samples.shape[2]
+
+                    # Trim to ensure the final size matches batch_latent_frames
+                    sliced_samples = sliced_samples[:, :, :batch_latent_frames]
+
+                # Assign the repeated or sliced samples to batch_samples
+                batch_samples = {"samples": sliced_samples}
+
+                # If the sliced samples are still empty, set to None
                 if batch_samples["samples"].shape[2] == 0:
                     batch_samples = None
+                    batch_samples_shape = None
+                else:
+                    batch_samples_shape = batch_samples["samples"].shape
+                print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = start_sample_latent_index: {start_sample_latent_index}, end_sample_latent_index: {end_sample_latent_index}, batch_samples_shape: {batch_samples_shape}, number_of_sample_latents: {number_of_sample_latents}")
 
+
+            # only use force_offload if we are on the lat loop iteration, otherwise set it to false
+            batch_force_offload = force_offload if loop_count == number_of_batches - 1 else False
             # Call the process method of WanVideoDiffusionForcingSampler
             batch_result = sampler.process(
                 model=model,
@@ -748,7 +791,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 cfg=cfg,
                 seed=seed,
                 scheduler=scheduler,
-                force_offload=force_offload,
+                force_offload=batch_force_offload,
                 samples=batch_samples,
                 prefix_samples=prefix_samples,
                 denoise_strength=denoise_strength,
@@ -759,7 +802,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                 unianimate_poses=unianimate_poses
             )
 
-            seed = (seed + seed_adjust) % 0xffffffffffffffff
+            if seed_batch_control == "Randomize":
+                # Randomize the seed for each batch
+                seed = random.randint(0, 0xffffffffffffffff)
+            else:
+                seed = (seed + seed_adjust) % 0xffffffffffffffff
 
             batch_result_samples = batch_result[0]
             non_overlapping_samples = batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
