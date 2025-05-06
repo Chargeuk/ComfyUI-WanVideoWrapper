@@ -430,7 +430,7 @@ class WanVideoDiffusionForcingSampler:
 
                 nonlocal patcher
                 current_step_percentage = idx / len(timesteps)
-                print(f"current_step_percentage[{idx}]: {current_step_percentage}")
+                # print(f"current_step_percentage[{idx}]: {current_step_percentage}")
                 control_lora_enabled = False
                 
                 image_cond_input = image_cond
@@ -538,7 +538,7 @@ class WanVideoDiffusionForcingSampler:
                     timestep[:, valid_interval_start:prefix_video_latent_length] = timestep_for_noised_condition
 
 
-                print(f"timestep[{i}]", timestep)
+                # print(f"timestep[{i}]", timestep)
                 noise_pred, self.teacache_state = predict_with_cfg(
                     latent_model_input.to(dtype), 
                     cfg[i], 
@@ -547,7 +547,7 @@ class WanVideoDiffusionForcingSampler:
                     timestep, i, image_cond, clip_fea, unianim_data=unianim_data, vace_data=vace_data,
                     teacache_state=self.teacache_state)
                 
-                print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
+                # print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
                 for idx in range(valid_interval_start, valid_interval_end):
                     if update_mask_i[idx].item():
                         latents[:, idx] = sample_schedulers[idx].step(
@@ -704,8 +704,8 @@ class WanVideoLoopingDiffusionForcingSampler:
             number_of_frames_for_batch_embeds = number_of_frames_for_batch + prefix_sample_num_frames
             number_of_latents_for_batch_embeds = (number_of_frames_for_batch_embeds - 1) // vae_stride[0] + 1
 
-            print(f"Processing batch {loop_count} = frames {start_idx} to {end_idx} remaining_frames: {remaining_frames}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}")
-            print(f"Processing batch {loop_count} = number_of_frames_for_batch {number_of_frames_for_batch}, number_of_latents_for_batch: {number_of_latents_for_batch}, number_of_frames_for_batch_embeds: {number_of_frames_for_batch_embeds}, number_of_latents_for_batch_embeds: {number_of_latents_for_batch_embeds}, prefix_sample_num_latents: {prefix_sample_num_latents}, overlap_length: {overlap_length}")
+            print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = frames {start_idx} to {end_idx} remaining_frames: {remaining_frames}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}")
+            print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = number_of_frames_for_batch {number_of_frames_for_batch}, number_of_latents_for_batch: {number_of_latents_for_batch}, number_of_frames_for_batch_embeds: {number_of_frames_for_batch_embeds}, number_of_latents_for_batch_embeds: {number_of_latents_for_batch_embeds}, prefix_sample_num_latents: {prefix_sample_num_latents}, overlap_length: {overlap_length}")
 
             # Generate batch_image_embeds by slicing the target_shape and control_embeds
             target_shape = (16, 
@@ -791,7 +791,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 prefix_samples = {"samples": batch_result_samples["samples"][:,  :,  -prefix_sample_num_latents:]}
             else:
                 prefix_samples = None
-            print(f"calculated next loop = prefix_sample_num_frames: {prefix_sample_num_frames}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_samples: {prefix_samples}")
+            print(f"calculated next loop = prefix_sample_num_frames: {prefix_sample_num_frames}, prefix_sample_num_latents: {prefix_sample_num_latents}")
 
             # Increment the loop count
             loop_count += 1
