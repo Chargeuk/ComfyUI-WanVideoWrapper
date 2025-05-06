@@ -752,19 +752,28 @@ class WanVideoLoopingDiffusionForcingSampler:
             )
 
             batch_result_samples = batch_result[0]
-
+            non_overlapping_samples = batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
+            print(f"!non_overlapping_samples shape: {non_overlapping_samples.shape}")
 
             # Merge the current batch samples into the final samples
             if final_samples is None:
                 # Initialize final_samples with the first batch
                 final_samples = {
-                    "samples": batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
+                    "samples": non_overlapping_samples
                 }
             else:
                 # Exclude the overlap region from the previous batch
-                non_overlapping_samples = batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
-                final_samples = torch.cat((final_samples["samples"], non_overlapping_samples), dim=2)
-
+                try:
+                    print(f"!final_samples['samples'] shape before merge: {final_samples['samples'].shape}")
+                    merged_samples = torch.cat((final_samples["samples"], non_overlapping_samples), dim=2)
+                    final_samples = {
+                        "samples": merged_samples
+                    }
+                    print(f"!final_samples['samples'] shape after merge: {final_samples['samples'].shape}")
+                except Exception as e:
+                    print(f"!Error concatenating final_samples: {e}")
+                    # print(f"!final_samples['samples'] shape: {final_samples['samples'].shape}, non_overlapping_samples shape: {non_overlapping_samples.shape}")
+                    
             prefix_sample_num_frames = overlap_length
             prefix_sample_num_latents = (prefix_sample_num_frames - 1) // vae_stride[0] + 1
             if (prefix_sample_num_latents > 0):
@@ -777,7 +786,10 @@ class WanVideoLoopingDiffusionForcingSampler:
             # Increment the loop count
             loop_count += 1
 
-        return ({"samples": final_samples}),
+        # return ({"samples": final_samples}),
+        return ({
+            "samples": final_samples['samples'],
+            }, )
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoDiffusionForcingSampler": WanVideoDiffusionForcingSampler,
