@@ -68,7 +68,7 @@ def generate_timestep_matrix(
                 else:
                     new_row[i] = new_row[i - 1] - ar_step
             new_row = new_row.clamp(0, num_iterations)
-            print(f"generate_timestep_matrix new_row[{row_count}]: {new_row}")
+            # print(f"generate_timestep_matrix new_row[{row_count}]: {new_row}")
             update_mask.append(
                 (new_row != pre_row) & (new_row != num_iterations)
             )  # False: no need to update， True: need to update
@@ -791,7 +791,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 prefix_samples = {"samples": batch_result_samples["samples"][:,  :,  -prefix_sample_num_latents:]}
             else:
                 prefix_samples = None
-            print(f"calculated next loop = prefix_sample_num_frames: {prefix_sample_num_frames}, prefix_sample_num_latents: {prefix_sample_num_latents}")
+            print(f"Processed batch [{loop_count + 1}/{number_of_batches}]. calculated next loop = prefix_sample_num_frames: {prefix_sample_num_frames}, prefix_sample_num_latents: {prefix_sample_num_latents}")
 
             # Increment the loop count
             loop_count += 1
