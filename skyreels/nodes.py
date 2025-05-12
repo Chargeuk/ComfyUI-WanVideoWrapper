@@ -604,7 +604,6 @@ class WanVideoLoopingDiffusionForcingSampler:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "vae": ("WANVAE",),
                 "batch_length": ("INT", {"default": 65, "min": 1, "step": 4, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
                 "overlap_length": ("INT", {"default": 6, "min": 1, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
                 "seed_adjust": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "tooltip": "Adjust the seed for each batch"}),
@@ -630,6 +629,10 @@ class WanVideoLoopingDiffusionForcingSampler:
                     }),
             },
             "optional": {
+                "vae": ("WANVAE",),
+                "prefix_samples_control": (["Ignore", "Merge"],
+                    {"default": "Ignore"}
+                ),
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "prefix_samples": ("LATENT", {"tooltip": "prefix latents"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
@@ -641,8 +644,13 @@ class WanVideoLoopingDiffusionForcingSampler:
             }
         }
 
-    RETURN_TYPES = ("LATENT", )
-    RETURN_NAMES = ("samples",)
+    RETURN_TYPES = ("LATENT", "LATENT", "LATENT")
+    RETURN_NAMES = ("samples", "prefix_samples", "generated_samples")
+    OUTPUT_IS_LIST = (
+        False,
+        False,
+        False
+    )
     FUNCTION = "process"
     CATEGORY = "VTS"
 
@@ -652,17 +660,41 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Batch samples shape: torch.Size([1, 16, 25, 58, 104])
     # Prefix video of length: 2
 
-    def process(self, vae, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
-                force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
+    def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
+                force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
                 experimental_args=None, unianimate_poses=None):
         vae_stride = (4, 8, 8)
+        prefix_samples_output = None
+        generated_samples_output = None
 
         prefix_sample_num_latents = 0
         prefix_sample_num_frames = 0
+        prefix_sample_shape = None
+        overlap_number_of_latents = (overlap_length - 1) // vae_stride[0] + 1
+
+        # Initialize the final samples list
+        final_samples = None
 
         if (prefix_samples):
             prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
             prefix_sample_num_frames = prefix_sample_num_latents * 4
+            if prefix_samples_control == "Merge":
+                prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
+                prefix_sample_num_frames = prefix_sample_num_latents * 4
+                print(f"Prefix samples provided, merging with samples")
+                non_overlapping_samples = prefix_samples["samples"][:, :, -prefix_sample_num_latents:]
+                final_samples = {
+                    "samples": non_overlapping_samples
+                }
+            
+            if prefix_sample_num_frames > overlap_length:
+                # we need to reduce the prefix_samples
+                prefix_samples = {"samples": prefix_samples["samples"][:,  :,  -overlap_number_of_latents:]}
+                prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
+                prefix_sample_num_frames = prefix_sample_num_latents * 4
+
+            prefix_sample_shape = prefix_samples["samples"].shape
+
 
         sample_shape = None
         number_of_sample_latents = 0
@@ -670,9 +702,6 @@ class WanVideoLoopingDiffusionForcingSampler:
             sample_shape = samples["samples"].shape
             number_of_sample_latents = sample_shape[2]
 
-        prefix_sample_shape = None
-        if (prefix_samples):
-            prefix_sample_shape = prefix_samples["samples"].shape
 
         # Create an instance of WanVideoDiffusionForcingSampler
         sampler = WanVideoDiffusionForcingSampler()
@@ -691,10 +720,6 @@ class WanVideoLoopingDiffusionForcingSampler:
         batch_length = int(batch_length_div_4 * 4 + 1)
 
         print(f"latent_frames: {latent_frames}, total_frames: {total_frames}, number_of_batches: {number_of_batches}, initial_batch_length: {initial_batch_length}, batch_length: {batch_length}, overlap_length: {overlap_length}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_sample_num_frames: {prefix_sample_num_frames}, sample_shape: {sample_shape}, prefix_sample_shape: {prefix_sample_shape}")
-
-        
-        # Initialize the final samples list
-        final_samples = None
 
         loop_count = 0
         remaining_frames = total_frames
@@ -740,12 +765,14 @@ class WanVideoLoopingDiffusionForcingSampler:
             # Slice the samples for the current batch if available
             batch_samples = None
             if samples is not None:
-                start_sample_latent_index = start_latent_index % number_of_sample_latents
+                start_sample_latent_index = start_latent_index
                 end_sample_latent_index = start_sample_latent_index + number_of_latents_for_batch
                 if samples_control == "Repeat":
+                    start_sample_latent_index = start_latent_index % number_of_sample_latents
+                    end_sample_latent_index = start_sample_latent_index + number_of_latents_for_batch
                     # Adjust indices to include overlap
-                    start_sample_latent_index = max(0, start_latent_index - overlap_length)
-                    end_sample_latent_index = min(sample_shape[2], end_latent_index + overlap_length)
+                    # start_sample_latent_index = max(0, start_latent_index - overlap_number_of_latents)
+                    # end_sample_latent_index = min(sample_shape[2], end_latent_index + overlap_number_of_latents)
 
                 # Slice the samples
                 sliced_samples = samples["samples"][:, :, start_sample_latent_index:end_sample_latent_index]
@@ -779,6 +806,24 @@ class WanVideoLoopingDiffusionForcingSampler:
 
             # only use force_offload if we are on the lat loop iteration, otherwise set it to false
             batch_force_offload = force_offload if loop_count == number_of_batches - 1 else False
+            if prefix_samples is not None and prefix_samples["samples"] is not None:
+                if prefix_samples_output is None:
+                    # Initialize final_samples with the first batch
+                    prefix_samples_output = {
+                        "samples": prefix_samples["samples"]
+                    }
+                else:
+                    # Exclude the overlap region from the previous batch
+                    try:
+                        print(f"!prefix_samples_output['samples'] shape before merge: {prefix_samples_output['samples'].shape}")
+                        merged_samples = torch.cat((prefix_samples_output["samples"], prefix_samples["samples"]), dim=2)
+                        prefix_samples_output = {
+                            "samples": merged_samples
+                        }
+                        print(f"!final_samples['samples'] shape after merge: {final_samples['samples'].shape}")
+                    except Exception as e:
+                        print(f"!Error concatenating final_samples: {e}")
+
             # Call the process method of WanVideoDiffusionForcingSampler
             batch_result = sampler.process(
                 model=model,
@@ -809,20 +854,40 @@ class WanVideoLoopingDiffusionForcingSampler:
                 seed = (seed + seed_adjust) % 0xffffffffffffffff
 
             batch_result_samples = batch_result[0]
-            non_overlapping_samples = batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
-            print(f"!non_overlapping_samples shape: {non_overlapping_samples.shape}")
+            non_overlapping_samples = {
+                    "samples": batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
+            }
+
+            print(f"!non_overlapping_samples shape: {non_overlapping_samples["samples"].shape}")
+
+            if generated_samples_output is None:
+                # Initialize final_samples with the first batch
+                generated_samples_output = {
+                    "samples": non_overlapping_samples["samples"]
+                }
+            else:
+                # Exclude the overlap region from the previous batch
+                try:
+                    print(f"!generated_samples_output['samples'] shape before merge: {generated_samples_output['samples'].shape}")
+                    merged_samples = torch.cat((generated_samples_output["samples"], non_overlapping_samples["samples"]), dim=2)
+                    generated_samples_output = {
+                        "samples": merged_samples
+                    }
+                    print(f"!final_samples['samples'] shape after merge: {final_samples['samples'].shape}")
+                except Exception as e:
+                    print(f"!Error concatenating final_samples: {e}")
 
             # Merge the current batch samples into the final samples
             if final_samples is None:
                 # Initialize final_samples with the first batch
                 final_samples = {
-                    "samples": non_overlapping_samples
+                    "samples": non_overlapping_samples["samples"]
                 }
             else:
                 # Exclude the overlap region from the previous batch
                 try:
                     print(f"!final_samples['samples'] shape before merge: {final_samples['samples'].shape}")
-                    merged_samples = torch.cat((final_samples["samples"], non_overlapping_samples), dim=2)
+                    merged_samples = torch.cat((final_samples["samples"], non_overlapping_samples["samples"]), dim=2)
                     final_samples = {
                         "samples": merged_samples
                     }
@@ -846,6 +911,10 @@ class WanVideoLoopingDiffusionForcingSampler:
         # return ({"samples": final_samples}),
         return ({
             "samples": final_samples['samples'],
+            }, {
+            "samples": prefix_samples_output['samples'] if prefix_samples_output else None,
+            },{
+            "samples": generated_samples_output['samples'] if generated_samples_output else None,
             }, )
 
 NODE_CLASS_MAPPINGS = {
