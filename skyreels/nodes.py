@@ -544,7 +544,7 @@ class WanVideoDiffusionForcingSampler:
                     raise
 
                 try:
-                    print(f"timestep[{i}]", timestep)
+                    # print(f"timestep[{i}]", timestep)
                     noise_pred, self.teacache_state = predict_with_cfg(
                         latent_model_input.to(dtype), 
                         cfg[i], 
@@ -557,7 +557,7 @@ class WanVideoDiffusionForcingSampler:
                     raise
 
                 try:
-                    print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
+                    # print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
                     for idx in range(valid_interval_start, valid_interval_end):
                         if update_mask_i[idx].item():
                             latents[:, idx] = sample_schedulers[idx].step(
