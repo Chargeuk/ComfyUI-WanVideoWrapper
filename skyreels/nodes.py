@@ -11,7 +11,7 @@ from ..wanvideo.modules.model import rope_params
 from ..wanvideo.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from ..wanvideo.utils.scheduling_flow_match_lcm import FlowMatchLCMScheduler
-from ..nodes import optimized_scale
+from ..nodes import WanVideoDecode, WanVideoEncode, optimized_scale
 from einops import rearrange
 
 from ..enhance_a_video.globals import disable_enhance
@@ -686,6 +686,12 @@ class WanVideoLoopingDiffusionForcingSampler:
         # Initialize the final samples list
         final_samples = None
 
+        wanVideoDecode = None
+        wanVideoEncode = None
+        if vae:
+            wanVideoDecode = WanVideoDecode()
+            wanVideoEncode = WanVideoEncode()
+
         if (prefix_samples):
             prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
             prefix_sample_num_frames = prefix_sample_num_latents * 4
@@ -818,9 +824,20 @@ class WanVideoLoopingDiffusionForcingSampler:
                 print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = start_sample_latent_index: {start_sample_latent_index}, end_sample_latent_index: {end_sample_latent_index}, batch_samples_shape: {batch_samples_shape}, number_of_sample_latents: {number_of_sample_latents}")
 
 
-            # only use force_offload if we are on the lat loop iteration, otherwise set it to false
+            # only use force_offload if we are on the last loop iteration, otherwise set it to false
             batch_force_offload = force_offload if loop_count == number_of_batches - 1 else False
             if prefix_samples is not None and prefix_samples["samples"] is not None:
+                if wanVideoDecode is not None and wanVideoEncode is not None and vae is not None:
+                    # decoding the prefix samples and the re-encoding them can improve quality
+                    print(f"Decoding prefix samples shape: {prefix_samples['samples'].shape}")
+                    # Decode the prefix samples
+                    decoded_samples = wanVideoDecode.decode(vae, prefix_samples, False, 272, 272, 144, 128)
+                    # Encode the decoded samples
+                    print(f"Re-encoding decoded prefix samples shape: {decoded_samples[0].shape}")
+                    encoded_samples = wanVideoEncode.encode(vae, decoded_samples[0], False, 272, 272, 144, 128)
+                    print(f"Assigning re-encoded prefix samples shape: {encoded_samples[0]['samples'].shape}")
+                    prefix_samples = {"samples": encoded_samples[0]["samples"]}
+
                 if prefix_samples_output is None:
                     # Initialize final_samples with the first batch
                     prefix_samples_output = {
