@@ -524,43 +524,54 @@ class WanVideoDiffusionForcingSampler:
         #region main loop start
         for i, timestep_i in enumerate(tqdm(step_matrix)):
             try:
-                update_mask_i = step_update_mask[i]
-                valid_interval_i = valid_interval[i]
-                valid_interval_start, valid_interval_end = valid_interval_i
-                timestep = timestep_i[None, valid_interval_start:valid_interval_end].clone()
-                latent_model_input = latents[:, valid_interval_start:valid_interval_end, :, :].clone()
-                if addnoise_condition > 0 and valid_interval_start < prefix_video_latent_length:
-                    noise_factor = 0.001 * addnoise_condition
-                    timestep_for_noised_condition = addnoise_condition
-                    latent_model_input[:, valid_interval_start:prefix_video_latent_length] = (
-                        latent_model_input[:, valid_interval_start:prefix_video_latent_length] * (1.0 - noise_factor)
-                        + torch.randn_like(latent_model_input[:, valid_interval_start:prefix_video_latent_length])
-                        * noise_factor
-                    )
-                    timestep[:, valid_interval_start:prefix_video_latent_length] = timestep_for_noised_condition
+                try:
+                    update_mask_i = step_update_mask[i]
+                    valid_interval_i = valid_interval[i]
+                    valid_interval_start, valid_interval_end = valid_interval_i
+                    timestep = timestep_i[None, valid_interval_start:valid_interval_end].clone()
+                    latent_model_input = latents[:, valid_interval_start:valid_interval_end, :, :].clone()
+                    if addnoise_condition > 0 and valid_interval_start < prefix_video_latent_length:
+                        noise_factor = 0.001 * addnoise_condition
+                        timestep_for_noised_condition = addnoise_condition
+                        latent_model_input[:, valid_interval_start:prefix_video_latent_length] = (
+                            latent_model_input[:, valid_interval_start:prefix_video_latent_length] * (1.0 - noise_factor)
+                            + torch.randn_like(latent_model_input[:, valid_interval_start:prefix_video_latent_length])
+                            * noise_factor
+                        )
+                        timestep[:, valid_interval_start:prefix_video_latent_length] = timestep_for_noised_condition
+                except Exception as e:
+                    log.error(f"Error during sampling[{i}] part 1: {e}")
+                    raise
 
+                try:
+                    print(f"timestep[{i}]", timestep)
+                    noise_pred, self.teacache_state = predict_with_cfg(
+                        latent_model_input.to(dtype), 
+                        cfg[i], 
+                        text_embeds["prompt_embeds"], 
+                        text_embeds["negative_prompt_embeds"], 
+                        timestep, i, image_cond, clip_fea, unianim_data=unianim_data, vace_data=vace_data,
+                        teacache_state=self.teacache_state)
+                except Exception as e:
+                    log.error(f"Error during sampling[{i}] part 2: {e}")
+                    raise
 
-                # print(f"timestep[{i}]", timestep)
-                noise_pred, self.teacache_state = predict_with_cfg(
-                    latent_model_input.to(dtype), 
-                    cfg[i], 
-                    text_embeds["prompt_embeds"], 
-                    text_embeds["negative_prompt_embeds"], 
-                    timestep, i, image_cond, clip_fea, unianim_data=unianim_data, vace_data=vace_data,
-                    teacache_state=self.teacache_state)
+                try:
+                    print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
+                    for idx in range(valid_interval_start, valid_interval_end):
+                        if update_mask_i[idx].item():
+                            latents[:, idx] = sample_schedulers[idx].step(
+                                noise_pred[:, idx - valid_interval_start],
+                                timestep_i[idx],
+                                latents[:, idx],
+                                return_dict=False,
+                                generator=seed_g,
+                            )[0]
+                            sample_schedulers_counter[idx] += 1
+                except Exception as e:
+                    log.error(f"Error during sampling[{i}] part 3: {e}")
+                    raise
                 
-                # print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
-                for idx in range(valid_interval_start, valid_interval_end):
-                    if update_mask_i[idx].item():
-                        latents[:, idx] = sample_schedulers[idx].step(
-                            noise_pred[:, idx - valid_interval_start],
-                            timestep_i[idx],
-                            latents[:, idx],
-                            return_dict=False,
-                            generator=seed_g,
-                        )[0]
-                        sample_schedulers_counter[idx] += 1
-
                 x0 = latents.unsqueeze(0)
                 if callback is not None:
                     callback_latent = (latent_model_input - noise_pred.to(timestep_i[idx].device) * timestep_i[idx] / 1000).detach().permute(1,0,2,3)
