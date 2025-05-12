@@ -711,13 +711,16 @@ class WanVideoLoopingDiffusionForcingSampler:
         total_frames = image_embeds["num_frames"]
 
         initial_batch_length = batch_length
-        batch_length_no_addition = batch_length - 1
-        number_of_batches = math.ceil((total_frames - 1) / batch_length_no_addition) # ensure round up
-        batch_length = math.ceil((total_frames - 1) / number_of_batches) # ensure round up
-
-        # batch length needs to be a number divisible by 4, then we add 1
-        batch_length_div_4 = math.ceil(batch_length / 4)
-        batch_length = int(batch_length_div_4 * 4 + 1)
+        if batch_length >= total_frames:
+            number_of_batches = 1
+            batch_length = total_frames
+        else:
+            batch_length_no_addition = batch_length - 1
+            number_of_batches = math.ceil((total_frames - 1) / batch_length_no_addition) # ensure round up
+            batch_length = math.ceil((total_frames - 1) / number_of_batches) # ensure round up
+            # batch length needs to be a number divisible by 4, then we add 1
+            batch_length_div_4 = math.ceil(batch_length / 4)
+            batch_length = int(batch_length_div_4 * 4 + 1)
 
         print(f"latent_frames: {latent_frames}, total_frames: {total_frames}, number_of_batches: {number_of_batches}, initial_batch_length: {initial_batch_length}, batch_length: {batch_length}, overlap_length: {overlap_length}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_sample_num_frames: {prefix_sample_num_frames}, sample_shape: {sample_shape}, prefix_sample_shape: {prefix_sample_shape}")
 
