@@ -571,7 +571,7 @@ class WanVideoDiffusionForcingSampler:
                 except Exception as e:
                     log.error(f"Error during sampling[{i}] part 3: {e}")
                     raise
-                
+
                 x0 = latents.unsqueeze(0)
                 if callback is not None:
                     callback_latent = (latent_model_input - noise_pred.to(timestep_i[idx].device) * timestep_i[idx] / 1000).detach().permute(1,0,2,3)
@@ -820,23 +820,6 @@ class WanVideoLoopingDiffusionForcingSampler:
 
             # only use force_offload if we are on the lat loop iteration, otherwise set it to false
             batch_force_offload = force_offload if loop_count == number_of_batches - 1 else False
-            if prefix_samples is not None and prefix_samples["samples"] is not None:
-                if prefix_samples_output is None:
-                    # Initialize final_samples with the first batch
-                    prefix_samples_output = {
-                        "samples": prefix_samples["samples"]
-                    }
-                else:
-                    # Exclude the overlap region from the previous batch
-                    try:
-                        print(f"!prefix_samples_output['samples'] shape before merge: {prefix_samples_output['samples'].shape}")
-                        merged_samples = torch.cat((prefix_samples_output["samples"], prefix_samples["samples"]), dim=2)
-                        prefix_samples_output = {
-                            "samples": merged_samples
-                        }
-                        print(f"!final_samples['samples'] shape after merge: {final_samples['samples'].shape}")
-                    except Exception as e:
-                        print(f"!Error concatenating final_samples: {e}")
 
             # Call the process method of WanVideoDiffusionForcingSampler
             batch_result = sampler.process(
@@ -860,6 +843,25 @@ class WanVideoLoopingDiffusionForcingSampler:
                 experimental_args=experimental_args,
                 unianimate_poses=unianimate_poses
             )
+
+            if prefix_samples is not None and prefix_samples["samples"] is not None:
+                if prefix_samples_output is None:
+                    # Initialize final_samples with the first batch
+                    prefix_samples_output = {
+                        "samples": prefix_samples["samples"]
+                    }
+                else:
+                    # Exclude the overlap region from the previous batch
+                    try:
+                        print(f"!prefix_samples_output['samples'] shape before merge: {prefix_samples_output['samples'].shape}")
+                        prefix_samples["samples"] = prefix_samples["samples"].to(prefix_samples_output["samples"].device)  # Ensure device consistency
+                        merged_samples = torch.cat((prefix_samples_output["samples"], prefix_samples["samples"]), dim=2)
+                        prefix_samples_output = {
+                            "samples": merged_samples
+                        }
+                        print(f"!prefix_samples_output['samples'] shape after merge: {prefix_samples_output['samples'].shape}")
+                    except Exception as e:
+                        print(f"!Error concatenating prefix_samples_output: {e}")
 
             if seed_batch_control == "Randomize":
                 # Randomize the seed for each batch
