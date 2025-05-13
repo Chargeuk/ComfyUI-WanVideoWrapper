@@ -11,7 +11,7 @@ from ..wanvideo.modules.model import rope_params
 from ..wanvideo.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from ..wanvideo.utils.scheduling_flow_match_lcm import FlowMatchLCMScheduler
-from ..nodes import optimized_scale
+from ..nodes import WanVideoDecode, WanVideoEncode, optimized_scale
 from einops import rearrange
 
 from ..enhance_a_video.globals import disable_enhance
@@ -544,7 +544,7 @@ class WanVideoDiffusionForcingSampler:
                     raise
 
                 try:
-                    print(f"timestep[{i}]", timestep)
+                    # print(f"timestep[{i}]", timestep)
                     noise_pred, self.teacache_state = predict_with_cfg(
                         latent_model_input.to(dtype), 
                         cfg[i], 
@@ -557,7 +557,7 @@ class WanVideoDiffusionForcingSampler:
                     raise
 
                 try:
-                    print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
+                    # print(f"timestep {i} valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
                     for idx in range(valid_interval_start, valid_interval_end):
                         if update_mask_i[idx].item():
                             latents[:, idx] = sample_schedulers[idx].step(
@@ -571,7 +571,7 @@ class WanVideoDiffusionForcingSampler:
                 except Exception as e:
                     log.error(f"Error during sampling[{i}] part 3: {e}")
                     raise
-
+                
                 x0 = latents.unsqueeze(0)
                 if callback is not None:
                     callback_latent = (latent_model_input - noise_pred.to(timestep_i[idx].device) * timestep_i[idx] / 1000).detach().permute(1,0,2,3)
@@ -685,6 +685,12 @@ class WanVideoLoopingDiffusionForcingSampler:
 
         # Initialize the final samples list
         final_samples = None
+
+        wanVideoDecode = None
+        wanVideoEncode = None
+        if vae:
+            wanVideoDecode = WanVideoDecode()
+            wanVideoEncode = WanVideoEncode()
 
         if (prefix_samples):
             prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
@@ -818,8 +824,36 @@ class WanVideoLoopingDiffusionForcingSampler:
                 print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = start_sample_latent_index: {start_sample_latent_index}, end_sample_latent_index: {end_sample_latent_index}, batch_samples_shape: {batch_samples_shape}, number_of_sample_latents: {number_of_sample_latents}")
 
 
-            # only use force_offload if we are on the lat loop iteration, otherwise set it to false
+            # only use force_offload if we are on the last loop iteration, otherwise set it to false
             batch_force_offload = force_offload if loop_count == number_of_batches - 1 else False
+            if prefix_samples is not None and prefix_samples["samples"] is not None:
+                if wanVideoDecode is not None and wanVideoEncode is not None and vae is not None:
+                    # decoding the prefix samples and the re-encoding them can improve quality
+                    print(f"Decoding prefix samples shape: {prefix_samples['samples'].shape}")
+                    # Decode the prefix samples
+                    decoded_samples = wanVideoDecode.decode(vae, prefix_samples, False, 272, 272, 144, 128)
+                    # Encode the decoded samples
+                    print(f"Re-encoding decoded prefix samples shape: {decoded_samples[0].shape}")
+                    encoded_samples = wanVideoEncode.encode(vae, decoded_samples[0], False, 272, 272, 144, 128)
+                    print(f"Assigning re-encoded prefix samples shape: {encoded_samples[0]['samples'].shape}")
+                    prefix_samples = {"samples": encoded_samples[0]["samples"]}
+
+                if prefix_samples_output is None:
+                    # Initialize final_samples with the first batch
+                    prefix_samples_output = {
+                        "samples": prefix_samples["samples"]
+                    }
+                else:
+                    # Exclude the overlap region from the previous batch
+                    try:
+                        print(f"!prefix_samples_output['samples'] shape before merge: {prefix_samples_output['samples'].shape}")
+                        merged_samples = torch.cat((prefix_samples_output["samples"], prefix_samples["samples"]), dim=2)
+                        prefix_samples_output = {
+                            "samples": merged_samples
+                        }
+                        print(f"!final_samples['samples'] shape after merge: {final_samples['samples'].shape}")
+                    except Exception as e:
+                        print(f"!Error concatenating final_samples: {e}")
 
             # Call the process method of WanVideoDiffusionForcingSampler
             batch_result = sampler.process(
@@ -843,25 +877,6 @@ class WanVideoLoopingDiffusionForcingSampler:
                 experimental_args=experimental_args,
                 unianimate_poses=unianimate_poses
             )
-
-            if prefix_samples is not None and prefix_samples["samples"] is not None:
-                if prefix_samples_output is None:
-                    # Initialize final_samples with the first batch
-                    prefix_samples_output = {
-                        "samples": prefix_samples["samples"]
-                    }
-                else:
-                    # Exclude the overlap region from the previous batch
-                    try:
-                        print(f"!prefix_samples_output['samples'] shape before merge: {prefix_samples_output['samples'].shape}")
-                        prefix_samples["samples"] = prefix_samples["samples"].to(prefix_samples_output["samples"].device)  # Ensure device consistency
-                        merged_samples = torch.cat((prefix_samples_output["samples"], prefix_samples["samples"]), dim=2)
-                        prefix_samples_output = {
-                            "samples": merged_samples
-                        }
-                        print(f"!prefix_samples_output['samples'] shape after merge: {prefix_samples_output['samples'].shape}")
-                    except Exception as e:
-                        print(f"!Error concatenating prefix_samples_output: {e}")
 
             if seed_batch_control == "Randomize":
                 # Randomize the seed for each batch
