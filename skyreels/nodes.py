@@ -146,7 +146,7 @@ class WanVideoDiffusionForcingSampler:
 
     def process(self, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
         force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
-        experimental_args=None, unianimate_poses=None):
+        experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0):
         #assert not (context_options and teacache_args), "Context options cannot currently be used together with teacache."
         patcher = model
         model = model.model
@@ -237,7 +237,9 @@ class WanVideoDiffusionForcingSampler:
             original_image = input_samples.to(device)
             if denoise_strength < 1.0:
                 latent_timestep = timesteps[:1].to(noise)
-                noise = noise * latent_timestep / 1000 + (1 - latent_timestep / 1000) * input_samples
+                # noise_reduction_factor = 0.95  # Adjust this value (e.g., 0.5 reduces noise by half)
+                noise = (noise * latent_timestep / 1000 * noise_reduction_factor) + \
+                        ((1 - latent_timestep / 1000) * input_samples)
 
             mask = samples.get("mask", None)
             if mask is not None:
@@ -616,7 +618,7 @@ class WanVideoLoopingDiffusionForcingSampler:
         return {
             "required": {
                 "batch_length": ("INT", {"default": 65, "min": 1, "step": 4, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
-                "overlap_length": ("INT", {"default": 6, "min": 1, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
+                "overlap_length": ("INT", {"default": 6, "min": 0, "max": 1000, "tooltip": "Number of frames to generate in each batch"}),
                 "seed_adjust": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "tooltip": "Adjust the seed for each batch"}),
                 "seed_batch_control": (["Seed Adjust", "Randomize"],
                     {"default": "Seed Adjust"}
@@ -652,12 +654,15 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "rope_function": (["default", "comfy"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile"}),
                 "experimental_args": ("EXPERIMENTALARGS", ),
                 "unianimate_poses": ("UNIANIMATE_POSE", ),
+                "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
             }
         }
 
-    RETURN_TYPES = ("LATENT", "LATENT", "LATENT")
-    RETURN_NAMES = ("samples", "prefix_samples", "generated_samples")
+    RETURN_TYPES = ("LATENT", "LATENT", "LATENT", "IMAGE")
+    RETURN_NAMES = ("samples", "prefix_samples", "generated_samples","images")
     OUTPUT_IS_LIST = (
+        False,
         False,
         False,
         False
@@ -673,10 +678,12 @@ class WanVideoLoopingDiffusionForcingSampler:
 
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
-                experimental_args=None, unianimate_poses=None):
+                experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0):
         vae_stride = (4, 8, 8)
         prefix_samples_output = None
         generated_samples_output = None
+        generated_images = None
+
 
         prefix_sample_num_latents = 0
         prefix_sample_num_frames = 0
@@ -691,6 +698,9 @@ class WanVideoLoopingDiffusionForcingSampler:
         if vae:
             wanVideoDecode = WanVideoDecode()
             wanVideoEncode = WanVideoEncode()
+
+        if overlap_length < 1:
+            prefix_samples = None
 
         if (prefix_samples):
             prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
@@ -718,10 +728,6 @@ class WanVideoLoopingDiffusionForcingSampler:
         if (samples):
             sample_shape = samples["samples"].shape
             number_of_sample_latents = sample_shape[2]
-
-
-        # Create an instance of WanVideoDiffusionForcingSampler
-        sampler = WanVideoDiffusionForcingSampler()
 
         # Get the total number of frames to generate
         latent_frames = image_embeds["target_shape"][1]
@@ -823,6 +829,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                     batch_samples_shape = batch_samples["samples"].shape
                 print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = start_sample_latent_index: {start_sample_latent_index}, end_sample_latent_index: {end_sample_latent_index}, batch_samples_shape: {batch_samples_shape}, number_of_sample_latents: {number_of_sample_latents}")
 
+            if overlap_length <= 0:
+                prefix_samples = None
 
             # only use force_offload if we are on the last loop iteration, otherwise set it to false
             batch_force_offload = force_offload if loop_count == number_of_batches - 1 else False
@@ -855,6 +863,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                     except Exception as e:
                         print(f"!Error concatenating final_samples: {e}")
 
+            # Create a new instance of WanVideoDiffusionForcingSampler
+            sampler = WanVideoDiffusionForcingSampler()
             # Call the process method of WanVideoDiffusionForcingSampler
             batch_result = sampler.process(
                 model=model,
@@ -875,8 +885,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                 rope_function=rope_function,
                 teacache_args=teacache_args,
                 experimental_args=experimental_args,
-                unianimate_poses=unianimate_poses
+                unianimate_poses=unianimate_poses,
+                noise_reduction_factor=noise_reduction_factor,
             )
+
+            noise_reduction_factor = noise_reduction_factor + reduction_factor_change
 
             if seed_batch_control == "Randomize":
                 # Randomize the seed for each batch
@@ -888,6 +901,17 @@ class WanVideoLoopingDiffusionForcingSampler:
             non_overlapping_samples = {
                     "samples": batch_result_samples["samples"][:, :, -number_of_latents_for_batch:]
             }
+
+            if (wanVideoDecode is not None and vae is not None):
+                one_less_latent = number_of_latents_for_batch - 1
+                small_samples = {
+                    "samples": batch_result_samples["samples"][:, :, -one_less_latent:]
+                }
+                decoded_samples = wanVideoDecode.decode(vae, small_samples, False, 272, 272, 144, 128)
+                if generated_images is None:
+                    generated_images = decoded_samples[0]
+                else:
+                    generated_images = torch.cat((generated_images, decoded_samples[0]), dim=0)
 
             print(f"!non_overlapping_samples shape: {non_overlapping_samples["samples"].shape}")
 
@@ -929,11 +953,12 @@ class WanVideoLoopingDiffusionForcingSampler:
                     
             prefix_sample_num_frames = overlap_length
             prefix_sample_num_latents = (prefix_sample_num_frames - 1) // vae_stride[0] + 1
-            if (prefix_sample_num_latents > 0):
+            if (prefix_sample_num_latents > 0 and overlap_length > 0):
                 # Set the prefix_samples for the next iteration to the last overlap_length samples
                 prefix_samples = {"samples": batch_result_samples["samples"][:,  :,  -prefix_sample_num_latents:]}
             else:
                 prefix_samples = None
+                prefix_sample_num_latents = 0
             print(f"Processed batch [{loop_count + 1}/{number_of_batches}]. calculated next loop = prefix_sample_num_frames: {prefix_sample_num_frames}, prefix_sample_num_latents: {prefix_sample_num_latents}")
 
             # Increment the loop count
@@ -946,7 +971,8 @@ class WanVideoLoopingDiffusionForcingSampler:
             "samples": prefix_samples_output['samples'] if prefix_samples_output else None,
             },{
             "samples": generated_samples_output['samples'] if generated_samples_output else None,
-            }, )
+            }, 
+            generated_images,)
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoDiffusionForcingSampler": WanVideoDiffusionForcingSampler,
