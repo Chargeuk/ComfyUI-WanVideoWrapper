@@ -652,7 +652,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "prefix_samples": ("LATENT", {"tooltip": "prefix latents"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "teacache_args": ("TEACACHEARGS", ),
+                "teacache_args": ("TEACACHEARGS", {"tooltip": "teacache for 1st loop"} ),
+                "teacache_args2": ("TEACACHEARGS", {"tooltip": "teacache for after 1st loop loop"} ),
                 "slg_args": ("SLGARGS", ),
                 "rope_function": (["default", "comfy"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile"}),
                 "experimental_args": ("EXPERIMENTALARGS", ),
@@ -680,9 +681,11 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Prefix video of length: 2
 
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
-                force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, 
+                force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, teacache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, reencode_samples="Ignore"):
         vae_stride = (4, 8, 8)
+        if teacache_args2 is None:
+            teacache_args2 = teacache_args
         prefix_samples_output = None
         generated_samples_output = None
         generated_images = None
@@ -722,7 +725,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
                 prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
                 print(f"Prefix samples provided, merging with samples")
-                non_overlapping_samples = prefix_samples["samples"][:, :, -prefix_sample_num_latents:]
+                non_overlapping_samples = prefix_samples["samples"][:, :, :-1]
                 final_samples = {
                     "samples": non_overlapping_samples
                 }
@@ -732,7 +735,7 @@ class WanVideoLoopingDiffusionForcingSampler:
             number_of_prefixSamples_to_use = prefix_sample_num_latents - 1
             if number_of_prefixSamples_to_use > 0:
                 prefix_samples = {
-                    "samples": prefix_samples["samples"][:, :, :number_of_prefixSamples_to_use]
+                    "samples": prefix_samples["samples"][:, :, :-1]
                 }
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2]
                 prefix_sample_num_frames = prefix_sample_num_latents * vae_stride[0]
@@ -858,52 +861,13 @@ class WanVideoLoopingDiffusionForcingSampler:
                     batch_samples_shape = batch_samples["samples"].shape
                 print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = start_sample_latent_index: {start_sample_latent_index}, end_sample_latent_index: {end_sample_latent_index}, batch_samples_shape: {batch_samples_shape}, number_of_sample_latents: {number_of_sample_latents}")
 
-            # if overlap_length <= 0:
-            #     prefix_samples = None
-            
-
-            # if prefix_samples is not None and prefix_samples["samples"] is not None:
-            #     if wanVideoDecode is not None and wanVideoEncode is not None and vae is not None:
-            #         decoded_samples = None
-            #         if used_decoded_sample_images is not None:
-            #             # no need to decode again, we already have the images. so just get the needed images
-            #             prefix_sample_num_frames = int((prefix_sample_num_latents * vae_stride[0]) - 3)
-            #             print(f"re-using {prefix_sample_num_frames} images already decoded samples from: {used_decoded_sample_images.shape}")
-            #             decoded_samples = used_decoded_sample_images[-prefix_sample_num_frames:]
-            #         else:
-            #             # decoding the prefix samples and the re-encoding them can improve quality
-            #             print(f"Decoding prefix samples shape: {prefix_samples['samples'].shape}")
-            #             # Decode the prefix samples
-            #             decoded_samples = wanVideoDecode.decode(vae, prefix_samples, False, 272, 272, 144, 128)[0]
-            #         # Encode the decoded samples
-            #         print(f"Re-encoding decoded prefix samples shape: {decoded_samples.shape}")
-            #         encoded_samples = wanVideoEncode.encode(vae, decoded_samples, False, 272, 272, 144, 128)
-            #         print(f"Assigning re-encoded prefix samples shape: {encoded_samples[0]['samples'].shape}")
-            #         prefix_samples = {"samples": encoded_samples[0]["samples"]}
-
-            #     if prefix_samples_output is None:
-            #         # Initialize final_samples with the first batch
-            #         prefix_samples_output = {
-            #             "samples": prefix_samples["samples"]
-            #         }
-            #     else:
-            #         # Exclude the overlap region from the previous batch
-            #         try:
-            #             print(f"!prefix_samples_output['samples'] shape before merge: {prefix_samples_output['samples'].shape}")
-            #             merged_samples = torch.cat((prefix_samples_output["samples"], prefix_samples["samples"]), dim=2)
-            #             prefix_samples_output = {
-            #                 "samples": merged_samples
-            #             }
-            #             print(f"!final_samples['samples'] shape after merge: {final_samples['samples'].shape}")
-            #         except Exception as e:
-            #             print(f"!Error concatenating final_samples: {e}")
-
-            # if prefix_samples is not None and prefix_samples["samples"] is not None:
-            #     print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = prefix_samples shape: {prefix_samples['samples'].shape}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_sample_num_frames: {prefix_sample_num_frames}, overlap_length: {overlap_length}")
-
             # only use force_offload if we are on the last loop iteration, otherwise set it to false
             batch_force_offload = force_offload if loop_count == number_of_batches - 1 else False
 
+            batch_teacache_args = teacache_args
+            if loop_count > 0:
+                batch_teacache_args = teacache_args2
+                
             # Create a new instance of WanVideoDiffusionForcingSampler
             sampler = WanVideoDiffusionForcingSampler()
             # Call the process method of WanVideoDiffusionForcingSampler
@@ -924,7 +888,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 denoise_strength=denoise_strength,
                 slg_args=slg_args,
                 rope_function=rope_function,
-                teacache_args=teacache_args,
+                teacache_args=batch_teacache_args,
                 experimental_args=experimental_args,
                 unianimate_poses=unianimate_poses,
                 noise_reduction_factor=noise_reduction_factor,
@@ -956,10 +920,10 @@ class WanVideoLoopingDiffusionForcingSampler:
                 print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = generated_images shape: {generated_images.shape}, used_decoded_sample_images shape: {used_decoded_sample_images.shape}, decoded_sample_images shape: {decoded_sample_images.shape}")
 
             number_of_latents_for_this_loop = number_of_latents_for_batch
-            non_overlapping_samples = {
-                "samples": batch_result_samples["samples"][:, :, -number_of_latents_for_this_loop:]
-            }
-            print(f"!non_overlapping_samples shape: {non_overlapping_samples["samples"].shape}")
+            # non_overlapping_samples = {
+            #     "samples": batch_result_samples["samples"][:, :, -number_of_latents_for_this_loop:]
+            # }
+            # print(f"!non_overlapping_samples shape: {non_overlapping_samples["samples"].shape}")
             
             # if there are remaining frames, we need to drop the last latent, which contains only one frame of data
             if remaining_frames > 0:
@@ -1014,7 +978,7 @@ class WanVideoLoopingDiffusionForcingSampler:
             prefix_sample_num_latents = (prefix_sample_num_frames) // vae_stride[0]
             if (prefix_sample_num_latents > 0 and overlap_length > 0):
                 # Set the prefix_samples for the next iteration to the last overlap_length samples
-                prefix_samples = {"samples": batch_result_samples["samples"][:,  :,  -prefix_sample_num_latents:-1]}
+                prefix_samples = {"samples": final_samples["samples"][:,  :,  -prefix_sample_num_latents:]}
             else:
                 prefix_samples = None
                 prefix_sample_num_latents = 0
@@ -1025,16 +989,12 @@ class WanVideoLoopingDiffusionForcingSampler:
             if prefix_samples is not None and prefix_samples["samples"] is not None:
                 if wanVideoDecode is not None and wanVideoEncode is not None and vae is not None:
                     decoded_samples = None
-                    if used_decoded_sample_images is not None:
+                    if generated_images is not None:
                         # no need to decode again, we already have the images. so just get the needed images
-                        # prefix_sample_num_frames = int((prefix_sample_num_latents * vae_stride[0]) - 3)
-                        # print(f"re-using {prefix_sample_num_frames} images already decoded samples from: {used_decoded_sample_images.shape}")
-                        # decoded_samples = used_decoded_sample_images[-prefix_sample_num_frames:]
-
                         # tmp_num_frames = int((prefix_sample_num_latents * vae_stride[0]) - 3)
                         tmp_num_frames = prefix_sample_num_frames
-                        print(f"re-using {tmp_num_frames} images already decoded samples from: {used_decoded_sample_images.shape}")
-                        decoded_samples = used_decoded_sample_images[-tmp_num_frames:]
+                        print(f"re-using {tmp_num_frames} images already decoded samples from: {generated_images.shape}")
+                        decoded_samples = generated_images[-tmp_num_frames:]
                     else:
                         # decoding the prefix samples and the re-encoding them can improve quality
                         print(f"Decoding prefix samples shape: {prefix_samples['samples'].shape}")
