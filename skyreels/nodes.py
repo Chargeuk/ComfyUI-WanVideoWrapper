@@ -867,7 +867,7 @@ class WanVideoLoopingDiffusionForcingSampler:
             batch_teacache_args = teacache_args
             if loop_count > 0:
                 batch_teacache_args = teacache_args2
-                
+
             # Create a new instance of WanVideoDiffusionForcingSampler
             sampler = WanVideoDiffusionForcingSampler()
             # Call the process method of WanVideoDiffusionForcingSampler
@@ -935,7 +935,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 samples_to_add_for_this_loop = {
                         "samples": batch_result_samples["samples"][:, :, -number_of_latents_for_this_loop:]
                 }
-            print(f"!samples_to_add_for_this_loop shape: {samples_to_add_for_this_loop["samples"].shape}")
+            print(f"!samples_to_add_for_this_loop shape: {samples_to_add_for_this_loop['samples'].shape}")
 
             if generated_samples_output is None:
                 # Initialize final_samples with the first batch
