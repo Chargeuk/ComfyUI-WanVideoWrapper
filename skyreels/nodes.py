@@ -920,10 +920,6 @@ class WanVideoLoopingDiffusionForcingSampler:
                 print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = generated_images shape: {generated_images.shape}, used_decoded_sample_images shape: {used_decoded_sample_images.shape}, decoded_sample_images shape: {decoded_sample_images.shape}")
 
             number_of_latents_for_this_loop = number_of_latents_for_batch
-            # non_overlapping_samples = {
-            #     "samples": batch_result_samples["samples"][:, :, -number_of_latents_for_this_loop:]
-            # }
-            # print(f"!non_overlapping_samples shape: {non_overlapping_samples["samples"].shape}")
             
             # if there are remaining frames, we need to drop the last latent, which contains only one frame of data
             if remaining_frames > 0:
