@@ -23,25 +23,30 @@ from comfy.utils import load_torch_file, ProgressBar, common_upscale
 from comfy.clip_vision import clip_preprocess, ClipVisionModel
 from comfy.cli_args import args, LatentPreviewMethod
 
-# Get the absolute path to the ComfyUI-ReActor folder
-comfyui_reactor_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'ComfyUI-ReActor'))
+try:
+    # Get the absolute path to the ComfyUI-ReActor folder
+    comfyui_reactor_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'ComfyUI-ReActor'))
 
-# Add the ComfyUI-ReActor folder to sys.path
-if comfyui_reactor_path not in sys.path:
-    sys.path.append(comfyui_reactor_path)
+    # Add the ComfyUI-ReActor folder to sys.path
+    if comfyui_reactor_path not in sys.path:
+        sys.path.append(comfyui_reactor_path)
 
-print(f"!!!!!!!!!!!!!ComfyUI-ReActor path: {comfyui_reactor_path}")
-print(sys.path)
+    print(f"!!!!!!!!!!!!!ComfyUI-ReActor path: {comfyui_reactor_path}")
+    print(sys.path)
 
-# Dynamically load the nodes module from ComfyUI-ReActor
-nodes_module_path = os.path.join(comfyui_reactor_path, 'nodes.py')
-spec = importlib.util.spec_from_file_location("ComfyUI_ReActor.nodes", nodes_module_path)
-nodes_module = importlib.util.module_from_spec(spec)
-sys.modules["ComfyUI_ReActor.nodes"] = nodes_module
-spec.loader.exec_module(nodes_module)
+    # Dynamically load the nodes module from ComfyUI-ReActor
+    nodes_module_path = os.path.join(comfyui_reactor_path, 'nodes.py')
+    spec = importlib.util.spec_from_file_location("ComfyUI_ReActor.nodes", nodes_module_path)
+    nodes_module = importlib.util.module_from_spec(spec)
+    sys.modules["ComfyUI_ReActor.nodes"] = nodes_module
+    spec.loader.exec_module(nodes_module)
 
-# Import the reactor class from the dynamically loaded module
-reactor = nodes_module.reactor
+    # Import the reactor class from the dynamically loaded module
+    reactor = nodes_module.reactor
+    print(f"Loaded reactor from: {comfyui_reactor_path}")
+except Error as e:
+    print(f"Error loading ComfyUI-ReActor nodes: {e}")
+    reactor = None
 
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
@@ -975,16 +980,16 @@ class WanVideoLoopingDiffusionForcingSampler:
             # Decode the samples if wanVideoDecode is available
             print(f"WanVideoLoopingDiffusionForcingSampler deciding if it should decode")
             if (wanVideoDecode is not None and vae is not None):
-                print(f"WanVideoLoopingDiffusionForcingSampler decoding")
+                print(f"WanVideoLoopingDiffusionForcingSampler decoding. require number_of_frames_for_batch={number_of_frames_for_batch} frames this loop")
                 decoded_samples = wanVideoDecode.decode(vae, batch_result_samples, False, 272, 272, 144, 128)
                 decoded_sample_images = decoded_samples[0]
                 used_decoded_sample_images = None
                 if remaining_frames > 0:
-                    used_decoded_sample_images = decoded_sample_images[-(number_of_frames_for_batch+1):-1]  # Drop the last image as it will be decoded and added in the next loop
+                    used_decoded_sample_images = decoded_sample_images[-(number_of_frames_for_batch):-1]  # Drop the last image as it will be decoded and added in the next loop
                 else:
                     used_decoded_sample_images = decoded_sample_images[-number_of_frames_for_batch:]
 
-                if restore_face and use_restore_face:
+                if restore_face and use_restore_face and reactor:
                     faceDetectionModel = restore_face["facedetection"]
                     faceRestoreModel = restore_face["model"]
                     faceRestoreVisibility = restore_face["visibility"]
