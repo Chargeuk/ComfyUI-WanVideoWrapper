@@ -1,4 +1,5 @@
 import os
+import sys
 import random
 import torch
 import gc
@@ -6,6 +7,7 @@ from ..utils import log, print_memory, fourier_filter
 import math
 from tqdm import tqdm
 import numpy as np
+import importlib.util
 
 from ..wanvideo.modules.model import rope_params
 from ..wanvideo.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
@@ -20,6 +22,27 @@ import comfy.model_management as mm
 from comfy.utils import load_torch_file, ProgressBar, common_upscale
 from comfy.clip_vision import clip_preprocess, ClipVisionModel
 from comfy.cli_args import args, LatentPreviewMethod
+
+# Get the absolute path to the ComfyUI-ReActor folder
+comfyui_reactor_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'ComfyUI-ReActor'))
+
+# Add the ComfyUI-ReActor folder to sys.path
+if comfyui_reactor_path not in sys.path:
+    sys.path.append(comfyui_reactor_path)
+
+print(f"!!!!!!!!!!!!!ComfyUI-ReActor path: {comfyui_reactor_path}")
+print(sys.path)
+
+# Dynamically load the nodes module from ComfyUI-ReActor
+nodes_module_path = os.path.join(comfyui_reactor_path, 'nodes.py')
+spec = importlib.util.spec_from_file_location("ComfyUI_ReActor.nodes", nodes_module_path)
+nodes_module = importlib.util.module_from_spec(spec)
+sys.modules["ComfyUI_ReActor.nodes"] = nodes_module
+spec.loader.exec_module(nodes_module)
+
+# Import the reactor class from the dynamically loaded module
+reactor = nodes_module.reactor
+
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -628,7 +651,6 @@ class WanVideoDiffusionForcingSampler:
             "samples": x0.cpu(),
             }, )
     
-
 class WanVideoLoopingDiffusionForcingSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -675,6 +697,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "rope_function": (["default", "comfy"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile"}),
                 "experimental_args": ("EXPERIMENTALARGS", ),
                 "unianimate_poses": ("UNIANIMATE_POSE", ),
+                "restore_face": ("RESTOREFACEARGS", ),
+                "use_restore_face": ("BOOLEAN", {"default": True, "tooltip": "Use provided RestoreFace to restore faces in the generated video"}),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
             }
@@ -699,7 +723,7 @@ class WanVideoLoopingDiffusionForcingSampler:
 
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
-                experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, reencode_samples="Ignore"):
+                experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True):
         vae_stride = (4, 8, 8)
         if cache_args2 is None:
             cache_args2 = cache_args
@@ -727,6 +751,7 @@ class WanVideoLoopingDiffusionForcingSampler:
         wanVideoDecode = None
         wanVideoEncode = None
         if vae:
+            print(f"WanVideoLoopingDiffusionForcingSampler Using VAE")
             wanVideoDecode = WanVideoDecode()
             if reencode_samples == "Re-encode":
                 # we need to reencode the samples
@@ -823,16 +848,43 @@ class WanVideoLoopingDiffusionForcingSampler:
                             number_of_latents_for_batch_embeds,
                             image_embeds["target_shape"][2],
                             image_embeds["target_shape"][3],)
-
+            
             batch_image_embeds = {
                 "target_shape": target_shape,
                 "num_frames": number_of_frames_for_batch_embeds,
-                "control_embeds": (
-                    image_embeds["control_embeds"][:, start_latent_index:end_latent_index]
-                    if image_embeds["control_embeds"] is not None
-                    else None
-                ),
             }
+
+            # unfortunately, right nnow these are not used...
+            if image_embeds.get("control_embeds") is not None:
+                # print(f'image_embeds["control_embeds"].shape: {image_embeds["control_embeds"].shape}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}')
+                
+                original_control_images = image_embeds["control_embeds"].get("control_images", None)
+                control_images = image_embeds["control_embeds"].get("control_images", None)
+                original_control_camera_latents = image_embeds["control_embeds"].get("control_camera_latents", None)
+                control_camera_latents = image_embeds["control_embeds"].get("control_camera_latents", None)
+                
+                # Slice control_images if they exist
+                if control_images is not None:
+                    control_images = control_images[:, start_latent_index:end_latent_index]
+                    # log out the provided shape, and the calculated shape
+                    #print(f"control_images.shape: {control_images.shape}, original_control_images.shape: {original_control_images.shape}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}")
+                
+                # Slice control_camera_latents if they exist
+                if control_camera_latents is not None:
+                    control_camera_latents = control_camera_latents[:, start_latent_index:end_latent_index]
+                    # log out the provided shape, and the calculated shape
+                    #print(f"control_camera_latents.shape: {control_camera_latents.shape}, original_control_camera_latents.shape: {original_control_camera_latents.shape}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}")
+                
+                # Add sliced control_embeds to batch_image_embeds
+                batch_image_embeds["control_embeds"] = {
+                    "control_images": control_images,
+                    "control_camera_latents": control_camera_latents,
+                    "control_camera_start_percent": image_embeds["control_embeds"].get("control_camera_start_percent", 0.0),
+                    "control_camera_end_percent": image_embeds["control_embeds"].get("control_camera_end_percent", 1.0),
+                    "start_percent": image_embeds["control_embeds"].get("start_percent", 0.0),
+                    "end_percent": image_embeds["control_embeds"].get("end_percent", 1.0),
+                }
+
             batch_latent_frames = batch_image_embeds["target_shape"][1]
             batch_num_frames = batch_image_embeds["num_frames"]
             print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = batch_latent_frames: {batch_latent_frames}, batch_num_frames: {batch_num_frames}")
@@ -921,18 +973,30 @@ class WanVideoLoopingDiffusionForcingSampler:
 
             batch_result_samples = batch_result[0]
             # Decode the samples if wanVideoDecode is available
+            print(f"WanVideoLoopingDiffusionForcingSampler deciding if it should decode")
             if (wanVideoDecode is not None and vae is not None):
+                print(f"WanVideoLoopingDiffusionForcingSampler decoding")
                 decoded_samples = wanVideoDecode.decode(vae, batch_result_samples, False, 272, 272, 144, 128)
                 decoded_sample_images = decoded_samples[0]
                 used_decoded_sample_images = None
                 if remaining_frames > 0:
-                    used_decoded_sample_images = decoded_sample_images[-number_of_frames_for_batch:-1]  # Drop the last image as it will be decoded and added in the next loop
+                    used_decoded_sample_images = decoded_sample_images[-(number_of_frames_for_batch+1):-1]  # Drop the last image as it will be decoded and added in the next loop
                 else:
                     used_decoded_sample_images = decoded_sample_images[-number_of_frames_for_batch:]
 
+                if restore_face and use_restore_face:
+                    faceDetectionModel = restore_face["facedetection"]
+                    faceRestoreModel = restore_face["model"]
+                    faceRestoreVisibility = restore_face["visibility"]
+                    faceRestoreCodeformerWeight = restore_face["codeformer_weight"]
+                    used_decoded_sample_images = reactor.restore_face(self,used_decoded_sample_images,faceRestoreModel,faceRestoreVisibility,faceRestoreCodeformerWeight,faceDetectionModel)
+                    reactor.unload_face_restore_model(self)
+
                 if generated_images is None:
+                    print(f"WanVideoLoopingDiffusionForcingSampler creating generated_images")
                     generated_images = used_decoded_sample_images
                 else:
+                    print(f"WanVideoLoopingDiffusionForcingSampler extending generated_images")
                     generated_images = torch.cat((generated_images, used_decoded_sample_images), dim=0)
                 print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = generated_images shape: {generated_images.shape}, used_decoded_sample_images shape: {used_decoded_sample_images.shape}, decoded_sample_images shape: {decoded_sample_images.shape}")
 
