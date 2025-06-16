@@ -398,7 +398,7 @@ class WanVideoDiffusionForcingSampler:
                 transformer.enable_teacache = True
                 transformer.rel_l1_thresh = cache_args["rel_l1_thresh"]
                 transformer.teacache_start_step = cache_args["start_step"]
-            	transformer.teacache_end_step = len(timesteps)-1 if cache_args["end_step"] == -1 else cache_args["end_step"]
+                transformer.teacache_end_step = len(timesteps)-1 if cache_args["end_step"] == -1 else cache_args["end_step"]
                 transformer.teacache_use_coefficients = cache_args["use_coefficients"]
                 transformer.teacache_mode = cache_args["mode"]
             elif cache_args["cache_type"] == "MagCache":
@@ -669,8 +669,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "prefix_samples": ("LATENT", {"tooltip": "prefix latents"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "teacache_args": ("TEACACHEARGS", {"tooltip": "teacache for 1st loop"} ),
-                "teacache_args2": ("TEACACHEARGS", {"tooltip": "teacache for after 1st loop loop"} ),
+                "cache_args": ("CACHEARGS", {"tooltip": "cache for 1st loop"} ),
+                "cache_args2": ("CACHEARGS", {"tooltip": "cache for after 1st loop loop"} ),
                 "slg_args": ("SLGARGS", ),
                 "rope_function": (["default", "comfy"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile"}),
                 "experimental_args": ("EXPERIMENTALARGS", ),
@@ -698,11 +698,11 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Prefix video of length: 2
 
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
-                force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", teacache_args=None, teacache_args2=None,
+                force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, reencode_samples="Ignore"):
         vae_stride = (4, 8, 8)
-        if teacache_args2 is None:
-            teacache_args2 = teacache_args
+        if cache_args2 is None:
+            cache_args2 = cache_args
         prefix_samples_output = None
         generated_samples_output = None
         generated_images = None
@@ -881,9 +881,9 @@ class WanVideoLoopingDiffusionForcingSampler:
             # only use force_offload if we are on the last loop iteration, otherwise set it to false
             batch_force_offload = force_offload if loop_count == number_of_batches - 1 else False
 
-            batch_teacache_args = teacache_args
+            batch_cache_args = cache_args
             if loop_count > 0:
-                batch_teacache_args = teacache_args2
+                batch_cache_args = cache_args2
 
             # Create a new instance of WanVideoDiffusionForcingSampler
             sampler = WanVideoDiffusionForcingSampler()
@@ -905,7 +905,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 denoise_strength=denoise_strength,
                 slg_args=slg_args,
                 rope_function=rope_function,
-                teacache_args=batch_teacache_args,
+                cache_args=batch_cache_args,
                 experimental_args=experimental_args,
                 unianimate_poses=unianimate_poses,
                 noise_reduction_factor=noise_reduction_factor,
