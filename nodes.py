@@ -183,6 +183,41 @@ class WanVideoEncodeSettings_VTS:
     def encode(self, **kwargs):
         return (kwargs, )
 
+class WanVideoUpscaleWithModelSettings_VTS:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "upscale_model": ("UPSCALE_MODEL",),
+                "device_preference": (["auto", "cuda", "cpu"],),
+            },
+        }
+    RETURN_TYPES = ("WANMODELUPSCALEARGS",)
+    RETURN_NAMES = ("model_upscale_args",)
+
+    FUNCTION = "upscale"
+
+    CATEGORY = "WanVideoWrapper"
+
+    def upscale(self, **kwargs):
+        return (kwargs, )
+
+class WanVideoSimpleScaleSettings_VTS:
+    upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
+    crop_methods = ["disabled", "center"]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "upscale_method": (s.upscale_methods,),
+                              "crop": (s.crop_methods,)}}
+    RETURN_TYPES = ("WANSIMPLESCALEARGS",)
+    FUNCTION = "scale"
+
+    CATEGORY = "WanVideoWrapper"
+
+    def scale(self, **kwargs):
+        return (kwargs, )
+
 class WanVideoBlockSwap:
     @classmethod
     def INPUT_TYPES(s):
@@ -4004,6 +4039,8 @@ NODE_CLASS_MAPPINGS = {
     "WanFaceRestoreArgs_VTS": WanFaceRestoreArgs_VTS,
     "WanVideoDecodeSettings_VTS": WanVideoDecodeSettings_VTS,
     "WanVideoEncodeSettings_VTS": WanVideoEncodeSettings_VTS,
+    "WanVideoUpscaleWithModelSettings_VTS": WanVideoUpscaleWithModelSettings_VTS,
+    "WanVideoSimpleScaleSettings_VTS": WanVideoSimpleScaleSettings_VTS,
     "WanVideoBlockSwap": WanVideoBlockSwap,
     "WanVideoTorchCompileSettings": WanVideoTorchCompileSettings,
     "WanVideoEmptyEmbeds": WanVideoEmptyEmbeds,
@@ -4048,6 +4085,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanFaceRestoreArgs_VTS": "WanFace Restore Args VTS",
     "WanVideoDecodeSettings_VTS": "WanVideo Decode Settings VTS",
     "WanVideoEncodeSettings_VTS": "WanVideo Encode Settings VTS",
+    "WanVideoUpscaleWithModelSettings_VTS": "WanVideo Upscale With Model Settings VTS",
+    "WanVideoSimpleScaleSettings_VTS": "WanVideo Simple Scale Settings VTS",
     "WanVideoBlockSwap": "WanVideo BlockSwap",
     "WanVideoTorchCompileSettings": "WanVideo Torch Compile Settings",
     "WanVideoEmptyEmbeds": "WanVideo Empty Embeds",

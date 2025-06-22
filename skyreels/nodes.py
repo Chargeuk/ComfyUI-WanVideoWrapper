@@ -8,6 +8,14 @@ import math
 from tqdm import tqdm
 import numpy as np
 import importlib.util
+import comfy
+import comfy.utils
+import logging
+import time
+
+from spandrel import ModelLoader, ImageModelDescriptor
+from spandrel.__helpers.size_req import pad_tensor
+from comfy import model_management
 
 from ..wanvideo.modules.model import rope_params
 from ..wanvideo.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
@@ -706,6 +714,9 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "use_restore_face": ("BOOLEAN", {"default": True, "tooltip": "Use provided RestoreFace to restore faces in the generated video"}),
                 "encode_latent_Args": ("WANENCODEARGS", ),
                 "decode_latent_Args": ("WANDECODEARGS", ),
+                "model_upscale_Args": ("WANMODELUPSCALEARGS", ),
+                "use_model_upscale": ("BOOLEAN", {"default": True, "tooltip": "Use provided upscale model to upscale the generated video"}),
+                "simple_scale_Args": ("WANSIMPLESCALEARGS", ),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
             }
@@ -731,7 +742,7 @@ class WanVideoLoopingDiffusionForcingSampler:
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
-                encode_latent_Args=None, decode_latent_Args=None):
+                encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None):
         vae_stride = (4, 8, 8)
         if cache_args2 is None:
             cache_args2 = cache_args
@@ -770,6 +781,18 @@ class WanVideoLoopingDiffusionForcingSampler:
             encodeAugStrength = encode_latent_Args.get("noise_aug_strength", encodeAugStrength)
             encodeLatentStrength = encode_latent_Args.get("latent_strength", encodeLatentStrength)
             encodeMask = encode_latent_Args.get("mask", encodeMask)
+
+        upscale_model = None
+        upscale_model_device_preference = "auto"
+        if model_upscale_Args:
+            upscale_model = model_upscale_Args.get("upscale_model", upscale_model)
+            upscale_model_device_preference = model_upscale_Args.get("device_preference", upscale_model_device_preference)
+
+        simple_scale_method = "bilinear"
+        simple_crop_method = "disabled"
+        if simple_scale_Args:
+            simple_scale_method = simple_scale_Args.get("upscale_method", simple_scale_method)
+            simple_crop_method = simple_scale_Args.get("crop", simple_crop_method)
 
         original_overlap_length = overlap_length
         # overlap_length needs to be exactly divisible by 4
@@ -878,6 +901,10 @@ class WanVideoLoopingDiffusionForcingSampler:
             number_of_frames_for_batch_embeds = number_of_frames_for_batch + prefix_sample_num_frames
             number_of_latents_for_batch_embeds = (number_of_frames_for_batch_embeds - 1) // vae_stride[0] + 1
 
+            output_image_height = image_embeds["target_shape"][2] * 8
+            output_image_width = image_embeds["target_shape"][3] * 8
+
+            print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = output_image_width {output_image_width}, output_image_height: {output_image_height}")
             print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = frames {start_idx} to {end_idx} inclusive. remaining_frames: {remaining_frames}, start_latent_index: {start_latent_index}, end_latent_index: {end_latent_index}, prefix_sample_num_frames: {prefix_sample_num_frames}")
             print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = number_of_frames_for_batch {number_of_frames_for_batch}, number_of_latents_for_batch: {number_of_latents_for_batch}, number_of_frames_for_batch_embeds: {number_of_frames_for_batch_embeds}, number_of_latents_for_batch_embeds: {number_of_latents_for_batch_embeds}, prefix_sample_num_latents: {prefix_sample_num_latents}, overlap_length: {overlap_length}")
 
@@ -886,7 +913,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                             number_of_latents_for_batch_embeds,
                             image_embeds["target_shape"][2],
                             image_embeds["target_shape"][3],)
-            
+
             batch_image_embeds = {
                 "target_shape": target_shape,
                 "num_frames": number_of_frames_for_batch_embeds,
@@ -925,7 +952,7 @@ class WanVideoLoopingDiffusionForcingSampler:
 
             batch_latent_frames = batch_image_embeds["target_shape"][1]
             batch_num_frames = batch_image_embeds["num_frames"]
-            print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = batch_latent_frames: {batch_latent_frames}, batch_num_frames: {batch_num_frames}")
+            print(f"Processing batch [{loop_count + 1}/{number_of_batches}] = batch_latent_frames: {batch_latent_frames}, batch_num_frames: {batch_num_frames}, target_shape: {target_shape}")
 
             # Slice the samples for the current batch if available
             batch_samples = None
@@ -1014,7 +1041,6 @@ class WanVideoLoopingDiffusionForcingSampler:
             print(f"WanVideoLoopingDiffusionForcingSampler deciding if it should decode")
             if (wanVideoDecode is not None and vae is not None):
                 print(f"WanVideoLoopingDiffusionForcingSampler decoding. require number_of_frames_for_batch={number_of_frames_for_batch} frames this loop")
-                
 
                 decoded_samples = wanVideoDecode.decode(vae, batch_result_samples, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
                 decoded_sample_images = decoded_samples[0]
@@ -1025,12 +1051,25 @@ class WanVideoLoopingDiffusionForcingSampler:
                     used_decoded_sample_images = decoded_sample_images[-number_of_frames_for_batch:]
 
                 if restore_face and use_restore_face and reactor:
+                    start_time = time.time()  # Start timing
                     faceDetectionModel = restore_face["facedetection"]
                     faceRestoreModel = restore_face["model"]
                     faceRestoreVisibility = restore_face["visibility"]
                     faceRestoreCodeformerWeight = restore_face["codeformer_weight"]
-                    used_decoded_sample_images = reactor.restore_face(self,used_decoded_sample_images,faceRestoreModel,faceRestoreVisibility,faceRestoreCodeformerWeight,faceDetectionModel)
+                    print(f"WanVideoLoopingDiffusionForcingSampler restoring faces in used_decoded_sample_images with faceRestoreModel: {faceRestoreModel}, faceRestoreVisibility: {faceRestoreVisibility}, faceRestoreCodeformerWeight: {faceRestoreCodeformerWeight}, faceDetectionModel: {faceDetectionModel}")
+                    used_decoded_sample_images = reactor.restore_face(self, used_decoded_sample_images, faceRestoreModel, faceRestoreVisibility, faceRestoreCodeformerWeight, faceDetectionModel)
                     reactor.unload_face_restore_model(self)
+                    end_time = time.time()  # End timing
+                    elapsed_time = end_time - start_time
+                    print(f"Execution time for face restoration block: {elapsed_time:.4f} seconds")
+
+                if use_model_upscale and upscale_model is not None:
+                    start_time = time.time()  # Start timing
+                    print(f"WanVideoLoopingDiffusionForcingSampler upscaling used_decoded_sample_images with upscale_model: {upscale_model}, upscale_model_device_preference: {upscale_model_device_preference}")
+                    used_decoded_sample_images = self.upscaleWithModel(upscale_model, used_decoded_sample_images, upscale_model_device_preference)
+                    end_time = time.time()  # End timing
+                    elapsed_time = end_time - start_time
+                    print(f"Execution time for model upscale block: {elapsed_time:.4f} seconds")
 
                 if generated_images is None:
                     print(f"WanVideoLoopingDiffusionForcingSampler creating generated_images")
@@ -1117,6 +1156,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                         print(f"Decoding prefix samples shape: {prefix_samples['samples'].shape}")
                         # Decode the prefix samples
                         decoded_samples = wanVideoDecode.decode(vae, prefix_samples, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)[0]
+                    
+                    # ensure the decoded_samples are the correct size
+                    print(f"Decoded prefix samples shape: {decoded_samples.shape}, prefix_sample_num_latents: {prefix_sample_num_latents}, prefix_sample_num_frames: {prefix_sample_num_frames}, overlap_length: {overlap_length}")
+                    decoded_samples = self.scale(decoded_samples, output_image_width, output_image_height, simple_scale_method, simple_crop_method)
+
                     # Encode the decoded samples
                     print(f"Re-encoding decoded prefix samples shape: {decoded_samples.shape}")
                     encoded_samples = wanVideoEncode.encode(vae, decoded_samples, encodeTile, encodeTileX, encodeTileY, encodeTileStrideX, encodeTileStrideY, encodeAugStrength, encodeLatentStrength, encodeMask)
@@ -1157,6 +1201,94 @@ class WanVideoLoopingDiffusionForcingSampler:
             "samples": generated_samples_output['samples'] if generated_samples_output else None,
             }, 
             generated_images,)
+
+
+    def scale(self, image, width, height, upscale_method, crop):
+        # Get the dimensions of the image
+        original_height, original_width = image.shape[1], image.shape[2]
+        # if we are not actually scaling, just return the original image
+        if width == original_width and height == original_height:
+            print(f"no scaling needed from {original_width}x{original_height} to {width}x{height}")
+            return image
+
+        print(f"scaling from {original_width}x{original_height} to {width}x{height}")
+
+        # Move dimensions for processing
+        samples = image.movedim(-1, 1)
+        # Perform the upscale
+        s = comfy.utils.common_upscale(samples, width, height, upscale_method, crop)
+        s = s.movedim(1, -1)
+        
+        return s
+
+
+    def upscaleWithModel(
+        self,
+        upscale_model: ImageModelDescriptor,
+        image: torch.Tensor,
+        device_preference: str = "auto",
+    ):
+        upscale_amount = upscale_model.scale
+
+        # Determine the device based on device_preference
+        if device_preference == "auto":
+            device = model_management.get_torch_device()
+        elif device_preference == "cuda":
+            if torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = model_management.get_torch_device()  # Fallback to auto
+        elif device_preference == "cpu":
+            device = "cpu"
+        else:
+            raise ValueError(f"Invalid device preference: {device_preference}")
+
+        logging.info(f"VTSImageUpscaleWithModel - upscale_model.scale = {upscale_model.scale}, size_requirements= {upscale_model.size_requirements}, device = {device}")
+
+        # Memory management
+        if device != "cpu":
+            memory_required = model_management.module_size(upscale_model.model)
+            memory_required += (512 * 512 * 3) * image.element_size() * max(upscale_amount, 1.0) * 384.0  # Estimate
+            memory_required += image.nelement() * image.element_size()
+            model_management.free_memory(memory_required, device)
+
+        # Move model to the selected device
+        upscale_model.to(device)
+        in_img = image.movedim(-1, -3).to(device)
+
+        tile = 512
+        overlap = 32
+
+        oom = True
+        while oom:
+            try:
+                # Calculate the number of steps for tiling
+                steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(
+                    in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap
+                )
+                pbar = comfy.utils.ProgressBar(steps)
+
+                # Perform tiled scaling
+                s = comfy.utils.tiled_scale(
+                    in_img,
+                    lambda a: upscale_model(a),
+                    tile_x=tile,
+                    tile_y=tile,
+                    overlap=overlap,
+                    upscale_amount=upscale_amount,  # Pass the correct upscale amount
+                    pbar=pbar,
+                )
+                oom = False
+            except model_management.OOM_EXCEPTION as e:
+                tile //= 2
+                if tile < 128:
+                    raise e
+
+        # Move model back to CPU and clamp output
+        if upscale_model.device != "cpu":
+            upscale_model.to("cpu")
+        s = torch.clamp(s.movedim(-3, -1), min=0, max=1.0)
+        return s
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoDiffusionForcingSampler": WanVideoDiffusionForcingSampler,
