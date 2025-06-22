@@ -704,6 +704,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "unianimate_poses": ("UNIANIMATE_POSE", ),
                 "restore_face": ("RESTOREFACEARGS", ),
                 "use_restore_face": ("BOOLEAN", {"default": True, "tooltip": "Use provided RestoreFace to restore faces in the generated video"}),
+                "encode_latent_Args": ("WANENCODEARGS", ),
+                "decode_latent_Args": ("WANDECODEARGS", ),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
             }
@@ -728,7 +730,8 @@ class WanVideoLoopingDiffusionForcingSampler:
 
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
-                experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True):
+                experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
+                encode_latent_Args=None, decode_latent_Args=None):
         vae_stride = (4, 8, 8)
         if cache_args2 is None:
             cache_args2 = cache_args
@@ -737,6 +740,36 @@ class WanVideoLoopingDiffusionForcingSampler:
         generated_images = None
         decoded_sample_images = None
         used_decoded_sample_images = None
+
+        decodeTile = False
+        decodeTileX = 272
+        decodeTileY = 272
+        decodeTileStrideX = 144
+        decodeTileStrideY = 128
+        if decode_latent_Args:
+            decodeTile = decode_latent_Args.get("enable_vae_tiling", decodeTile)
+            decodeTileX = decode_latent_Args.get("tile_x", decodeTileX)
+            decodeTileY = decode_latent_Args.get("tile_y", decodeTileY)
+            decodeTileStrideX = decode_latent_Args.get("tile_stride_x", decodeTileStrideX)
+            decodeTileStrideY = decode_latent_Args.get("tile_stride_y", decodeTileStrideY)
+
+        encodeTile = False
+        encodeTileX = 272
+        encodeTileY = 272
+        encodeTileStrideX = 144
+        encodeTileStrideY = 128
+        encodeAugStrength = 0.0
+        encodeLatentStrength = 1.0
+        encodeMask = None
+        if encode_latent_Args:
+            encodeTile = encode_latent_Args.get("enable_vae_tiling", encodeTile)
+            encodeTileX = encode_latent_Args.get("tile_x", encodeTileX)
+            encodeTileY = encode_latent_Args.get("tile_y", encodeTileY)
+            encodeTileStrideX = encode_latent_Args.get("tile_stride_x", encodeTileStrideX)
+            encodeTileStrideY = encode_latent_Args.get("tile_stride_y", encodeTileStrideY)
+            encodeAugStrength = encode_latent_Args.get("noise_aug_strength", encodeAugStrength)
+            encodeLatentStrength = encode_latent_Args.get("latent_strength", encodeLatentStrength)
+            encodeMask = encode_latent_Args.get("mask", encodeMask)
 
         original_overlap_length = overlap_length
         # overlap_length needs to be exactly divisible by 4
@@ -981,7 +1014,9 @@ class WanVideoLoopingDiffusionForcingSampler:
             print(f"WanVideoLoopingDiffusionForcingSampler deciding if it should decode")
             if (wanVideoDecode is not None and vae is not None):
                 print(f"WanVideoLoopingDiffusionForcingSampler decoding. require number_of_frames_for_batch={number_of_frames_for_batch} frames this loop")
-                decoded_samples = wanVideoDecode.decode(vae, batch_result_samples, False, 272, 272, 144, 128)
+                
+
+                decoded_samples = wanVideoDecode.decode(vae, batch_result_samples, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
                 decoded_sample_images = decoded_samples[0]
                 used_decoded_sample_images = None
                 if remaining_frames > 0:
@@ -1081,10 +1116,10 @@ class WanVideoLoopingDiffusionForcingSampler:
                         # decoding the prefix samples and the re-encoding them can improve quality
                         print(f"Decoding prefix samples shape: {prefix_samples['samples'].shape}")
                         # Decode the prefix samples
-                        decoded_samples = wanVideoDecode.decode(vae, prefix_samples, False, 272, 272, 144, 128)[0]
+                        decoded_samples = wanVideoDecode.decode(vae, prefix_samples, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)[0]
                     # Encode the decoded samples
                     print(f"Re-encoding decoded prefix samples shape: {decoded_samples.shape}")
-                    encoded_samples = wanVideoEncode.encode(vae, decoded_samples, False, 272, 272, 144, 128)
+                    encoded_samples = wanVideoEncode.encode(vae, decoded_samples, encodeTile, encodeTileX, encodeTileY, encodeTileStrideX, encodeTileStrideY, encodeAugStrength, encodeLatentStrength, encodeMask)
                     print(f"Assigning re-encoded prefix samples shape: {encoded_samples[0]['samples'].shape}")
                     prefix_samples = {"samples": encoded_samples[0]["samples"]}
 
