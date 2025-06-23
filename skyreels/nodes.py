@@ -599,6 +599,7 @@ class WanVideoDiffusionForcingSampler:
                         timestep[:, valid_interval_start:prefix_video_latent_length] = timestep_for_noised_condition
                 except Exception as e:
                     log.error(f"Error during sampling[{i}] part 1: {e}")
+                    log.error(f"Call stack:\n{traceback.format_exc()}")
                     raise
 
                 try:
@@ -612,6 +613,7 @@ class WanVideoDiffusionForcingSampler:
                         teacache_state=self.teacache_state)
                 except Exception as e:
                     log.error(f"Error during sampling[{i}] part 2: {e}")
+                    log.error(f"Call stack:\n{traceback.format_exc()}")
                     raise
 
                 try:
@@ -630,6 +632,7 @@ class WanVideoDiffusionForcingSampler:
                             sample_schedulers_counter[idx] += 1
                 except Exception as e:
                     log.error(f"Error during sampling[{i}] part 3: {e}")
+                    log.error(f"Call stack:\n{traceback.format_exc()}")
                     raise
                 
                 x0 = latents.unsqueeze(0)
