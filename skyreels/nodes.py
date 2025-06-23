@@ -12,6 +12,7 @@ import comfy
 import comfy.utils
 import logging
 import time
+import traceback
 
 from spandrel import ModelLoader, ImageModelDescriptor
 from spandrel.__helpers.size_req import pad_tensor
@@ -617,11 +618,11 @@ class WanVideoDiffusionForcingSampler:
                     raise
 
                 try:
-                    # print(f"timestep:{i}, denoising_multiplier: {denoising_multiplier}, valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
+                    print(f"timestep:{i}, denoising_multiplier: {denoising_multiplier}, valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
                     for idx in range(valid_interval_start, valid_interval_end):
                         if update_mask_i[idx].item():
-                            # print(f"Sampling frame {idx} with timestep {timestep_i[idx]}. ")
-                            # print(f"Sampling frame {idx} with timestep {timestep_i[idx]}. ")
+                            print(f"Sampling frame {idx} with timestep {timestep_i[idx]}. ")
+                            print(f"Sampling frame {idx} with timestep {timestep_i[idx]}. ")
                             latents[:, idx] = sample_schedulers[idx].step(
                                 noise_pred[:, idx - valid_interval_start],
                                 timestep_i[idx],
