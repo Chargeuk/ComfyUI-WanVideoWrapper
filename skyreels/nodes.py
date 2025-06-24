@@ -167,7 +167,8 @@ class WanVideoDiffusionForcingSampler:
             "optional": {
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "prefix_samples": ("LATENT", {"tooltip": "prefix latents"} ),
-                "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "denoising_skew" : ("FLOAT", {"default": 0.0, "min": -100.0, "max": 10.0, "step": 0.001}),
                 "cache_args": ("CACHEARGS", ),
                 "slg_args": ("SLGARGS", ),
                 "rope_function": (["default", "comfy"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile"}),
@@ -182,9 +183,11 @@ class WanVideoDiffusionForcingSampler:
     CATEGORY = "WanVideoWrapper"
 
     def process(self, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
-        force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, teacache_args=None, 
-        experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, denoising_multiplier=1.0):
+        force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, denoising_skew=0.0, slg_args=None, rope_function="default", cache_args=None, teacache_args=None, 
+        experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, denoising_multiplier=1.0, denoising_multiplier_end=None):
         #assert not (context_options and teacache_args), "Context options cannot currently be used together with teacache."
+        if denoising_multiplier_end is None:
+            denoising_multiplier_end = denoising_multiplier
         patcher = model
         model = model.model
         transformer = model.diffusion_model
@@ -204,7 +207,6 @@ class WanVideoDiffusionForcingSampler:
         elif 'lcm' in scheduler:
             sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
             sample_scheduler.set_timesteps(timestep_steps, device=device) 
-        
         
         init_timesteps = sample_scheduler.timesteps
         timesteps = init_timesteps[:]
@@ -578,8 +580,19 @@ class WanVideoDiffusionForcingSampler:
             pass
 
         #region main loop start
-        print(f"denoising_multiplier: {denoising_multiplier}")
+        print(f"denoising_multiplier: {denoising_multiplier}, denoising_multiplier_end:{denoising_multiplier_end}, denoising_skew: {denoising_skew}")
         for i, timestep_i in enumerate(tqdm(step_matrix)):
+            # Adjust usedDenoising based on denoising_skew
+            progress = i / (len(step_matrix) - 1)  # Normalized progress through the loop (0 to 1)
+            if denoising_skew != 0:
+                # Transition from denoising_multiplier to denoising_multiplier_end
+                transition_factor = progress ** (1 / abs(denoising_skew))  # Faster transition for larger magnitude of denoising_skew
+                usedDenoising = denoising_multiplier + (denoising_multiplier_end - denoising_multiplier) * transition_factor
+            else:
+                # No skew, linear transition
+                transition_factor = 1.0
+                usedDenoising = denoising_multiplier + (denoising_multiplier_end - denoising_multiplier) * progress
+
             try:
                 try:
                     update_mask_i = step_update_mask[i]
@@ -587,7 +600,8 @@ class WanVideoDiffusionForcingSampler:
                     valid_interval_start, valid_interval_end = valid_interval_i
                     timestep = timestep_i[None, valid_interval_start:valid_interval_end].clone()
                     # Modify timestep to remove more noise
-                    timestep = timestep * denoising_multiplier
+                    timestep = timestep * usedDenoising
+                    print(f"\nSampling frame {i} with timestep {timestep_i}, progress: {progress}, usedDenoising: {usedDenoising}, transition_factor: {transition_factor}, denoising_multiplier: {denoising_multiplier}, denoising_multiplier_end:{denoising_multiplier_end}, denoising_skew: {denoising_skew}")
                     latent_model_input = latents[:, valid_interval_start:valid_interval_end, :, :].clone()
                     if addnoise_condition > 0 and valid_interval_start < prefix_video_latent_length:
                         noise_factor = 0.001 * addnoise_condition
@@ -729,6 +743,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
+                "denoising_multiplier_end": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive at the end of the video"}),
+                "denoising_skew": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.001, "tooltip": "How quickly do we transition from denoising_multiplier to denoising_multiplier_end. 0.0=linear."}),
             }
         }
 
@@ -751,11 +767,13 @@ class WanVideoLoopingDiffusionForcingSampler:
 
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
-                experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
+                experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None):
         vae_stride = (4, 8, 8)
         if cache_args2 is None:
             cache_args2 = cache_args
+        if denoising_multiplier_end is None:
+            denoising_multiplier_end = denoising_multiplier
         prefix_samples_output = None
         generated_samples_output = None
         generated_images = None
@@ -1037,6 +1055,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 unianimate_poses=unianimate_poses,
                 noise_reduction_factor=noise_reduction_factor,
                 denoising_multiplier=denoising_multiplier,
+                denoising_multiplier_end=denoising_multiplier_end,
+                denoising_skew=denoising_skew,
             )
 
             noise_reduction_factor = noise_reduction_factor + reduction_factor_change
