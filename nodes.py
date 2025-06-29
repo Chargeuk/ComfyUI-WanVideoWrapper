@@ -625,7 +625,7 @@ class WanVideoLoraSelect:
 class WanVideoLoraSelectMulti:
     @classmethod
     def INPUT_TYPES(s):
-        lora_files = folder_paths.get_filename_list("loras")
+        lora_files = get_filename_list("loras")
         lora_files = ["none"] + lora_files  # Add "none" as the first option
         return {
             "required": {
