@@ -368,23 +368,23 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
         self._step_index = None
         self._begin_index = None
 
-        logger.info(f"FlowMatchLCMScheduler num_inference_steps: {self.num_inference_steps}")
-        logger.info(f"FlowMatchLCMScheduler Timesteps: {self.timesteps}")
-        logger.info(f"FlowMatchLCMScheduler Sigmas: {self.sigmas}")
+        # logger.info(f"FlowMatchLCMScheduler num_inference_steps: {self.num_inference_steps}")
+        # logger.info(f"FlowMatchLCMScheduler Timesteps: {self.timesteps}")
+        # logger.info(f"FlowMatchLCMScheduler Sigmas: {self.sigmas}")
 
     def index_for_timestep(self, timestep, schedule_timesteps=None):
         if schedule_timesteps is None:
             schedule_timesteps = self.timesteps
 
-        logger.info(f"FlowMatchLCMScheduler.index_for_timestep Timestep: {timestep}, Schedule Timesteps: {schedule_timesteps}")
+        # logger.info(f"FlowMatchLCMScheduler.index_for_timestep Timestep: {timestep}, Schedule Timesteps: {schedule_timesteps}")
         
         # Log the difference for debugging
         differences = torch.abs(schedule_timesteps - timestep)
-        logger.info(f"FlowMatchLCMScheduler.index_for_timestep Differences: {differences}")
+        # logger.info(f"FlowMatchLCMScheduler.index_for_timestep Differences: {differences}")
 
         # indices = (schedule_timesteps == timestep).nonzero()
         indices = (torch.abs(schedule_timesteps - timestep) < 1e-6).nonzero()
-        logger.info(f"FlowMatchLCMScheduler.index_for_timestep Indices: {indices}")
+        # logger.info(f"FlowMatchLCMScheduler.index_for_timestep Indices: {indices}")
 
         # if indices.numel() == 0:
         #     raise ValueError(f"FlowMatchLCMScheduler.index_for_timestep Timestep {timestep} not found in schedule_timesteps.")
@@ -392,9 +392,9 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
         if indices.numel() == 0:
             # If no exact match is found, find the closest value
             closest_index = torch.argmin(differences).item()
-            logger.warning(f"No exact match found for timestep {timestep}. Using closest value at index {closest_index}.")
+            # logger.warning(f"No exact match found for timestep {timestep}. Using closest value at index {closest_index}.")
             indices = torch.tensor([[closest_index]], device=schedule_timesteps.device, dtype=torch.int64)
-            logger.info(f"FlowMatchLCMScheduler.index_for_timestep Indices based on closest: {indices}")
+            # logger.info(f"FlowMatchLCMScheduler.index_for_timestep Indices based on closest: {indices}")
 
         # The sigma index that is taken for the **very** first `step`
         # is always the second index (or the last index if there is only 1)

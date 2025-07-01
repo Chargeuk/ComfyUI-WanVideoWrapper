@@ -81,7 +81,7 @@ def generate_timestep_matrix(
             min_ar_step = infer_step_num / gen_block
             assert ar_step >= min_ar_step, f"ar_step should be at least {math.ceil(min_ar_step)} in your setting"
         # print(num_frames, step_template, base_num_frames, ar_step, num_pre_ready, casual_block_size, num_frames_block, base_num_frames_block)
-        print(f"generate_timestep_matrix: num_frames:{num_frames}, num_iterations:{num_iterations}, step_template:{step_template.shape}, base_num_frames:{base_num_frames}, ar_step:{ar_step}, num_pre_ready:{num_pre_ready}, casual_block_size:{casual_block_size}, num_frames_block:{num_frames_block}, base_num_frames_block:{base_num_frames_block}")
+        # print(f"generate_timestep_matrix: num_frames:{num_frames}, num_iterations:{num_iterations}, step_template:{step_template.shape}, base_num_frames:{base_num_frames}, ar_step:{ar_step}, num_pre_ready:{num_pre_ready}, casual_block_size:{casual_block_size}, num_frames_block:{num_frames_block}, base_num_frames_block:{base_num_frames_block}")
         step_template = torch.cat(
             [
                 torch.tensor([999], dtype=torch.int64, device=step_template.device),
@@ -107,7 +107,7 @@ def generate_timestep_matrix(
                 else:
                     new_row[i] = new_row[i - 1] - ar_step
             new_row = new_row.clamp(0, num_iterations)
-            print(f"generate_timestep_matrix new_row[{row_count}]: {new_row}")
+            # print(f"generate_timestep_matrix new_row[{row_count}]: {new_row}")
             update_mask.append(
                 (new_row != pre_row) & (new_row != num_iterations)
             )  # False: no need to update， True: need to update
@@ -140,7 +140,7 @@ def generate_timestep_matrix(
             step_matrix = step_matrix.unsqueeze(-1).repeat(1, 1, casual_block_size).flatten(1).contiguous()
             valid_interval = [(s * casual_block_size, e * casual_block_size) for s, e in valid_interval]
 
-        print(f"generate_timestep_matrix = step_matrix: {step_matrix.shape}, step_index: {step_index.shape}, step_update_mask: {step_update_mask.shape}, valid_interval: {valid_interval}")
+        # print(f"generate_timestep_matrix = step_matrix: {step_matrix.shape}, step_index: {step_index.shape}, step_update_mask: {step_update_mask.shape}, valid_interval: {valid_interval}")
         return step_matrix, step_index, step_update_mask, valid_interval
 
 #region Sampler
@@ -580,7 +580,7 @@ class WanVideoDiffusionForcingSampler:
             pass
 
         #region main loop start
-        print(f"denoising_multiplier: {denoising_multiplier}, denoising_multiplier_end:{denoising_multiplier_end}, denoising_skew: {denoising_skew}")
+        # print(f"denoising_multiplier: {denoising_multiplier}, denoising_multiplier_end:{denoising_multiplier_end}, denoising_skew: {denoising_skew}")
         for i, timestep_i in enumerate(tqdm(step_matrix)):
             # Adjust usedDenoising based on denoising_skew
             progress = i / (len(step_matrix) - 1)  # Normalized progress through the loop (0 to 1)
@@ -601,7 +601,7 @@ class WanVideoDiffusionForcingSampler:
                     timestep = timestep_i[None, valid_interval_start:valid_interval_end].clone()
                     # Modify timestep to remove more noise
                     timestep = timestep * usedDenoising
-                    print(f"\nSampling frame {i} with timestep {timestep_i}, progress: {progress}, usedDenoising: {usedDenoising}, transition_factor: {transition_factor}, denoising_multiplier: {denoising_multiplier}, denoising_multiplier_end:{denoising_multiplier_end}, denoising_skew: {denoising_skew}")
+                    # print(f"\nSampling frame {i} with timestep {timestep_i}, progress: {progress}, usedDenoising: {usedDenoising}, transition_factor: {transition_factor}, denoising_multiplier: {denoising_multiplier}, denoising_multiplier_end:{denoising_multiplier_end}, denoising_skew: {denoising_skew}")
                     latent_model_input = latents[:, valid_interval_start:valid_interval_end, :, :].clone()
                     if addnoise_condition > 0 and valid_interval_start < prefix_video_latent_length:
                         noise_factor = 0.001 * addnoise_condition
@@ -632,11 +632,11 @@ class WanVideoDiffusionForcingSampler:
                     raise
 
                 try:
-                    print(f"timestep:{i}, denoising_multiplier: {denoising_multiplier}, valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
+                    # print(f"timestep:{i}, denoising_multiplier: {denoising_multiplier}, valid_interval_start: {valid_interval_start}, valid_interval_end: {valid_interval_end}, noise_pred shape: {noise_pred.shape}, latents shape: {latents.shape}")
                     for idx in range(valid_interval_start, valid_interval_end):
                         if update_mask_i[idx].item():
-                            print(f"Sampling frame {idx} with timestep {timestep_i[idx]}. ")
-                            print(f"Sampling frame {idx} with timestep {timestep_i[idx]}. ")
+                            # print(f"Sampling frame {idx} with timestep {timestep_i[idx]}. ")
+                            # print(f"Sampling frame {idx} with timestep {timestep_i[idx]}. ")
                             latents[:, idx] = sample_schedulers[idx].step(
                                 noise_pred[:, idx - valid_interval_start],
                                 timestep_i[idx],
@@ -1239,10 +1239,10 @@ class WanVideoLoopingDiffusionForcingSampler:
         original_height, original_width = image.shape[1], image.shape[2]
         # if we are not actually scaling, just return the original image
         if width == original_width and height == original_height:
-            print(f"no scaling needed from {original_width}x{original_height} to {width}x{height}")
+            # print(f"no scaling needed from {original_width}x{original_height} to {width}x{height}")
             return image
 
-        print(f"scaling from {original_width}x{original_height} to {width}x{height}")
+        # print(f"scaling from {original_width}x{original_height} to {width}x{height}")
 
         # Move dimensions for processing
         samples = image.movedim(-1, 1)
