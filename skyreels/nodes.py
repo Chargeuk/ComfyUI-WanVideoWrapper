@@ -745,17 +745,19 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
                 "denoising_multiplier_end": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive at the end of the video"}),
                 "denoising_skew": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.001, "tooltip": "How quickly do we transition from denoising_multiplier to denoising_multiplier_end. 0.0=linear."}),
-                "prefix_denoise_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How much the provided prefix_samples are processed prior to use."}),
+                "prefix_denoise_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "How much the provided prefix_samples are processed prior to use."}),
                 "prefix_denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
                 "prefix_denoising_multiplier_end": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive at the end of the video"}),
                 "prefix_steps": ("INT", {"default": 6, "min": 1}),
                 "prefix_shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                "prefix_frame_count": ("INT", {"default": 1, "min": 1}),
             }
         }
 
     RETURN_TYPES = ("LATENT", "LATENT", "LATENT", "IMAGE")
-    RETURN_NAMES = ("samples", "prefix_samples", "generated_samples","images")
+    RETURN_NAMES = ("samples", "prefix_samples", "generated_prefix_samples", "generated_samples","images")
     OUTPUT_IS_LIST = (
+        False,
         False,
         False,
         False,
@@ -774,7 +776,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
-                prefix_shift=None):
+                prefix_shift=None, prefix_frame_count=1):
         vae_stride = (4, 8, 8)
         if cache_args2 is None:
             cache_args2 = cache_args
@@ -862,11 +864,18 @@ class WanVideoLoopingDiffusionForcingSampler:
             prefix_samples = None
 
         if (prefix_samples):
+            generated_prefix_samples = prefix_samples
             prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
             prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
 
             if prefix_denoise_strength > 0.0:
                 print(f"Prefix samples provided, denoising with strength {prefix_denoise_strength}")
+                if prefix_frame_count > prefix_sample_num_frames:
+                    print(f"Prefix frame count {prefix_frame_count} is greater than prefix sample frames {prefix_sample_num_frames}, adjusting to {prefix_sample_num_frames}")
+                    # we need to increase the prefix_samples number of latents and frames to match the prefix sample frames
+                    
+
+                
                 # we need to process the prefix samples with the denoising strength
                 # Create a new instance of WanVideoDiffusionForcingSampler
                 sampler = WanVideoDiffusionForcingSampler()
@@ -883,7 +892,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                     model=model,
                     text_embeds=text_embeds,
                     image_embeds=batch_image_embeds,
-                    shift=shift,
+                    shift=prefix_shift,
                     fps=fps,
                     steps=prefix_steps,
                     addnoise_condition=addnoise_condition,
@@ -903,6 +912,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                     denoising_multiplier_end=prefix_denoising_multiplier_end,
                 )
                 prefix_samples = result[0]
+                generated_prefix_samples = prefix_samples
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
                 prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
 
@@ -931,10 +941,15 @@ class WanVideoLoopingDiffusionForcingSampler:
                 # we need to reduce the prefix_samples
                 prefix_samples = {"samples": prefix_samples["samples"][:,  :,  -overlap_number_of_latents:]}
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
-                prefix_sample_num_frames = prefix_sample_num_latents * vae_stride[0]
+                prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
+
+            if prefix_sample_num_frames > prefix_frame_count:
+                # we need to reduce the prefix_samples
+                prefix_samples = {"samples": prefix_samples["samples"][:, :, :prefix_frame_count]}
+                prefix_sample_num_latents = prefix_samples["samples"].shape[2]
+                prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
 
             prefix_sample_shape = prefix_samples["samples"].shape
-
 
 
         sample_shape = None
@@ -1285,6 +1300,8 @@ class WanVideoLoopingDiffusionForcingSampler:
             }, {
             "samples": prefix_samples_output['samples'] if prefix_samples_output else None,
             },{
+            "samples": generated_prefix_samples['samples'] if generated_prefix_samples else None,
+            }, {
             "samples": generated_samples_output['samples'] if generated_samples_output else None,
             }, 
             generated_images,)
