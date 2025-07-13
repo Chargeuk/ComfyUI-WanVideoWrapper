@@ -32,6 +32,9 @@ from comfy.utils import load_torch_file, ProgressBar, common_upscale
 from comfy.clip_vision import clip_preprocess, ClipVisionModel
 from comfy.cli_args import args, LatentPreviewMethod
 
+import node_helpers
+from nodes import MAX_RESOLUTION
+
 try:
     # Get the absolute path to the ComfyUI-ReActor folder
     comfyui_reactor_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'ComfyUI-ReActor'))
@@ -59,6 +62,43 @@ except Error as e:
 
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
+
+
+
+def colormatch(image_ref, image_target, method, strength=1.0):
+    try:
+        from color_matcher import ColorMatcher
+    except:
+        raise Exception("Can't import color-matcher, did you install requirements.txt? Manual install: pip install color-matcher")
+    cm = ColorMatcher()
+    image_ref = image_ref.cpu()
+    image_target = image_target.cpu()
+    batch_size = image_target.size(0)
+    out = []
+    images_target = image_target.squeeze()
+    images_ref = image_ref.squeeze()
+
+    image_ref_np = images_ref.numpy()
+    images_target_np = images_target.numpy()
+
+    if image_ref.size(0) > 1 and image_ref.size(0) != batch_size:
+        raise ValueError("ColorMatch: Use either single reference image or a matching batch of reference images.")
+
+    for i in range(batch_size):
+        image_target_np = images_target_np if batch_size == 1 else images_target[i].numpy()
+        image_ref_np_i = image_ref_np if image_ref.size(0) == 1 else images_ref[i].numpy()
+        try:
+            image_result = cm.transfer(src=image_target_np, ref=image_ref_np_i, method=method)
+        except BaseException as e:
+            print(f"Error occurred during transfer: {e}")
+            break
+        # Apply the strength multiplier
+        image_result = image_target_np + strength * (image_result - image_target_np)
+        out.append(torch.from_numpy(image_result))
+        
+    out = torch.stack(out, dim=0).to(torch.float32)
+    out.clamp_(0, 1)
+    return (out,)
 
 def generate_timestep_matrix(
         num_frames,
@@ -738,6 +778,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "encode_latent_Args": ("WANENCODEARGS", ),
                 "decode_latent_Args": ("WANDECODEARGS", ),
                 "model_upscale_Args": ("WANMODELUPSCALEARGS", ),
+                "color_match_args": ("COLOURMATCHARGS", ),
                 "use_model_upscale": ("BOOLEAN", {"default": True, "tooltip": "Use provided upscale model to upscale the generated video"}),
                 "simple_scale_Args": ("WANSIMPLESCALEARGS", ),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
@@ -755,14 +796,16 @@ class WanVideoLoopingDiffusionForcingSampler:
             }
         }
 
-    RETURN_TYPES = ("LATENT", "LATENT", "LATENT", "IMAGE")
-    RETURN_NAMES = ("samples", "prefix_samples", "generated_prefix_samples", "generated_samples","images")
+    RETURN_TYPES = ("LATENT", "LATENT", "LATENT", "LATENT", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("samples", "prefix_samples", "generated_prefix_samples", "generated_samples","images","color_match_source","generated_first_frame",)
     OUTPUT_IS_LIST = (
         False,
         False,
         False,
         False,
-        False
+        False,
+        False,
+        False,
     )
     FUNCTION = "process"
     CATEGORY = "VTS"
@@ -777,7 +820,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
-                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None):
+                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None):
         vae_stride = (4, 8, 8)
         if cache_args2 is None:
             cache_args2 = cache_args
@@ -833,6 +876,29 @@ class WanVideoLoopingDiffusionForcingSampler:
             upscale_model = model_upscale_Args.get("upscale_model", upscale_model)
             upscale_model_device_preference = model_upscale_Args.get("device_preference", upscale_model_device_preference)
 
+        color_match_source = None
+        generated_first_frame = None
+        color_match_used_source = 'disable-match'
+        color_match_method = 'hm-mvgd-hm'
+        color_match_strength = 0.0
+        if color_match_args:
+            print(f"Color match args is provided, using color match")
+            color_match_used_source = color_match_args.get("used_source", color_match_used_source)
+            if color_match_used_source != 'disable-match':
+                print(f"Color match source is {color_match_used_source}, still using color match")
+                if color_match_used_source == 'provided':
+                    color_match_source = color_match_args.get("source", color_match_source)
+                    if color_match_source is None:
+                        color_match_used_source = 'first-frame'
+                        print(f"WARNING - Color match source is None, using first frame as source")
+                color_match_method = color_match_args.get("color_match_method", color_match_method)
+                color_match_strength = color_match_args.get("color_match_strength", color_match_strength)
+                print(f"Color match method is {color_match_method}, strength is {color_match_strength}, used source is {color_match_used_source}")
+            else:
+                print(f"Color match is set to disable-match, not using color match")
+        else:
+            print(f"Color match args is not provided, not using color match")
+
         simple_scale_method = "bilinear"
         simple_crop_method = "disabled"
         if simple_scale_Args:
@@ -860,6 +926,7 @@ class WanVideoLoopingDiffusionForcingSampler:
             print(f"WanVideoLoopingDiffusionForcingSampler Using VAE")
             wanVideoDecode = WanVideoDecode()
             if reencode_samples == "Re-encode":
+                print(f"WanVideoLoopingDiffusionForcingSampler Re-encoding samples")
                 # we need to reencode the samples
                 wanVideoEncode = WanVideoEncode()
 
@@ -876,9 +943,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 if prefix_frame_count > prefix_sample_num_frames:
                     print(f"Prefix frame count {prefix_frame_count} is greater than prefix sample frames {prefix_sample_num_frames}, adjusting to {prefix_sample_num_frames}")
                     # we need to increase the prefix_samples number of latents and frames to match the prefix sample frames
-                    
 
-                
                 # we need to process the prefix samples with the denoising strength
                 # Create a new instance of WanVideoDiffusionForcingSampler
                 sampler = WanVideoDiffusionForcingSampler()
@@ -920,7 +985,6 @@ class WanVideoLoopingDiffusionForcingSampler:
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
                 prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
 
-
             if prefix_samples_control == "Merge":
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
                 prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
@@ -953,8 +1017,38 @@ class WanVideoLoopingDiffusionForcingSampler:
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2]
                 prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
 
+            if wanVideoDecode is not None and wanVideoEncode is not None and color_match_strength > 0.0:
+                # we need to decode the prefix samples
+                print(f"Decoding prefix samples with wanVideoDecode")
+                decoded_prefix_samples = wanVideoDecode.decode(vae, prefix_samples, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
+                used_decoded_sample_images = decoded_prefix_samples[0]
+                print(f"Decoded prefix samples with wanVideoDecode. shape: {used_decoded_sample_images.shape}")
+                generated_first_frame = used_decoded_sample_images[0].unsqueeze(0).clone()
+                if color_match_source is None:
+                    # use the first frame of the decoded prefix samples as the color match source
+                    color_match_source = used_decoded_sample_images[0].unsqueeze(0).clone()
+                # we need to color match the decoded_sample_images
+                color_match_result = colormatch(color_match_source, used_decoded_sample_images, color_match_method, color_match_strength)
+                used_decoded_sample_images = color_match_result[0]
+                # we need to reencode the decoded prefix samples
+                print(f"Re-encoding decoded prefix samples with wanVideoEncode")
+                encoded_samples = wanVideoEncode.encode(
+                    vae, 
+                    used_decoded_sample_images, 
+                    encodeTile, 
+                    encodeTileX, 
+                    encodeTileY, 
+                    encodeTileStrideX, 
+                    encodeTileStrideY,
+                    encodeAugStrength,
+                    encodeLatentStrength,
+                    encodeMask,
+                )
+                prefix_samples = {"samples": encoded_samples[0]["samples"]}
+            else:
+                print(f"Not decoding prefix samples with wanVideoDecode for colormatch, using provided prefix_samples")
+            
             prefix_sample_shape = prefix_samples["samples"].shape
-
 
         sample_shape = None
         number_of_sample_latents = 0
@@ -1177,6 +1271,18 @@ class WanVideoLoopingDiffusionForcingSampler:
                     elapsed_time = end_time - start_time
                     print(f"Execution time for model upscale block: {elapsed_time:.4f} seconds")
 
+                if color_match_strength > 0.0:       
+                    start_time = time.time()  # Start timing             
+                    if color_match_source is None:
+                        # use the first frame of the decoded samples as the color match source
+                        color_match_source = used_decoded_sample_images["samples"][:, 0, :, :, :].clone()
+                    print(f"Color matching prefix samples with WanColorMatch")
+                    color_match_result = colormatch(color_match_source, used_decoded_sample_images, color_match_method, color_match_strength)
+                    used_decoded_sample_images = color_match_result[0]
+                    end_time = time.time()  # End timing
+                    elapsed_time = end_time - start_time
+                    print(f"Execution time for color matching block: {elapsed_time:.4f} seconds")
+
                 if generated_images is None:
                     print(f"WanVideoLoopingDiffusionForcingSampler creating generated_images")
                     generated_images = used_decoded_sample_images
@@ -1244,9 +1350,6 @@ class WanVideoLoopingDiffusionForcingSampler:
             else:
                 prefix_samples = None
                 prefix_sample_num_latents = 0
-
-            # if overlap_length <= 0:
-            #     prefix_samples = None
             
             if prefix_samples is not None and prefix_samples["samples"] is not None:
                 if wanVideoDecode is not None and wanVideoEncode is not None and vae is not None:
@@ -1308,7 +1411,9 @@ class WanVideoLoopingDiffusionForcingSampler:
             }, {
             "samples": generated_samples_output['samples'] if generated_samples_output else None,
             }, 
-            generated_images,)
+            generated_images,
+            color_match_source,
+            generated_first_frame,)
 
 
     def scale(self, image, width, height, upscale_method, crop):

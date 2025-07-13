@@ -124,6 +124,43 @@ class WanFaceRestoreArgs_VTS:
 
     def setargs(self, **kwargs):
         return (kwargs, )
+    
+class WanColorMatchArgs_VTS:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "source": ("IMAGE",),
+                "used_source": (
+                [   
+                    'disable-match',
+                    'provided',
+                    'first-frame', 
+                ], {
+                "default": 'first-frame'
+                }),  
+                "color_match_method": (
+                [   
+                    'mkl',
+                    'hm', 
+                    'reinhard', 
+                    'mvgd', 
+                    'hm-mvgd-hm', 
+                    'hm-mkl-hm',
+                ], {
+                "default": 'hm-mvgd-hm'
+                }),  
+                "color_match_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),          
+            },
+        }
+    RETURN_TYPES = ("COLOURMATCHARGS",)
+    RETURN_NAMES = ("color_match_args",)
+    FUNCTION = "setargs"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Settings for color matching while looping"
+
+    def setargs(self, **kwargs):
+        return (kwargs, )
 
 #region VideoDecode
 class WanVideoDecodeSettings_VTS:
@@ -4172,6 +4209,7 @@ NODE_CLASS_MAPPINGS = {
     "LoadWanVideoClipTextEncoder": LoadWanVideoClipTextEncoder,
     "WanVideoEncode": WanVideoEncode,
     "WanFaceRestoreArgs_VTS": WanFaceRestoreArgs_VTS,
+    "WanColorMatchArgs_VTS": WanColorMatchArgs_VTS,
     "WanVideoDecodeSettings_VTS": WanVideoDecodeSettings_VTS,
     "WanVideoEncodeSettings_VTS": WanVideoEncodeSettings_VTS,
     "WanVideoUpscaleWithModelSettings_VTS": WanVideoUpscaleWithModelSettings_VTS,
@@ -4220,6 +4258,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadWanVideoClipTextEncoder": "Load WanVideo Clip Encoder",
     "WanVideoEncode": "WanVideo Encode",
     "WanFaceRestoreArgs_VTS": "WanFace Restore Args VTS",
+    "WanColorMatchArgs_VTS": "WanColor Match Args VTS",
     "WanVideoDecodeSettings_VTS": "WanVideo Decode Settings VTS",
     "WanVideoEncodeSettings_VTS": "WanVideo Encode Settings VTS",
     "WanVideoUpscaleWithModelSettings_VTS": "WanVideo Upscale With Model Settings VTS",
