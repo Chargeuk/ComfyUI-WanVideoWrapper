@@ -751,6 +751,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "prefix_steps": ("INT", {"default": 6, "min": 1}),
                 "prefix_shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "prefix_frame_count": ("INT", {"default": 1, "min": 1}),
+                "prefix_noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
             }
         }
 
@@ -776,7 +777,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
-                prefix_shift=None, prefix_frame_count=1):
+                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None):
         vae_stride = (4, 8, 8)
         if cache_args2 is None:
             cache_args2 = cache_args
@@ -788,6 +789,8 @@ class WanVideoLoopingDiffusionForcingSampler:
             prefix_steps = steps
         if prefix_shift is None:
             prefix_shift = shift
+        if prefix_noise_reduction_factor is None:
+            prefix_noise_reduction_factor = noise_reduction_factor
         prefix_samples_output = None
         generated_samples_output = None
         generated_images = None
@@ -908,6 +911,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                     cache_args=cache_args,
                     experimental_args=experimental_args,
                     unianimate_poses=unianimate_poses,
+                    noise_reduction_factor=prefix_noise_reduction_factor,
                     denoising_multiplier=prefix_denoising_multiplier,
                     denoising_multiplier_end=prefix_denoising_multiplier_end,
                 )
