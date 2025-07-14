@@ -1244,12 +1244,8 @@ class WanVideoLoopingDiffusionForcingSampler:
 
                 decoded_samples = wanVideoDecode.decode(vae, batch_result_samples, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
                 decoded_sample_images = decoded_samples[0]
-                used_decoded_sample_images = None
-                if remaining_frames > 0:
-                    used_decoded_sample_images = decoded_sample_images[-(number_of_frames_for_batch):-1]  # Drop the last image as it will be decoded and added in the next loop
-                else:
-                    used_decoded_sample_images = decoded_sample_images[-number_of_frames_for_batch:]
-
+                used_decoded_sample_images = decoded_samples[0]
+                
                 if restore_face and use_restore_face and reactor:
                     start_time = time.time()  # Start timing
                     faceDetectionModel = restore_face["facedetection"]
@@ -1284,6 +1280,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                     print(f"Execution time for color matching block: {elapsed_time:.4f} seconds")
 
                 if wanVideoEncode is not None:
+                    start_time = time.time()  # Start timing
                     print(f"WanVideoLoopingDiffusionForcingSampler re-encoding used_decoded_sample_images with wanVideoEncode")
                     # we need to re-encode the decoded samples
                     encoded_samples = wanVideoEncode.encode(
@@ -1298,7 +1295,15 @@ class WanVideoLoopingDiffusionForcingSampler:
                         encodeLatentStrength,
                         encodeMask,
                     )
+                    end_time = time.time()  # End timing
+                    elapsed_time = end_time - start_time
+                    print(f"Execution time for re-encoding block: {elapsed_time:.4f} seconds")
                     batch_result_samples = encoded_samples[0]
+
+                if remaining_frames > 0:
+                    used_decoded_sample_images = used_decoded_sample_images[-(number_of_frames_for_batch):-1]  # Drop the last image as it will be decoded and added in the next loop
+                else:
+                    used_decoded_sample_images = used_decoded_sample_images[-number_of_frames_for_batch:]
 
                 if generated_images is None:
                     print(f"WanVideoLoopingDiffusionForcingSampler creating generated_images")
