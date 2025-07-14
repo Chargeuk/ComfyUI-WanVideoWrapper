@@ -1275,13 +1275,30 @@ class WanVideoLoopingDiffusionForcingSampler:
                     start_time = time.time()  # Start timing             
                     if color_match_source is None:
                         # use the first frame of the decoded samples as the color match source
-                        color_match_source = used_decoded_sample_images["samples"][:, 0, :, :, :].clone()
+                        color_match_source = used_decoded_sample_images[0].unsqueeze(0).clone()
                     print(f"Color matching prefix samples with WanColorMatch")
                     color_match_result = colormatch(color_match_source, used_decoded_sample_images, color_match_method, color_match_strength)
                     used_decoded_sample_images = color_match_result[0]
                     end_time = time.time()  # End timing
                     elapsed_time = end_time - start_time
                     print(f"Execution time for color matching block: {elapsed_time:.4f} seconds")
+
+                if wanVideoEncode is not None:
+                    print(f"WanVideoLoopingDiffusionForcingSampler re-encoding used_decoded_sample_images with wanVideoEncode")
+                    # we need to re-encode the decoded samples
+                    encoded_samples = wanVideoEncode.encode(
+                        vae, 
+                        used_decoded_sample_images, 
+                        encodeTile, 
+                        encodeTileX, 
+                        encodeTileY, 
+                        encodeTileStrideX, 
+                        encodeTileStrideY,
+                        encodeAugStrength,
+                        encodeLatentStrength,
+                        encodeMask,
+                    )
+                    batch_result_samples = encoded_samples[0]
 
                 if generated_images is None:
                     print(f"WanVideoLoopingDiffusionForcingSampler creating generated_images")
