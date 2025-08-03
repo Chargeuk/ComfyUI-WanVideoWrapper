@@ -3,7 +3,7 @@ import sys
 import random
 import torch
 import gc
-from ..utils import log, print_memory, fourier_filter
+from ..utils import log, print_memory, fourier_filter, optimized_scale, setup_radial_attention, compile_model
 import math
 from tqdm import tqdm
 import numpy as np
@@ -21,8 +21,13 @@ from comfy import model_management
 from ..wanvideo.modules.model import rope_params
 from ..wanvideo.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-from ..wanvideo.utils.scheduling_flow_match_lcm import FlowMatchLCMScheduler
+
 from ..nodes import WanVideoDecode, WanVideoEncode, optimized_scale
+
+
+from ..fp8_optimization import convert_linear_with_lora_and_scale, remove_lora_from_module
+from ..wanvideo.schedulers.scheduling_flow_match_lcm import FlowMatchLCMScheduler
+from ..gguf.gguf import set_lora_params
 from einops import rearrange
 
 from ..enhance_a_video.globals import disable_enhance
@@ -234,6 +239,23 @@ class WanVideoDiffusionForcingSampler:
         dtype = model["dtype"]
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+
+        gguf = model["gguf"]
+        transformer_options = patcher.model_options.get("transformer_options", None)
+
+        if len(patcher.patches) != 0 and transformer_options.get("linear_with_lora", False) is True:
+            log.info(f"Using {len(patcher.patches)} LoRA weight patches for WanVideo model")
+            if not gguf:
+                convert_linear_with_lora_and_scale(transformer, patches=patcher.patches)
+            else:
+                set_lora_params(transformer, patcher.patches)
+        else:
+            log.info("Unloading all LoRAs")
+            remove_lora_from_module(transformer)
+
+        #torch.compile
+        if model["auto_cpu_offload"] is False:
+            transformer = compile_model(transformer, model["compile_args"])
         
         timestep_steps = int(steps/denoise_strength)
 
@@ -435,19 +457,18 @@ class WanVideoDiffusionForcingSampler:
         callback = prepare_callback(patcher, steps)
 
         #blockswap init        
-        transformer_options = patcher.model_options.get("transformer_options", None)
         if transformer_options is not None:
             block_swap_args = transformer_options.get("block_swap_args", None)
 
         if block_swap_args is not None:
-            transformer.use_non_blocking = block_swap_args.get("use_non_blocking", True)
+            transformer.use_non_blocking = block_swap_args.get("use_non_blocking", False)
             for name, param in transformer.named_parameters():
                 if "block" not in name:
                     param.data = param.data.to(device)
                 elif block_swap_args["offload_txt_emb"] and "txt_emb" in name:
-                    param.data = param.data.to(offload_device, non_blocking=transformer.use_non_blocking)
+                    param.data = param.data.to(offload_device)
                 elif block_swap_args["offload_img_emb"] and "img_emb" in name:
-                    param.data = param.data.to(offload_device, non_blocking=transformer.use_non_blocking)
+                    param.data = param.data.to(offload_device)
 
             transformer.block_swap(
                 block_swap_args["blocks_to_swap"] - 1 ,
@@ -499,6 +520,9 @@ class WanVideoDiffusionForcingSampler:
         self.teacache_state = [None, None]
         self.teacache_state_source = [None, None]
         self.teacache_states_context = []
+
+        if transformer.attention_mode == "radial_sage_attention":
+            setup_radial_attention(transformer, transformer_options, latents, seq_len, latent_video_length)
 
 
         use_cfg_zero_star, use_fresca = False, False

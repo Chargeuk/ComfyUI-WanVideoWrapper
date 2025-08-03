@@ -16,11 +16,11 @@ except ModuleNotFoundError:
 try:
     from sageattention import sageattn
     @torch.compiler.disable()
-    def sageattn_func(q, k, v, attn_mask=None, dropout_p=0, is_causal=False):
+    def sageattn_func(q, k, v, attn_mask=None, dropout_p=0, is_causal=False, tensor_layout="HND"):
         if q.dtype == torch.float32:
-            return sageattn(q.to(torch.float16), k.to(torch.float16), v.to(torch.float16), attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal).to(torch.float32)
+            return sageattn(q.to(torch.float16), k.to(torch.float16), v.to(torch.float16), attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, tensor_layout=tensor_layout).to(torch.float32)
         else:
-            return sageattn(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
+            return sageattn(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, tensor_layout=tensor_layout)
 except Exception as e:
     print(f"Warning: Could not load sageattention: {str(e)}")
     if isinstance(e, ModuleNotFoundError):
@@ -28,6 +28,12 @@ except Exception as e:
     elif isinstance(e, ImportError) and "DLL" in str(e):
         print("sageattention DLL loading error")
     sageattn_func = None
+
+try:
+    from sageattn import sageattn_blackwell
+except:
+    SAGE3_AVAILABLE = False
+
 import warnings
 
 __all__ = [
@@ -181,30 +187,13 @@ def attention(
             version=fa_version,
         )
     elif attention_mode == 'sdpa':
-        # if q_lens is not None or k_lens is not None:
-        #     warnings.warn(
-        #         'Padding mask is disabled when using scaled_dot_product_attention. It can have a significant impact on performance.'
-        #     )
-        attn_mask = None
-
-        q = q.transpose(1, 2)#.to(dtype)
-        k = k.transpose(1, 2)#.to(dtype)
-        v = v.transpose(1, 2)#.to(dtype)
-
-        out = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
-
-        out = out.transpose(1, 2).contiguous()
-        return out
-    elif attention_mode == 'sageattn':
-        attn_mask = None
-
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        out = sageattn_func(
-            q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
-
-        out = out.transpose(1, 2).contiguous()
-        return out
+        return torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2).contiguous()
+    elif attention_mode == 'sageattn_3':
+        return sageattn_blackwell(
+            q.transpose(1,2), 
+            k.transpose(1,2), 
+            v.transpose(1,2), 
+            per_block_mean=False #seems necessary for reasonable VRAM usage, not sure of other implications
+            ).transpose(1,2).contiguous()
+    else:
+        return sageattn_func(q, k, v, tensor_layout="NHD").contiguous()
