@@ -19,7 +19,7 @@ from spandrel.__helpers.size_req import pad_tensor
 from comfy import model_management
 
 from ..wanvideo.modules.model import rope_params
-from ..wanvideo.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from ..wanvideo.schedulers.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 from ..nodes import WanVideoDecode, WanVideoEncode, optimized_scale

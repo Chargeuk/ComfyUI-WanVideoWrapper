@@ -271,13 +271,8 @@ class WanVideoSetBlockSwap:
         return {
             "required": {
                 "model": ("WANVIDEOMODEL", ),
-            "path": folder_paths.get_full_path("loras", lora),
-        lora_files = folder_paths.get_filename_list("loras")
                },
             "optional": {
-                "vace_model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' VACE model to use when not using model that has it included"}),
-            "path": folder_paths.get_full_path("diffusion_models", vace_model),
-                "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
                 "block_swap_args": ("BLOCKSWAPARGS", ),
                }
         }
@@ -289,7 +284,6 @@ class WanVideoSetBlockSwap:
 
     def loadmodel(self, model, block_swap_args=None):
         if block_swap_args is None:
-        model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
             return (model,)
         patcher = model.clone()
         if 'transformer_options' not in patcher.model_options:
