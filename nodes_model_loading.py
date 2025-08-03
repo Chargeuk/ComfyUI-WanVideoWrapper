@@ -29,6 +29,24 @@ try:
 except:
     PromptServer = None
 
+def get_filename_list(folder_name: str) -> list[str]:
+    result = folder_paths.get_filename_list(folder_name)
+    # convert to linux paths rather than windows paths
+    result = [f.replace("\\", "/") for f in result]
+    return result
+
+def get_full_path(folder_name: str, filename: str) -> str | None:
+    # convert the folder_name, which is a path to a path using this operating system's path seperator as it may be wrong
+    folder_name_for_this_os = folder_name.replace("\\", os.sep).replace("/", os.sep)
+    filename_for_this_os = filename.replace("\\", os.sep).replace("/", os.sep)
+    return folder_paths.get_full_path(folder_name_for_this_os, filename_for_this_os)
+
+def get_full_path_or_raise(folder_name: str, filename: str) -> str:
+    result = get_full_path(folder_name, filename)
+    if result is None:
+        raise FileNotFoundError(f"Model in folder '{folder_name}' with filename '{filename}' not found.")
+    return result
+
 #from city96's gguf nodes
 def update_folder_names_and_paths(key, targets=[]):
     # check for existing key
@@ -345,7 +363,7 @@ class WanVideoLoraSelect:
     def INPUT_TYPES(s):
         return {
             "required": {
-               "lora": (folder_paths.get_filename_list("loras"),
+               "lora": (get_filename_list("loras"),
                 {"tooltip": "LORA models are expected to be in ComfyUI/models/loras with .safetensors extension"}),
                 "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.0001, "tooltip": "LORA strength, set to 0.0 to unmerge the LORA"}),
             },
@@ -378,7 +396,7 @@ class WanVideoLoraSelect:
             return (loras_list,)
 
         try:
-            lora_path = folder_paths.get_full_path("loras", lora)
+            lora_path = get_full_path("loras", lora)
         except:
             lora_path = lora
 
@@ -437,7 +455,7 @@ class WanVideoLoraSelect:
 class WanVideoLoraSelectMulti:
     @classmethod
     def INPUT_TYPES(s):
-        lora_files = folder_paths.get_filename_list("loras")
+        lora_files = get_filename_list("loras")
         lora_files = ["none"] + lora_files  # Add "none" as the first option
         return {
             "required": {
@@ -485,7 +503,7 @@ class WanVideoLoraSelectMulti:
             if not lora_name or lora_name == "none" or s == 0.0:
                 continue
             loras_list.append({
-                "path": folder_paths.get_full_path("loras", lora_name),
+                "path": get_full_path("loras", lora_name),
                 "strength": s,
                 "name": lora_name.split(".")[0],
                 "blocks": blocks.get("selected_blocks", {}),
@@ -500,7 +518,7 @@ class WanVideoVACEModelSelect:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "vace_model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' VACE model to use when not using model that has it included"}),
+                "vace_model": (get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' VACE model to use when not using model that has it included"}),
             },
         }
 
@@ -512,7 +530,7 @@ class WanVideoVACEModelSelect:
 
     def getvacepath(self, vace_model):
         vace_model = {
-            "path": folder_paths.get_full_path("diffusion_models", vace_model),
+            "path": get_full_path("diffusion_models", vace_model),
         }
         return (vace_model,)
 
@@ -702,7 +720,7 @@ class WanVideoModelLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": (folder_paths.get_filename_list("unet_gguf") + folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
+                "model": (get_filename_list("unet_gguf") + get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
             "base_precision": (["fp32", "bf16", "fp16", "fp16_fast"], {"default": "bf16"}),
             "quantization": (["disabled", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2", "fp8_e4m3fn_fast_no_ffn", "fp8_e4m3fn_scaled", "fp8_e5m2_scaled"], {"default": "disabled", "tooltip": "optional quantization method"}),
@@ -782,7 +800,7 @@ class WanVideoModelLoader:
                 pass
  
 
-        model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
+        model_path = get_full_path_or_raise("diffusion_models", model)
       
         if not gguf:
             sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
@@ -1295,7 +1313,7 @@ class WanVideoVAELoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_name": (folder_paths.get_filename_list("vae"), {"tooltip": "These models are loaded from 'ComfyUI/models/vae'"}),
+                "model_name": (get_filename_list("vae"), {"tooltip": "These models are loaded from 'ComfyUI/models/vae'"}),
             },
             "optional": {
                 "precision": (["fp16", "fp32", "bf16"],
@@ -1316,7 +1334,7 @@ class WanVideoVAELoader:
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         #with open(os.path.join(script_directory, 'configs', 'hy_vae_config.json')) as f:
         #    vae_config = json.load(f)
-        model_path = folder_paths.get_full_path("vae", model_name)
+        model_path = get_full_path("vae", model_name)
         vae_sd = load_torch_file(model_path, safe_load=True)
 
         has_model_prefix = any(k.startswith("model.") for k in vae_sd.keys())
@@ -1340,7 +1358,7 @@ class WanVideoTinyVAELoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_name": (folder_paths.get_filename_list("vae_approx"), {"tooltip": "These models are loaded from 'ComfyUI/models/vae_approx'"}),
+                "model_name": (get_filename_list("vae_approx"), {"tooltip": "These models are loaded from 'ComfyUI/models/vae_approx'"}),
             },
             "optional": {
                 "precision": (["fp16", "fp32", "bf16"], {"default": "fp16"}), 
@@ -1358,7 +1376,7 @@ class WanVideoTinyVAELoader:
         from .taehv import TAEHV
 
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
-        model_path = folder_paths.get_full_path("vae_approx", model_name)
+        model_path = get_full_path("vae_approx", model_name)
         vae_sd = load_torch_file(model_path, safe_load=True)
         
         vae = TAEHV(vae_sd, parallel=parallel)
@@ -1372,7 +1390,7 @@ class LoadWanVideoT5TextEncoder:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_name": (folder_paths.get_filename_list("text_encoders"), {"tooltip": "These models are loaded from 'ComfyUI/models/text_encoders'"}),
+                "model_name": (get_filename_list("text_encoders"), {"tooltip": "These models are loaded from 'ComfyUI/models/text_encoders'"}),
                 "precision": (["fp32", "bf16"],
                     {"default": "bf16"}
                 ),
@@ -1396,7 +1414,7 @@ class LoadWanVideoT5TextEncoder:
 
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
 
-        model_path = folder_paths.get_full_path("text_encoders", model_name)
+        model_path = get_full_path("text_encoders", model_name)
         sd = load_torch_file(model_path, safe_load=True)
 
         if quantization == "disabled":
@@ -1485,7 +1503,7 @@ class LoadWanVideoClipTextEncoder:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_name": (folder_paths.get_filename_list("clip_vision") + folder_paths.get_filename_list("text_encoders"), {"tooltip": "These models are loaded from 'ComfyUI/models/clip_vision'"}),
+                "model_name": (get_filename_list("clip_vision") + get_filename_list("text_encoders"), {"tooltip": "These models are loaded from 'ComfyUI/models/clip_vision'"}),
                  "precision": (["fp16", "fp32", "bf16"],
                     {"default": "fp16"}
                 ),
@@ -1506,10 +1524,10 @@ class LoadWanVideoClipTextEncoder:
 
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
 
-        model_path = folder_paths.get_full_path("clip_vision", model_name)
+        model_path = get_full_path("clip_vision", model_name)
         # We also support legacy setups where the model is in the text_encoders folder
         if model_path is None:
-            model_path = folder_paths.get_full_path("text_encoders", model_name)
+            model_path = get_full_path("text_encoders", model_name)
         sd = load_torch_file(model_path, safe_load=True)
         if "log_scale" not in sd:
             raise ValueError("Invalid CLIP model, this node expectes the 'open-clip-xlm-roberta-large-vit-huge-14' model")
