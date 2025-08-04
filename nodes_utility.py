@@ -109,8 +109,18 @@ class WanVideoVACEStartToEndFrame:
 
     def process(self, num_frames, empty_frame_level, start_image=None, end_image=None, control_images=None, inpaint_mask=None, start_index=0, end_index=-1):
         
-        B, H, W, C = start_image.shape if start_image is not None else end_image.shape
-        device = start_image.device if start_image is not None else end_image.device
+        # Get dimensions and device from available images
+        if start_image is not None:
+            B, H, W, C = start_image.shape
+            device = start_image.device
+        elif end_image is not None:
+            B, H, W, C = end_image.shape
+            device = end_image.device
+        elif control_images is not None:
+            B, H, W, C = control_images.shape
+            device = control_images.device
+        else:
+            raise ValueError("At least one of start_image, end_image, or control_images must be provided")
 
         # Convert negative end_index to positive
         if end_index < 0:
