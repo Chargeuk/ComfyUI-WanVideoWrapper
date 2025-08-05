@@ -23,6 +23,7 @@ from .utils import(log, print_memory, apply_lora, clip_encode_image_tiled, fouri
 from .cache_methods.cache_methods import cache_report
 from .enhance_a_video.globals import set_enhance_weight, set_num_frames
 from .taehv import TAEHV
+from .nodes_utility import WanVideoVACEStartToEndFrame
 
 from einops import rearrange
 
@@ -1515,6 +1516,7 @@ class WanVideoLoopingControlImagesOptions:
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength of the control signal"}),
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of the control signal"}),
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of the control signal"}),
+                "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE for control images"}),
             }
         }
 
@@ -1524,12 +1526,13 @@ class WanVideoLoopingControlImagesOptions:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Control images for a full video created by a looping Wan Video."
 
-    def process(self, control_images, strength=1.0, start_percent=0.0, end_percent=1.0):
+    def process(self, control_images, strength=1.0, start_percent=0.0, end_percent=1.0, tiled_vae=False):
         control_images_options = {
             "control_images": control_images,
             "strength": strength,
             "start_percent": start_percent,
             "end_percent": end_percent,
+            "tiled_vae": tiled_vae,
         }
 
         return (control_images_options,)
@@ -3370,6 +3373,91 @@ class WanVideoLoopingSampler:
     RETURN_NAMES = ("samples", "denoised_samples",)
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
+
+    def generateWanVaceEmbeds(
+            self,
+            numberOfNewFrames,
+            starting_images,
+            control_images,
+            controlImageStartindex,
+            controlImageEndIndex,
+            vae,
+            width,
+            height
+            ):
+        totalFramesToGenerate = numberOfNewFrames
+        if starting_images is not None:
+             B, H, W, C = starting_images.shape
+             totalFramesToGenerate += B
+        print(f"Generating VACE embeds for WanVideoLoopingSampler. numberOfNewFrames: {numberOfNewFrames}, totalFramesToGenerate: {totalFramesToGenerate}")
+        wanVideoVACEStartToEndFrame = WanVideoVACEStartToEndFrame()
+        startToendFrames = []
+        # iterate through each control_images item and generate the required images and masks
+        for i in range(len(control_images)):
+            usedControlImages = control_images[i].get("control_images", None)
+            if usedControlImages is not None:
+                # use controlImageStartindex & controlImageEndIndex to get the actual images needed, given the shape is (B, H, W, C)
+                usedControlImages = usedControlImages[controlImageStartindex:controlImageEndIndex]
+            # note we are appensing a tuple, where the first item is images, and ther second item is the masks
+            startToendFrames.append(
+                wanVideoVACEStartToEndFrame.process(
+                    totalFramesToGenerate,
+                    0.5,
+                    starting_images,
+                    None, # end image
+                    usedControlImages,
+                    None, # inpaint mask
+                    0, # start index
+                    -1, # end index
+                    False, # control after start
+                    False, # ignore start frame
+                )
+            )
+        # if startToendFrames is empty, then we need to generate at least one item
+        if len(startToendFrames) == 0:
+            startToendFrames.append(
+                wanVideoVACEStartToEndFrame.process(
+                    totalFramesToGenerate,
+                    0.5,
+                    starting_images,
+                    None, # end image
+                    None, # control images
+                    None, # inpaint mask
+                    0, # start index
+                    -1, # end index
+                    False, # control after start
+                    False, # ignore start frame
+                )
+            )
+        wanVideoVACEEncode = WanVideoVACEEncode()
+
+        # iterate through each startToendFrame item and generate the VACE embeds
+        vaceEmbeds = None
+        previousVaceEmbeds = None
+        for i in range(len(startToendFrames)):
+            startToEndFrame = startToendFrames[i]
+            usedStrength = control_images[i].get("strength", 0.5)
+            usedStartPercent = control_images[i].get("start_percent", 0.0)
+            usedEndPercent = control_images[i].get("end_percent", 1.0)
+            usedTiledVae = control_images[i].get("tiled_vae", False)
+            usedInputFrames = startToEndFrame[0]
+            usedInputMasks = startToEndFrame[1]
+            vaceEmbeds = wanVideoVACEEncode.process(
+                    vae,
+                    width,
+                    height,
+                    totalFramesToGenerate,
+                    usedStrength,
+                    usedStartPercent,
+                    usedEndPercent,
+                    usedInputFrames,
+                    None, # ref_images
+                    usedInputMasks,
+                    previousVaceEmbeds,
+                    usedTiledVae
+                )[0]
+            previousVaceEmbeds = vaceEmbeds
+        return vaceEmbeds
 
     def process(self,
         total_frames, batch_length, overlap_length, vae, encode_latent_Args, decode_latent_Args,
