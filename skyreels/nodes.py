@@ -804,7 +804,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "model_upscale_Args": ("WANMODELUPSCALEARGS", ),
                 "color_match_args": ("COLOURMATCHARGS", ),
                 "use_model_upscale": ("BOOLEAN", {"default": True, "tooltip": "Use provided upscale model to upscale the generated video"}),
-                "simple_scale_Args": ("WANSIMPLESCALEARGS", ),
+                "simple_scale_Args": ("WANSIMPLESCALEARGS", {"tooltip": "Arguments for simple scaling."}),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),

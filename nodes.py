@@ -1504,8 +1504,37 @@ class WanVideoContextOptions:
         }
 
         return (context_options,)
-    
-    
+
+class WanVideoLoopingControlImagesOptions:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                "control_images": ("IMAGE", {"tooltip": "Control images for the context"}),
+            },
+            "optional": {
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength of the control signal"}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of the control signal"}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of the control signal"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDEOCONTROLIMAGESOPTIONS", )
+    RETURN_NAMES = ("control_images_options",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Control images for a full video created by a looping Wan Video."
+
+    def process(self, control_images, strength=1.0, start_percent=0.0, end_percent=1.0):
+        control_images_options = {
+            "control_images": control_images,
+            "strength": strength,
+            "start_percent": start_percent,
+            "end_percent": end_percent,
+        }
+
+        return (control_images_options,)
+
+
 class WanVideoFlowEdit:
     @classmethod
     def INPUT_TYPES(s):
@@ -3283,6 +3312,172 @@ class WanVideoSampler:
             "samples": callback_latent.unsqueeze(0).cpu(), 
         })
 
+class WanVideoLoopingSampler:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "total_frames": ("INT", {"default": 65, "min": 1, "step": 4, "tooltip": "Total length of the video in frames"}),
+                "batch_length": ("INT", {"default": 65, "min": 1, "step": 4, "max": 1000, "tooltip": "Number of new frames to generate in each batch"}),
+                "overlap_length": ("INT", {"default": 6, "min": 0, "max": 1000, "tooltip": "Number of previously generated frames to use in each batch"}),
+                "vae": ("WANVAE",),
+                "encode_latent_Args": ("WANENCODEARGS", ),
+                "decode_latent_Args": ("WANDECODEARGS", ),
+                "model": ("WANVIDEOMODEL",),
+                "image_embeds": ("WANVIDIMAGE_EMBEDS", ),
+                "steps": ("INT", {"default": 30, "min": 1}),
+                "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
+                "shift": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Moves the model to the offload device after sampling"}),
+                "scheduler": (scheduler_list, {"default": "uni_pc",}),
+                "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 6. Allows for new frames to be generated after without looping"}),
+            },
+            "optional": {
+                "starting_images": ("IMAGE", {"tooltip": "The starting images for the video generation. These will not change."}),
+                "control_images_1": ("WANVIDEOCONTROLIMAGESOPTIONS", {"tooltip": "The first set of control images."}),
+                "control_images_2": ("WANVIDEOCONTROLIMAGESOPTIONS", {"tooltip": "The second set of control images."}),
+                "control_images_3": ("WANVIDEOCONTROLIMAGESOPTIONS", {"tooltip": "The third set of control images."}),
+                "control_images_4": ("WANVIDEOCONTROLIMAGESOPTIONS", {"tooltip": "The fourth set of control images."}),
+                "control_images_5": ("WANVIDEOCONTROLIMAGESOPTIONS", {"tooltip": "The fifth set of control images."}),
+                "color_match_args": ("COLOURMATCHARGS", {"tooltip": "Arguments for color matching."}),
+                "simple_scale_Args": ("WANSIMPLESCALEARGS", {"tooltip": "Arguments for simple scaling."}),
+                "text_embeds": ("WANVIDEOTEXTEMBEDS", ),
+                "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"}),
+                "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feta_args": ("FETAARGS", ),
+                "context_options": ("WANVIDCONTEXT", ),
+                "cache_args": ("CACHEARGS", ),
+                "flowedit_args": ("FLOWEDITARGS", ),
+                "batched_cfg": ("BOOLEAN", {"default": False, "tooltip": "Batch cond and uncond for faster sampling, possibly faster on some hardware, uses more memory"}),
+                "slg_args": ("SLGARGS", ),
+                "rope_function": (["default", "comfy", "comfy_chunked"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile. Chunked version has reduced peak VRAM usage when not using torch.compile"}),
+                "loop_args": ("LOOPARGS", ),
+                "experimental_args": ("EXPERIMENTALARGS", ),
+                "sigmas": ("SIGMAS", ),
+                "unianimate_poses": ("UNIANIMATE_POSE", ),
+                "fantasytalking_embeds": ("FANTASYTALKING_EMBEDS", ),
+                "uni3c_embeds": ("UNI3C_EMBEDS", ),
+                "multitalk_embeds": ("MULTITALK_EMBEDS", ),
+                "freeinit_args": ("FREEINITARGS", ),
+                "start_step": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1, "tooltip": "Start step for the sampling, 0 means full sampling, otherwise samples only from this step"}),
+                "end_step": ("INT", {"default": -1, "min": -1, "max": 10000, "step": 1, "tooltip": "End step for the sampling, -1 means full sampling, otherwise samples only until this step"}),
+                "add_noise_to_samples": ("BOOLEAN", {"default": False, "tooltip": "Add noise to the samples before sampling, needed for video2video sampling when starting from clean video"}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "LATENT",)
+    RETURN_NAMES = ("samples", "denoised_samples",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+
+    def process(self,
+        total_frames, batch_length, overlap_length, vae, encode_latent_Args, decode_latent_Args,
+        model, image_embeds, shift, steps, cfg, seed, scheduler, riflex_freq_index,
+        starting_images=None, control_images_1=None, control_images_2=None, control_images_3=None, control_images_4=None, control_images_5=None, color_match_args=None, simple_scale_Args=None,
+        text_embeds=None,
+        force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None, 
+        cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None, 
+        experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
+        
+        print("Processing video with WanVideoLoopingSampler")
+        decodeTile = False
+        decodeTileX = 272
+        decodeTileY = 272
+        decodeTileStrideX = 144
+        decodeTileStrideY = 128
+        if decode_latent_Args:
+            decodeTile = decode_latent_Args.get("enable_vae_tiling", decodeTile)
+            decodeTileX = decode_latent_Args.get("tile_x", decodeTileX)
+            decodeTileY = decode_latent_Args.get("tile_y", decodeTileY)
+            decodeTileStrideX = decode_latent_Args.get("tile_stride_x", decodeTileStrideX)
+            decodeTileStrideY = decode_latent_Args.get("tile_stride_y", decodeTileStrideY)
+
+        encodeTile = False
+        encodeTileX = 272
+        encodeTileY = 272
+        encodeTileStrideX = 144
+        encodeTileStrideY = 128
+        encodeAugStrength = 0.0
+        encodeLatentStrength = 1.0
+        encodeMask = None
+        if encode_latent_Args:
+            encodeTile = encode_latent_Args.get("enable_vae_tiling", encodeTile)
+            encodeTileX = encode_latent_Args.get("tile_x", encodeTileX)
+            encodeTileY = encode_latent_Args.get("tile_y", encodeTileY)
+            encodeTileStrideX = encode_latent_Args.get("tile_stride_x", encodeTileStrideX)
+            encodeTileStrideY = encode_latent_Args.get("tile_stride_y", encodeTileStrideY)
+            encodeAugStrength = encode_latent_Args.get("noise_aug_strength", encodeAugStrength)
+            encodeLatentStrength = encode_latent_Args.get("latent_strength", encodeLatentStrength)
+            encodeMask = encode_latent_Args.get("mask", encodeMask)
+
+        color_match_source = None
+        generated_first_frame = None
+        color_match_used_source = 'disable-match'
+        color_match_method = 'hm-mvgd-hm'
+        color_match_strength = 0.0
+        if color_match_args:
+            print(f"Color match args is provided, using color match")
+            color_match_used_source = color_match_args.get("used_source", color_match_used_source)
+            if color_match_used_source != 'disable-match':
+                print(f"Color match source is {color_match_used_source}, still using color match")
+                if color_match_used_source == 'provided':
+                    color_match_source = color_match_args.get("source", color_match_source)
+                    if color_match_source is None:
+                        color_match_used_source = 'first-frame'
+                        print(f"WARNING - Color match source is None, using first frame as source")
+                color_match_method = color_match_args.get("color_match_method", color_match_method)
+                color_match_strength = color_match_args.get("color_match_strength", color_match_strength)
+                print(f"Color match method is {color_match_method}, strength is {color_match_strength}, used source is {color_match_used_source}")
+            else:
+                print(f"Color match is set to disable-match, not using color match")
+        else:
+            print(f"Color match args is not provided, not using color match")
+
+        simple_scale_method = "bilinear"
+        simple_crop_method = "disabled"
+        if simple_scale_Args:
+            simple_scale_method = simple_scale_Args.get("upscale_method", simple_scale_method)
+            simple_crop_method = simple_scale_Args.get("crop", simple_crop_method)
+
+        # move each control_images into an array for easy processing if it is not None
+        control_images = []
+        if control_images_1 is not None:
+            control_images.append(control_images_1)
+        if control_images_2 is not None:
+            control_images.append(control_images_2)
+        if control_images_3 is not None:
+            control_images.append(control_images_3)
+        if control_images_4 is not None:
+            control_images.append(control_images_4)
+        if control_images_5 is not None:
+            control_images.append(control_images_5)
+
+        batch_starting_images = starting_images
+        wanVideoDecode = WanVideoDecode()
+        wanVideoEncode = WanVideoEncode()
+
+        if batch_length >= total_frames:
+            number_of_batches = 1
+            batch_length = total_frames
+        else:
+            batch_length_no_addition = batch_length - 1
+            number_of_batches = math.ceil((total_frames - 1) / batch_length_no_addition) # ensure round up
+            batch_length = math.ceil((total_frames - 1) / number_of_batches) # ensure round up
+            # batch length needs to be a number divisible by 4, then we add 1
+            batch_length_div_4 = math.ceil(batch_length / 4)
+            batch_length = int(batch_length_div_4 * 4 + 1)
+
+        print(f"Total frames: {total_frames}, Batch length: {batch_length}, Number of batches: {number_of_batches}, Number of control images: {len(control_images)}")
+        loop_count = 0
+        remaining_frames = total_frames
+
+        for start_idx in range(0, total_frames, batch_length - 1):
+            # Stop the loop early if remaining_frames <= 0
+            if remaining_frames <= 0:
+                break
+
+
 #region VideoDecode
 class WanVideoDecode:
     @classmethod
@@ -3494,6 +3689,7 @@ class WanVideoEncode:
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoSampler": WanVideoSampler,
+    "WanVideoLoopingSampler": WanVideoLoopingSampler,
     "WanVideoDecode": WanVideoDecode,
     "WanVideoTextEncode": WanVideoTextEncode,
     "WanVideoTextEncodeSingle": WanVideoTextEncodeSingle,
@@ -3510,6 +3706,7 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoEnhanceAVideo": WanVideoEnhanceAVideo,
     "WanVideoContextOptions": WanVideoContextOptions,
     "WanVideoTextEmbedBridge": WanVideoTextEmbedBridge,
+    "WanVideoLoopingControlImagesOptions": WanVideoLoopingControlImagesOptions,
     "WanVideoFlowEdit": WanVideoFlowEdit,
     "WanVideoControlEmbeds": WanVideoControlEmbeds,
     "WanVideoSLG": WanVideoSLG,
@@ -3528,6 +3725,7 @@ NODE_CLASS_MAPPINGS = {
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSampler": "WanVideo Sampler",
+    "WanVideoLoopingSampler": "WanVideo Looping Sampler",
     "WanVideoDecode": "WanVideo Decode",
     "WanVideoTextEncode": "WanVideo TextEncode",
     "WanVideoTextEncodeSingle": "WanVideo TextEncodeSingle",
@@ -3545,6 +3743,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoEnhanceAVideo": "WanVideo Enhance-A-Video",
     "WanVideoContextOptions": "WanVideo Context Options",
     "WanVideoTextEmbedBridge": "WanVideo TextEmbed Bridge",
+    "WanVideoLoopingControlImagesOptions": "WanVideo Looping Control Images Options",
     "WanVideoFlowEdit": "WanVideo FlowEdit",
     "WanVideoControlEmbeds": "WanVideo Control Embeds",
     "WanVideoSLG": "WanVideo SLG",

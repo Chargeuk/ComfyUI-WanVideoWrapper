@@ -98,6 +98,8 @@ class WanVideoVACEStartToEndFrame:
                 "inpaint_mask": ("MASK", {"tooltip": "Inpaint mask to use for the empty frames"}),
                 "start_index": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1, "tooltip": "Index to start from"}),
                 "end_index": ("INT", {"default": -1, "min": -10000, "max": 10000, "step": 1, "tooltip": "Index to end at"}),
+                "control_after_start": ("BOOLEAN", {"default": False, "tooltip": "When enabled, control images will start after the start_image frames"}),
+                "ignore_start_frame": ("BOOLEAN", {"default": False, "tooltip": "When enabled, the start frame will be ignored"}),
             },
         }
 
@@ -107,8 +109,9 @@ class WanVideoVACEStartToEndFrame:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Helper node to create start/end frame batch and masks for VACE"
 
-    def process(self, num_frames, empty_frame_level, start_image=None, end_image=None, control_images=None, inpaint_mask=None, start_index=0, end_index=-1):
-        
+    def process(self, num_frames, empty_frame_level, start_image=None, end_image=None, control_images=None, inpaint_mask=None, start_index=0, end_index=-1, control_after_start=False, ignore_start_frame=False):
+        if ignore_start_frame:
+            start_image = None
         # Get dimensions and device from available images
         if start_image is not None:
             B, H, W, C = start_image.shape
@@ -161,15 +164,24 @@ class WanVideoVACEStartToEndFrame:
         
         # Apply control images to remaining frames that don't have start or end images
         if control_images is not None:
-            # Create a mask of frames that are still empty (mask == 1)
-            empty_frames = masks.sum(dim=(1, 2)) > 0.5 * H * W
-            
-            if empty_frames.any():
-                # Only apply control images where they exist
+            if control_after_start and start_image is not None:
+                # Start control images after the start_image frames
+                control_start_idx = start_index + start_image.shape[0]
                 control_length = control_images.shape[0]
-                for frame_idx in range(num_frames):
-                    if empty_frames[frame_idx] and frame_idx < control_length:
-                        out_batch[frame_idx] = control_images[frame_idx]
+                
+                for i, frame_idx in enumerate(range(control_start_idx, min(control_start_idx + control_length, num_frames))):
+                    if frame_idx < num_frames and masks[frame_idx].sum() > 0.5 * H * W:  # Only if frame is still empty
+                        out_batch[frame_idx] = control_images[i]
+            else:
+                # Original behavior: Create a mask of frames that are still empty (mask == 1)
+                empty_frames = masks.sum(dim=(1, 2)) > 0.5 * H * W
+                
+                if empty_frames.any():
+                    # Only apply control images where they exist
+                    control_length = control_images.shape[0]
+                    for frame_idx in range(num_frames):
+                        if empty_frames[frame_idx] and frame_idx < control_length:
+                            out_batch[frame_idx] = control_images[frame_idx]
         
         # Apply inpaint mask if provided
         if inpaint_mask is not None:
