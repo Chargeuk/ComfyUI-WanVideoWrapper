@@ -201,7 +201,7 @@ class WanVideoVACEStartToEndFrame:
         if control_images is not None:
             if control_after_start and start_image is not None:
                 # Start control images after the start_image frames
-                control_start_idx = start_index + start_image.shape[0]
+                control_start_idx = 0
                 control_length = control_images.shape[0]
                 
                 for i, frame_idx in enumerate(range(control_start_idx, min(control_start_idx + control_length, num_frames))):

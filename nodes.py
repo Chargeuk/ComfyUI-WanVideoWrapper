@@ -3378,75 +3378,68 @@ class WanVideoLoopingSampler:
 
     def generateWanVaceEmbeds(
             self,
-            numberOfNewFrames,
+            totalFramesToGenerate,
             starting_images,
             control_images,
             controlImageStartindex,
             controlImageEndIndex,
             vae,
             width,
-            height
+            height,
+            control_after_start
             ):
-        totalFramesToGenerate = numberOfNewFrames
-        if starting_images is not None:
-             B, H, W, C = starting_images.shape
-             totalFramesToGenerate += B
-        print(f"Generating VACE embeds for WanVideoLoopingSampler. numberOfNewFrames: {numberOfNewFrames}, totalFramesToGenerate: {totalFramesToGenerate}")
-        wanVideoVACEStartToEndFrame = WanVideoVACEStartToEndFrame()
-        startToendFrames = []
-        # iterate through each control_images item and generate the required images and masks
-        for i in range(len(control_images)):
-            if control_images[i] is None:
-                continue
-            usedControlImages = control_images[i].get("control_images", None)
-            if usedControlImages is not None:
-                # use controlImageStartindex & controlImageEndIndex to get the actual images needed, given the shape is (B, H, W, C)
-                usedControlImages = usedControlImages[controlImageStartindex:controlImageEndIndex]
-            # note we are appensing a tuple, where the first item is images, and ther second item is the masks
-            startToendFrames.append(
-                wanVideoVACEStartToEndFrame.process(
-                    totalFramesToGenerate,
-                    0.5,
-                    starting_images,
-                    None, # end image
-                    usedControlImages,
-                    None, # inpaint mask
-                    0, # start index
-                    -1, # end index
-                    False, # control after start
-                    False, # ignore start frame
-                )
-            )
-        # if startToendFrames is empty, then we need to generate at least one item
-        if len(startToendFrames) == 0:
-            startToendFrames.append(
-                wanVideoVACEStartToEndFrame.process(
-                    totalFramesToGenerate,
-                    0.5,
-                    starting_images,
-                    None, # end image
-                    None, # control images
-                    None, # inpaint mask
-                    0, # start index
-                    -1, # end index
-                    False, # control after start
-                    False, # ignore start frame
-                )
-            )
-        wanVideoVACEEncode = WanVideoVACEEncode()
-
-        # iterate through each startToendFrame item and generate the VACE embeds
+        numberOfStartingImages = starting_images.shape[0] if (starting_images is not None and starting_images.shape is not None) else 0
+        print(f"WanVideoLoopingSampler Generating VACE embeds. totalFramesToGenerate: {totalFramesToGenerate}, numberOfStartingImages: {numberOfStartingImages}, controlImageStartindex: {controlImageStartindex}, controlImageEndIndex: {controlImageEndIndex}, width: {width}, height: {height}")
+        
+        # Create reusable instances once
+        if not hasattr(self, '_vace_start_to_end_frame'):
+            self._vace_start_to_end_frame = WanVideoVACEStartToEndFrame()
+        if not hasattr(self, '_vace_encode'):
+            self._vace_encode = WanVideoVACEEncode()
+        
+        # Process control images sequentially to reduce peak memory usage
         vaceEmbeds = None
         previousVaceEmbeds = None
-        for i in range(len(startToendFrames)):
-            startToEndFrame = startToendFrames[i]
-            usedStrength = control_images[i].get("strength", 0.5)
-            usedStartPercent = control_images[i].get("start_percent", 0.0)
-            usedEndPercent = control_images[i].get("end_percent", 1.0)
-            usedTiledVae = control_images[i].get("tiled_vae", False)
+        
+        # Helper function to process a single control image set
+        def process_control_image_set(control_image_data, is_fallback=False):
+            nonlocal vaceEmbeds, previousVaceEmbeds
+            
+            usedControlImages = None
+            usedStrength = 0.5
+            usedStartPercent = 0.0
+            usedEndPercent = 1.0
+            usedTiledVae = False
+            
+            if not is_fallback and control_image_data is not None:
+                usedControlImages = control_image_data.get("control_images", None)
+                if usedControlImages is not None:
+                    # use controlImageStartindex & controlImageEndIndex to get the actual images needed, given the shape is (B, H, W, C)
+                    usedControlImages = usedControlImages[controlImageStartindex:controlImageEndIndex]
+                usedStrength = control_image_data.get("strength", 0.5)
+                usedStartPercent = control_image_data.get("start_percent", 0.0)
+                usedEndPercent = control_image_data.get("end_percent", 1.0)
+                usedTiledVae = control_image_data.get("tiled_vae", False)
+            
+            # Process frames and masks immediately without storing
+            startToEndFrame = self._vace_start_to_end_frame.process(
+                num_frames=totalFramesToGenerate,
+                empty_frame_level=0.5,
+                start_image=starting_images,
+                end_image=None, # end image
+                control_images=usedControlImages,
+                inpaint_mask=None, # inpaint mask
+                start_index=0, # start index
+                end_index=-1, # end index
+                control_after_start=control_after_start, # control after start
+                ignore_start_frame=False, # ignore start frame
+            )
+            
             usedInputFrames = startToEndFrame[0]
             usedInputMasks = startToEndFrame[1]
-            vaceEmbeds = wanVideoVACEEncode.process(
+            
+            # Process VACE embeds immediately
+            vaceEmbeds = self._vace_encode.process(
                     vae,
                     width,
                     height,
@@ -3460,7 +3453,31 @@ class WanVideoLoopingSampler:
                     previousVaceEmbeds,
                     usedTiledVae
                 )[0]
+            
+            # Clear intermediate data explicitly
+            del startToEndFrame, usedInputFrames, usedInputMasks
+            if usedControlImages is not None:
+                del usedControlImages
+            
+            # Force garbage collection to free memory
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             previousVaceEmbeds = vaceEmbeds
+        
+        # Process each control image set sequentially
+        control_images_processed = False
+        for i, control_image_data in enumerate(control_images):
+            if control_image_data is None:
+                continue
+            process_control_image_set(control_image_data)
+            control_images_processed = True
+        
+        # if no control images were processed, create fallback
+        if not control_images_processed:
+            process_control_image_set(None, is_fallback=True)
+        
         return vaceEmbeds
 
     def process(self,
@@ -3564,6 +3581,7 @@ class WanVideoLoopingSampler:
         batchCount = 0
         remaining_frames = total_frames
         generated_images = None
+        isFirstBatch = True
 
         for start_idx in range(0, total_frames, batch_length - 1): # we always throw away the last generated frame
             batchCount += 1
@@ -3573,18 +3591,31 @@ class WanVideoLoopingSampler:
             endIndex = min(start_idx + batch_length, total_frames)
             numberOfFramesForBatch = endIndex - start_idx
             remaining_frames -= numberOfFramesForBatch
+            if remaining_frames > 0:
+                remaining_frames += 1 # allow for the fact that we drop a frame each batch except the last
             isLastBatch = (remaining_frames <= 0)
-            print(f"Processing batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
+            batchControlAfterStart = False
+            batchControlsEnd = endIndex
+            numberOfBatchStartingImages = batch_starting_images.shape[0] if batch_starting_images is not None else 0
+            batchControlsStart = max(0, start_idx - numberOfBatchStartingImages)
+            totalNumberOfFramesForBatchEmbeds = batchControlsEnd - batchControlsStart
+
+            print(f"WanVideoLoopingSampler Processing batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
             batchImageEmbeds = self.generateWanVaceEmbeds(
-                numberOfFramesForBatch,
-                batch_starting_images,
-                control_images,
-                start_idx,
-                endIndex,
-                vae,
-                width,
-                height
+                totalFramesToGenerate=totalNumberOfFramesForBatchEmbeds,
+                starting_images=batch_starting_images,
+                control_images=control_images,
+                controlImageStartindex=batchControlsStart,
+                controlImageEndIndex=batchControlsEnd,
+                vae=vae,
+                width=width,
+                height=height,
+                control_after_start=batchControlAfterStart
             )
+
+            batchForceOffload = isLastBatch
+            if isLastBatch:
+                batchForceOffload = force_offload
             
             wanVideoSampler = WanVideoSampler()
             batchSampledResult = wanVideoSampler.process(
@@ -3597,7 +3628,7 @@ class WanVideoLoopingSampler:
                 scheduler=scheduler,
                 riflex_freq_index=riflex_freq_index,
                 text_embeds=text_embeds,
-                force_offload=isLastBatch,
+                force_offload=batchForceOffload,
                 samples=samples,
                 feta_args=feta_args,
                 denoise_strength=denoise_strength,
@@ -3620,7 +3651,7 @@ class WanVideoLoopingSampler:
                 end_step=end_step,
                 add_noise_to_samples=add_noise_to_samples
             )
-            print(f"Processed batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
+            print(f"WanVideoLoopingSampler Processed batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
             # decode the created samples
             batchSamplesToDecode = batchSampledResult[1] # the 2nd item in the returned tuple is the denoised samples
             batchDecodedSamples = wanVideoDecode.decode(vae, batchSamplesToDecode, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
@@ -3632,12 +3663,12 @@ class WanVideoLoopingSampler:
                 if color_match_source is None:
                     # use the first frame of the decoded samples as the color match source
                     color_match_source = batchDecodedSampleimages[0].unsqueeze(0).clone()
-                print(f"Color matching prefix samples with WanColorMatch")
+                print(f"WanVideoLoopingSampler Color matching prefix samples with WanColorMatch")
                 color_match_result = colormatch(color_match_source, batchDecodedSampleimages, color_match_method, color_match_strength)
                 batchDecodedSampleimages = color_match_result[0]
                 end_time = time.time()  # End timing
                 elapsed_time = end_time - start_time
-                print(f"Execution time for color matching block: {elapsed_time:.4f} seconds")
+                print(f"WanVideoLoopingSampler Execution time for color matching block: {elapsed_time:.4f} seconds")
 
             # as the decoded images include the prefix data and an extra unwanted frame at the end,
             # we only want the last numberOfFramesForBatch frames, AND we want to remove the last frame IF we are not on the last batch
@@ -3645,17 +3676,20 @@ class WanVideoLoopingSampler:
             end_idx = None if isLastBatch else -1
             batchDecodedSampleimages = batchDecodedSampleimages[-numberOfFramesForBatch:end_idx]
             if generated_images is None:
-                print(f"WanVideoLoopingSampler creating generated_images")
+                print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} creating generated_images with shape {batchDecodedSampleimages.shape}")
                 generated_images = batchDecodedSampleimages
             else:
-                print(f"WanVideoLoopingSampler extending generated_images")
+                print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} extending generated_images with shape {batchDecodedSampleimages.shape}")
                 generated_images = torch.cat((generated_images, batchDecodedSampleimages), dim=0)
+            print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} generated_images shape: {generated_images.shape}")
 
             # get overlap_length frames from the end of the generated images
             if not isLastBatch:
-                print(f"WanVideoLoopingSampler getting {overlap_length} overlap frames from the end of the generated images")
+                print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} getting {overlap_length} overlap frames from the end of the generated images")
                 batch_starting_images = generated_images[-overlap_length:]
+            isFirstBatch = False
 
+        print(f"WanVideoLoopingSampler final output generated_images shape: {generated_images.shape}")
         return (generated_images,)
 
 
