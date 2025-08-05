@@ -10,6 +10,7 @@ from typing import Literal, List
 import glob
 import inspect
 import hashlib
+import time
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 from .wanvideo.modules.model import rope_params
@@ -23,7 +24,7 @@ from .utils import(log, print_memory, apply_lora, clip_encode_image_tiled, fouri
 from .cache_methods.cache_methods import cache_report
 from .enhance_a_video.globals import set_enhance_weight, set_num_frames
 from .taehv import TAEHV
-from .nodes_utility import WanVideoVACEStartToEndFrame
+from .nodes_utility import WanVideoVACEStartToEndFrame, colormatch
 
 from einops import rearrange
 
@@ -3326,8 +3327,9 @@ class WanVideoLoopingSampler:
                 "vae": ("WANVAE",),
                 "encode_latent_Args": ("WANENCODEARGS", ),
                 "decode_latent_Args": ("WANDECODEARGS", ),
+                "width": ("INT", {"default": 512, "min": 1, "max": 4096, "step": 1}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 4096, "step": 1}),
                 "model": ("WANVIDEOMODEL",),
-                "image_embeds": ("WANVIDIMAGE_EMBEDS", ),
                 "steps": ("INT", {"default": 30, "min": 1}),
                 "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "shift": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
@@ -3369,8 +3371,8 @@ class WanVideoLoopingSampler:
             }
         }
 
-    RETURN_TYPES = ("LATENT", "LATENT",)
-    RETURN_NAMES = ("samples", "denoised_samples",)
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("generated_images",)
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
 
@@ -3394,6 +3396,8 @@ class WanVideoLoopingSampler:
         startToendFrames = []
         # iterate through each control_images item and generate the required images and masks
         for i in range(len(control_images)):
+            if control_images[i] is None:
+                continue
             usedControlImages = control_images[i].get("control_images", None)
             if usedControlImages is not None:
                 # use controlImageStartindex & controlImageEndIndex to get the actual images needed, given the shape is (B, H, W, C)
@@ -3460,8 +3464,8 @@ class WanVideoLoopingSampler:
         return vaceEmbeds
 
     def process(self,
-        total_frames, batch_length, overlap_length, vae, encode_latent_Args, decode_latent_Args,
-        model, image_embeds, shift, steps, cfg, seed, scheduler, riflex_freq_index,
+        total_frames, batch_length, overlap_length, vae, encode_latent_Args, decode_latent_Args, width, height,
+        model, shift, steps, cfg, seed, scheduler, riflex_freq_index,
         starting_images=None, control_images_1=None, control_images_2=None, control_images_3=None, control_images_4=None, control_images_5=None, color_match_args=None, simple_scale_Args=None,
         text_embeds=None,
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None, 
@@ -3557,13 +3561,99 @@ class WanVideoLoopingSampler:
             batch_length = int(batch_length_div_4 * 4 + 1)
 
         print(f"Total frames: {total_frames}, Batch length: {batch_length}, Number of batches: {number_of_batches}, Number of control images: {len(control_images)}")
-        loop_count = 0
+        batchCount = 0
         remaining_frames = total_frames
+        generated_images = None
 
-        for start_idx in range(0, total_frames, batch_length - 1):
+        for start_idx in range(0, total_frames, batch_length):
+            batchCount += 1
             # Stop the loop early if remaining_frames <= 0
             if remaining_frames <= 0:
                 break
+            endIndex = min(start_idx + batch_length, total_frames)
+            numberOfFramesForBatch = endIndex - start_idx
+            remaining_frames -= numberOfFramesForBatch
+            isLastBatch = (remaining_frames <= 0)
+            print(f"Processing batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
+            batchImageEmbeds = self.generateWanVaceEmbeds(
+                numberOfFramesForBatch,
+                batch_starting_images,
+                control_images,
+                start_idx,
+                endIndex,
+                vae,
+                width,
+                height
+            )
+            
+            wanVideoSampler = WanVideoSampler()
+            batchSampledResult = wanVideoSampler.process(
+                model=model,
+                batchImageEmbeds=batchImageEmbeds,
+                shift=shift,
+                steps=steps,
+                cfg=cfg,
+                seed=seed,
+                scheduler=scheduler,
+                riflex_freq_index=riflex_freq_index,
+                text_embeds=text_embeds,
+                force_offload=isLastBatch,
+                samples=samples,
+                feta_args=feta_args,
+                denoise_strength=denoise_strength,
+                context_options=context_options,
+                cache_args=cache_args,
+                teacache_args=teacache_args,
+                flowedit_args=flowedit_args,
+                batched_cfg=batched_cfg,
+                slg_args=slg_args,
+                rope_function=rope_function,
+                loop_args=loop_args,
+                experimental_args=experimental_args,
+                sigmas=sigmas,
+                unianimate_poses=unianimate_poses,
+                fantasytalking_embeds=fantasytalking_embeds,
+                uni3c_embeds=uni3c_embeds,
+                multitalk_embeds=multitalk_embeds,
+                freeinit_args=freeinit_args,
+                start_step=start_step,
+                end_step=end_step,
+                add_noise_to_samples=add_noise_to_samples
+            )
+            print(f"Processed batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
+            # decode the created samples
+            batchSamplesToDecode = batchSampledResult[1] # the 2nd item in the returned tuple is the denoised samples
+            batchDecodedSamples = wanVideoDecode.decode(vae, batchSamplesToDecode, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
+            batchDecodedSampleimages = batchDecodedSamples[0] # get the first item from the tuple
+
+            # color match the generated frames
+            if color_match_strength > 0.0:       
+                start_time = time.time()  # Start timing             
+                if color_match_source is None:
+                    # use the first frame of the decoded samples as the color match source
+                    color_match_source = batchDecodedSampleimages[0].unsqueeze(0).clone()
+                print(f"Color matching prefix samples with WanColorMatch")
+                color_match_result = colormatch(color_match_source, batchDecodedSampleimages, color_match_method, color_match_strength)
+                batchDecodedSampleimages = color_match_result[0]
+                end_time = time.time()  # End timing
+                elapsed_time = end_time - start_time
+                print(f"Execution time for color matching block: {elapsed_time:.4f} seconds")
+
+            # as the decoded images include the prefix data, we only want the last numberOfFramesForBatch frames
+            batchDecodedSampleimages = batchDecodedSampleimages[-numberOfFramesForBatch:]
+            if generated_images is None:
+                print(f"WanVideoLoopingSampler creating generated_images")
+                generated_images = batchDecodedSampleimages
+            else:
+                print(f"WanVideoLoopingSampler extending generated_images")
+                generated_images = torch.cat((generated_images, batchDecodedSampleimages), dim=0)
+
+            # get overlap_length frames from the end of the generated images
+            if not isLastBatch:
+                print(f"WanVideoLoopingSampler getting {overlap_length} overlap frames from the end of the generated images")
+                batch_starting_images = generated_images[-overlap_length:]
+
+        return (generated_images,)
 
 
 #region VideoDecode

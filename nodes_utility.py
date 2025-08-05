@@ -5,6 +5,41 @@ from comfy.utils import common_upscale
 VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
 
+def colormatch(image_ref, image_target, method, strength=1.0):
+    try:
+        from color_matcher import ColorMatcher
+    except:
+        raise Exception("Can't import color-matcher, did you install requirements.txt? Manual install: pip install color-matcher")
+    cm = ColorMatcher()
+    image_ref = image_ref.cpu()
+    image_target = image_target.cpu()
+    batch_size = image_target.size(0)
+    out = []
+    images_target = image_target.squeeze()
+    images_ref = image_ref.squeeze()
+
+    image_ref_np = images_ref.numpy()
+    images_target_np = images_target.numpy()
+
+    if image_ref.size(0) > 1 and image_ref.size(0) != batch_size:
+        raise ValueError("ColorMatch: Use either single reference image or a matching batch of reference images.")
+
+    for i in range(batch_size):
+        image_target_np = images_target_np if batch_size == 1 else images_target[i].numpy()
+        image_ref_np_i = image_ref_np if image_ref.size(0) == 1 else images_ref[i].numpy()
+        try:
+            image_result = cm.transfer(src=image_target_np, ref=image_ref_np_i, method=method)
+        except BaseException as e:
+            print(f"Error occurred during transfer: {e}")
+            break
+        # Apply the strength multiplier
+        image_result = image_target_np + strength * (image_result - image_target_np)
+        out.append(torch.from_numpy(image_result))
+        
+    out = torch.stack(out, dim=0).to(torch.float32)
+    out.clamp_(0, 1)
+    return (out,)
+
 class WanVideoImageResizeToClosest:
     @classmethod
     def INPUT_TYPES(s):
