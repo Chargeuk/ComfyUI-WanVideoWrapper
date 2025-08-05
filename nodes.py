@@ -1,5 +1,6 @@
 import os, gc, math
 import torch
+import random
 import torch.nn.functional as F
 import gc
 from .utils import log, print_memory, apply_lora, clip_encode_image_tiled, fourier_filter
@@ -33,6 +34,33 @@ from comfy.utils import ProgressBar, common_upscale
 from comfy.clip_vision import clip_preprocess, ClipVisionModel
 from comfy.cli_args import args, LatentPreviewMethod
 import folder_paths
+import importlib.util
+import sys
+
+try:
+    # Get the absolute path to the ComfyUI-ReActor folder
+    comfyui_reactor_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'ComfyUI-ReActor'))
+
+    # Add the ComfyUI-ReActor folder to sys.path
+    if comfyui_reactor_path not in sys.path:
+        sys.path.append(comfyui_reactor_path)
+
+    print(f"!!!!!!!!!!!!!ComfyUI-ReActor path: {comfyui_reactor_path}")
+    print(sys.path)
+
+    # Dynamically load the nodes module from ComfyUI-ReActor
+    nodes_module_path = os.path.join(comfyui_reactor_path, 'nodes.py')
+    spec = importlib.util.spec_from_file_location("ComfyUI_ReActor.nodes", nodes_module_path)
+    nodes_module = importlib.util.module_from_spec(spec)
+    sys.modules["ComfyUI_ReActor.nodes"] = nodes_module
+    spec.loader.exec_module(nodes_module)
+
+    # Import the reactor class from the dynamically loaded module
+    reactor = nodes_module.reactor
+    print(f"Loaded reactor from: {comfyui_reactor_path}")
+except Exception as e:
+    print(f"Error loading ComfyUI-ReActor nodes: {e}")
+    reactor = None
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -85,6 +113,55 @@ def get_model_names(get_models):
     names.insert(0, "none")
     return names
 
+
+def trim_memory():
+        try:
+            import ctypes
+            import os
+            if os.name == 'posix':  # For Linux/Unix systems
+                libc = ctypes.CDLL("libc.so.6")
+                return libc.malloc_trim(0)
+            elif os.name == 'nt':  # For Windows systems
+                kernel32 = ctypes.WinDLL("kernel32.dll")
+                process = kernel32.GetCurrentProcess()
+                result = kernel32.SetProcessWorkingSetSize(process, -1, -1)
+                return result != 0  # Returns True if successful
+        except Exception as e:
+            # Fallback for systems that may not support these methods
+            print(f"VTS_WAN_Clear_Ram: Trim memory failure: {e}")
+            return False
+
+def ClearMemory(
+    gc_collect,
+    empty_cache,
+    unload_all_models
+    ):
+    if empty_cache:
+        mm.soft_empty_cache()
+        # torch.device('cpu').empty_cache()
+    if unload_all_models:
+        mm.unload_all_models()
+        mm.free_memory(1e30, mm.unet_offload_device())
+        mm.free_memory(1e30, torch.device('cpu'))
+    if gc_collect:
+        for _ in range(3):  # Run garbage collection multiple times
+            trim_memory()
+            gc.collect()
+        
+        trim_memory()
+
+        # Handle CUDA memory if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+            # More aggressive memory cleanup
+            # Force a synchronization point
+            torch.cuda.synchronize()
+            
+            # Try to defragment memory
+            if hasattr(torch.cuda, 'caching_allocator_delete_caches'):
+                torch.cuda.caching_allocator_delete_caches()
+
 class WanFaceRestoreArgs_VTS:
     @classmethod
     def INPUT_TYPES(s):
@@ -94,6 +171,8 @@ class WanFaceRestoreArgs_VTS:
                 "model": (get_model_names(get_restorers),),
                 "visibility": ("FLOAT", {"default": 1, "min": 0.0, "max": 1, "step": 0.05}),
                 "codeformer_weight": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05}),
+                "max_batch_size": ("INT", {"default": 20, "min": 1, "max": 10000, "step": 1, "tooltip": "Maximum number of images to process in a single batch"}),
+                "useFp16_Onnx": ("BOOLEAN", {"default": False, "tooltip": "When true, compile a provided onnx file as fp16, otherwise use fp32"}),
             },
         }
     RETURN_TYPES = ("RESTOREFACEARGS",)
@@ -1535,6 +1614,7 @@ class WanVideoLoopingControlImagesOptions:
             "tiled_vae": tiled_vae,
             "use_provided_starting_images": use_provided_starting_images,
             "use_generated_starting_images": use_generated_starting_images,
+            "custom_name": custom_name,
         }
         return (control_images_options,)
 
@@ -3351,6 +3431,8 @@ class WanVideoLoopingSampler:
                 "control_images_5": ("WANVIDEOCONTROLIMAGESOPTIONS", {"tooltip": "The fifth set of control images."}),
                 "color_match_args": ("COLOURMATCHARGS", {"tooltip": "Arguments for color matching."}),
                 "simple_scale_Args": ("WANSIMPLESCALEARGS", {"tooltip": "Arguments for simple scaling."}),
+                "restore_face": ("RESTOREFACEARGS", ),
+                "use_restore_face": ("BOOLEAN", {"default": True, "tooltip": "Use provided RestoreFace to restore faces in the generated video"}),
                 "text_embeds": ("WANVIDEOTEXTEMBEDS", ),
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"}),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
@@ -3507,12 +3589,12 @@ class WanVideoLoopingSampler:
         total_frames, batch_length, overlap_length, vae, encode_latent_Args, decode_latent_Args, width, height,
         model, shift, steps, cfg, seed, seed_adjust, seed_batch_control,
         scheduler, riflex_freq_index,
-        starting_images=None, control_images_1=None, control_images_2=None, control_images_3=None, control_images_4=None, control_images_5=None, color_match_args=None, simple_scale_Args=None,
+        starting_images=None, control_images_1=None, control_images_2=None, control_images_3=None, control_images_4=None, control_images_5=None, color_match_args=None, simple_scale_Args=None, restore_face=None, use_restore_face=True,
         text_embeds=None,
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None, 
         cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None, 
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
-        
+        overallStartTime = time.time()  # Start timing
         print("Processing video with WanVideoLoopingSampler")
                 
         decodeTile = False
@@ -3625,11 +3707,20 @@ class WanVideoLoopingSampler:
 
         batchSeed = seed
 
+        totalVaceTime = 0.0
+        totalSamplerTime = 0.0
+        totalColorMatchTime = 0.0
+        totalRestoreFaceTime = 0.0
+        totalMergeImageTime = 0.0
+        totalDecodeTime = 0.0
+        totalStartingimagesTotalTime = 0.0
+
         for start_idx in range(0, total_frames, batch_length - 1): # we always throw away the last generated frame
             batchCount += 1
             # Stop the loop early if remaining_frames <= 0
             if remaining_frames <= 0:
                 break
+            startBatchTime = time.time()  # Start timing  
             print(f"-------- WanVideoLoopingSampler batch {batchCount}/{number_of_batches} START -------------")
             endIndex = min(start_idx + batch_length, total_frames)
             numberOfFramesForBatch = endIndex - start_idx
@@ -3644,6 +3735,8 @@ class WanVideoLoopingSampler:
             totalNumberOfFramesForBatchEmbeds = batchControlsEnd - batchControlsStart
             batchstartingImagesAreGenerated = not isFirstBatch
             print(f"WanVideoLoopingSampler Processing batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
+
+            startVaceTime = time.time()
             batchImageEmbeds = self.generateWanVaceEmbeds(
                 totalFramesToGenerate=totalNumberOfFramesForBatchEmbeds,
                 starting_images=batch_starting_images,
@@ -3657,10 +3750,20 @@ class WanVideoLoopingSampler:
                 startingImagesAreGenerated=batchstartingImagesAreGenerated
             )
 
+            ClearMemory(
+                gc_collect=True,
+                empty_cache=True,
+                unload_all_models=True
+            )
+            endVaceTime = time.time()
+            batchVaceTime = endVaceTime - startVaceTime
+            totalVaceTime += batchVaceTime
+
             batchForceOffload = isLastBatch
             if isLastBatch:
                 batchForceOffload = force_offload
             
+            startSamplerTime = time.time()
             wanVideoSampler = WanVideoSampler()
             batchSampledResult = wanVideoSampler.process(
                 model=model,
@@ -3698,9 +3801,14 @@ class WanVideoLoopingSampler:
             
             # Clean up batch image embeds immediately after sampling
             del batchImageEmbeds
+
+            endSamplerTime = time.time()
+            batchSamplerTime = endSamplerTime - startSamplerTime
+            totalSamplerTime += batchSamplerTime
             
             print(f"WanVideoLoopingSampler Processed batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}, batchSeed: {batchSeed}, batchControlAfterStart: {batchControlAfterStart}, batchControlsStart: {batchControlsStart}, batchControlsEnd: {batchControlsEnd}, numberOfBatchStartingImages: {numberOfBatchStartingImages}, batchstartingImagesAreGenerated: {batchstartingImagesAreGenerated}")
             # decode the created samples
+            batchDecodeStartTime = time.time()
             batchSamplesToDecode = batchSampledResult[1] # the 2nd item in the returned tuple is the denoised samples
             batchDecodedSamples = wanVideoDecode.decode(vae, batchSamplesToDecode, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
             batchDecodedSampleimages = batchDecodedSamples[0] # get the first item from the tuple
@@ -3714,6 +3822,13 @@ class WanVideoLoopingSampler:
             end_idx = None if isLastBatch else -1
             batchDecodedSampleimages = batchDecodedSampleimages[-numberOfFramesForBatch:end_idx]
 
+            gc.collect()
+
+            batchDecodeEndTime = time.time()
+            batchDecodeTime = batchDecodeEndTime - batchDecodeStartTime
+            totalDecodeTime += batchDecodeTime
+
+            batchColorMatchTime = 0.0
              # color match the generated frames
             if color_match_strength > 0.0:       
                 start_time = time.time()  # Start timing             
@@ -3733,11 +3848,44 @@ class WanVideoLoopingSampler:
                 
                 # Clean up color match result
                 del color_match_result
-                
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 end_time = time.time()  # End timing
-                elapsed_time = end_time - start_time
-                print(f"WanVideoLoopingSampler Execution time for color matching block: {elapsed_time:.4f} seconds")
+                batchColorMatchTime = end_time - start_time
+                print(f"WanVideoLoopingSampler Execution time for color matching block: {batchColorMatchTime:.4f} seconds")
+            totalColorMatchTime += batchColorMatchTime
+
+            batchRestoreFaceTime = 0.0
+            if restore_face and use_restore_face and reactor:
+                start_time = time.time()  # Start timing
+                faceDetectionModel = restore_face.get("facedetection", "retinaface_resnet50")
+                faceRestoreModel = restore_face.get("model", "codeformer")
+                faceRestoreVisibility = restore_face.get("visibility", 1.0)
+                faceRestoreCodeformerWeight = restore_face.get("codeformer_weight", 0.5)
+                faceRestoreSetMaxBatchSize = restore_face.get("max_batch_size", 20)
+                faceRestoreUseFp16Onnx = restore_face.get("useFp16_Onnx", False)
+                print(f"WanVideoLoopingSampler restoring faces in batchDecodedSampleimages with faceRestoreModel: {faceRestoreModel}, faceRestoreVisibility: {faceRestoreVisibility}, faceRestoreCodeformerWeight: {faceRestoreCodeformerWeight}, faceDetectionModel: {faceDetectionModel}, faceRestoreSetMaxBatchSize: {faceRestoreSetMaxBatchSize}, faceRestoreUseFp16Onnx: {faceRestoreUseFp16Onnx}")
+                batchDecodedSampleimages = reactor.restore_face(
+                    self,
+                    input_image=batchDecodedSampleimages,
+                    face_restore_model=faceRestoreModel,
+                    face_restore_visibility=faceRestoreVisibility,
+                    codeformer_weight=faceRestoreCodeformerWeight,
+                    facedetection=faceDetectionModel,
+                    setMaxBatchSize=faceRestoreSetMaxBatchSize,
+                    use_fp16=faceRestoreUseFp16Onnx
+                 )
+                reactor.unload_face_restore_model(self)
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                end_time = time.time()  # End timing
+                batchRestoreFaceTime = end_time - start_time
+                print(f"Execution time for face restoration block: {batchRestoreFaceTime:.4f} seconds")
+            totalRestoreFaceTime += batchRestoreFaceTime
             
+            batchMergeImagesStartTime = time.time()  # Start timing
             # Memory optimization: Pre-allocate or concatenate efficiently
             if generated_images is None:
                 print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} creating generated_images with shape {batchDecodedSampleimages.shape}")
@@ -3782,22 +3930,26 @@ class WanVideoLoopingSampler:
             
             # Clean up batch sampled result
             del batchSampledResult
+
+            batchMergeImagesEndTime = time.time()  # Start timing
+            batchMergeImageTime = batchMergeImagesEndTime - batchMergeImagesStartTime
+            totalMergeImageTime += batchMergeImageTime
             
             print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} generated_images shape: {generated_images.shape if preallocated_images is None else preallocated_images[:preallocated_offset].shape}")
 
+            batchStartingimagesTotalTime = 0
             # get overlap_length frames from the end of the generated images
             if not isLastBatch:
+                batchStartingImagesStartTime = time.time()  # Start timing
                 print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} getting {overlap_length} overlap frames from the end of the generated images")
                 if preallocated_images is not None:
                     # Get overlap from pre-allocated tensor
                     batch_starting_images = preallocated_images[preallocated_offset - overlap_length:preallocated_offset].clone()
                 else:
                     batch_starting_images = generated_images[-overlap_length:].clone()
-            
-            # Force garbage collection after each batch to free memory
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                batchStartingImagesEndTime = time.time()  # End timing
+                batchStartingimagesTotalTime = batchStartingImagesEndTime - batchStartingImagesStartTime
+            totalStartingimagesTotalTime += batchStartingimagesTotalTime
 
             if seed_batch_control == "Randomize":
                 # Randomize the seed for each batch
@@ -3806,21 +3958,53 @@ class WanVideoLoopingSampler:
                 batchSeed = (batchSeed + seed_adjust) % 0xffffffffffffffff
 
             isFirstBatch = False
-            print(f"-------- WanVideoLoopingSampler batch {batchCount}/{number_of_batches} COMPLETED -------------")
+
+            ClearMemory(
+                gc_collect=True,
+                empty_cache=True,
+                unload_all_models=True
+            )
+            
+            endBatchTime = time.time()  # End timing
+            elapsedBatchTime = endBatchTime - startBatchTime
+            print(f"-------- WanVideoLoopingSampler batch {batchCount}/{number_of_batches} timing stats:")
+            print(f"  VACE time: {batchVaceTime:.4f} seconds")
+            print(f"  Sampler time: {batchSamplerTime:.4f} seconds")
+            print(f"  Decode time: {batchDecodeTime:.4f} seconds")
+            print(f"  Color match time: {batchColorMatchTime:.4f} seconds")
+            print(f"  Restore face time: {batchRestoreFaceTime:.4f} seconds")
+            print(f"  Merge images time: {batchMergeImageTime:.4f} seconds")
+            print(f"  Starting images time: {batchStartingimagesTotalTime:.4f} seconds")
+            print(f"  Total Batch time: {elapsedBatchTime:.4f} seconds")
+            print(f"-------- WanVideoLoopingSampler batch {batchCount}/{number_of_batches} COMPLETED in {elapsedBatchTime:.4f} seconds -------------")
             
         # Final cleanup and return the properly sized tensor
         if preallocated_images is not None:
             # Return only the frames we actually used
             generated_images = preallocated_images[:preallocated_offset].clone()
             del preallocated_images
-            
-        print(f"!!!!!! ------ WanVideoLoopingSampler final output generated_images shape: {generated_images.shape} ------ !!!!!!")
-        
+                    
         # Final garbage collection
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
+        ClearMemory(
+            gc_collect=True,
+            empty_cache=True,
+            unload_all_models=True
+        )
+
+        overallEndTime = time.time()  # Start timing
+        overallTotalTime = overallEndTime - overallStartTime
+
+        print(f"-------- WanVideoLoopingSampler FINAL timing stats:")
+        print(f"  VACE time: {totalVaceTime:.4f} seconds")
+        print(f"  Sampler time: {totalSamplerTime:.4f} seconds")
+        print(f"  Decode time: {totalDecodeTime:.4f} seconds")
+        print(f"  Color match time: {totalColorMatchTime:.4f} seconds")
+        print(f"  Restore face time: {totalRestoreFaceTime:.4f} seconds")
+        print(f"  Merge images time: {totalMergeImageTime:.4f} seconds")
+        print(f"  Starting images time: {totalStartingimagesTotalTime:.4f} seconds")
+        print(f"  Total time: {overallTotalTime:.4f} seconds")
+        print(f"!!!!!! ------ WanVideoLoopingSampler final output generated_images shape: {generated_images.shape} COMPLETED in {overallTotalTime:.4f} seconds ------ !!!!!!")
+        # Return the generated images as a tuple
         return (generated_images,)
 
 

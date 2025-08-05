@@ -61,7 +61,7 @@ try:
     # Import the reactor class from the dynamically loaded module
     reactor = nodes_module.reactor
     print(f"Loaded reactor from: {comfyui_reactor_path}")
-except Error as e:
+except Exception as e:
     print(f"Error loading ComfyUI-ReActor nodes: {e}")
     reactor = None
 
