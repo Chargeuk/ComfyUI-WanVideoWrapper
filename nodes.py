@@ -1514,6 +1514,9 @@ class WanVideoLoopingControlImagesOptions:
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of the control signal"}),
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of the control signal"}),
                 "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE for control images"}),
+                "use_provided_starting_images": ("BOOLEAN", {"default": True, "tooltip": "Use provided starting images as the first frames"}),
+                "use_generated_starting_images": ("BOOLEAN", {"default": True, "tooltip": "Use generated starting images as the first frames"}),
+                "custom_name": ("STRING", {"default": "NoName", "multiline": False})
             }
         }
 
@@ -1523,15 +1526,16 @@ class WanVideoLoopingControlImagesOptions:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Control images for a full video created by a looping Wan Video."
 
-    def process(self, control_images, strength=1.0, start_percent=0.0, end_percent=1.0, tiled_vae=False):
+    def process(self, control_images, strength=1.0, start_percent=0.0, end_percent=1.0, tiled_vae=False, use_provided_starting_images=True, use_generated_starting_images=True, custom_name="NoName"):
         control_images_options = {
             "control_images": control_images,
             "strength": strength,
             "start_percent": start_percent,
             "end_percent": end_percent,
             "tiled_vae": tiled_vae,
+            "use_provided_starting_images": use_provided_starting_images,
+            "use_generated_starting_images": use_generated_starting_images,
         }
-
         return (control_images_options,)
 
 
@@ -3330,8 +3334,12 @@ class WanVideoLoopingSampler:
                 "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "shift": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "seed_adjust": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "tooltip": "Adjust the seed for each batch"}),
+                "seed_batch_control": (["Seed Adjust", "Randomize"],
+                    {"default": "Seed Adjust"}
+                ),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Moves the model to the offload device after sampling"}),
-                "scheduler": (scheduler_list, {"default": "uni_pc",}),
+                "scheduler": (scheduler_list, {"default": scheduler_list[0],}),
                 "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 6. Allows for new frames to be generated after without looping"}),
             },
             "optional": {
@@ -3382,7 +3390,8 @@ class WanVideoLoopingSampler:
             vae,
             width,
             height,
-            control_after_start
+            control_after_start,
+            startingImagesAreGenerated,
             ):
         numberOfStartingImages = starting_images.shape[0] if (starting_images is not None and starting_images.shape is not None) else 0
         print(f"WanVideoLoopingSampler Generating VACE embeds. totalFramesToGenerate: {totalFramesToGenerate}, numberOfStartingImages: {numberOfStartingImages}, controlImageStartindex: {controlImageStartindex}, controlImageEndIndex: {controlImageEndIndex}, width: {width}, height: {height}")
@@ -3406,6 +3415,9 @@ class WanVideoLoopingSampler:
             usedStartPercent = 0.0
             usedEndPercent = 1.0
             usedTiledVae = False
+            useProvidedStartingimages=True
+            useGeneratedStartingImages=True
+            customName = "Fallback"
             
             if not is_fallback and control_image_data is not None:
                 usedControlImages = control_image_data.get("control_images", None)
@@ -3416,15 +3428,27 @@ class WanVideoLoopingSampler:
                 usedStartPercent = control_image_data.get("start_percent", 0.0)
                 usedEndPercent = control_image_data.get("end_percent", 1.0)
                 usedTiledVae = control_image_data.get("tiled_vae", False)
+                useProvidedStartingimages = control_image_data.get("use_provided_starting_images", True)
+                useGeneratedStartingImages = control_image_data.get("use_generated_starting_images", True)
+                customName = control_image_data.get("custom_name", "NoName")
                 if usedStrength == 0.0:
-                    print("Control image strength is 0, skipping control images processing.")
+                    print("WanVideoLoopingSampler - {customName} control image strength is 0, skipping control images processing.")
                     return
+               
+            useStartingImages = True
+            if startingImagesAreGenerated:
+                useStartingImages = useGeneratedStartingImages
+            else:
+                useStartingImages = useProvidedStartingimages
+
+            usedStartingImages = starting_images if useStartingImages else None
+            print(f"WanVideoLoopingSampler - Processing {customName} control images: {usedControlImages.shape if usedControlImages is not None else 'None'}, strength: {usedStrength}, start_percent: {usedStartPercent}, end_percent: {usedEndPercent}, tiled_vae: {usedTiledVae}, useProvidedStartingimages: {useProvidedStartingimages}, useGeneratedStartingImages: {useGeneratedStartingImages}, usedStartingImages.shape: {usedStartingImages.shape if usedStartingImages is not None else 'None'}")
 
             # Process frames and masks immediately without storing
             startToEndFrame = self._vace_start_to_end_frame.process(
                 num_frames=totalFramesToGenerate,
                 empty_frame_level=0.5,
-                start_image=starting_images,
+                start_image=usedStartingImages,
                 end_image=None, # end image
                 control_images=usedControlImages,
                 inpaint_mask=None, # inpaint mask
@@ -3481,7 +3505,8 @@ class WanVideoLoopingSampler:
 
     def process(self,
         total_frames, batch_length, overlap_length, vae, encode_latent_Args, decode_latent_Args, width, height,
-        model, shift, steps, cfg, seed, scheduler, riflex_freq_index,
+        model, shift, steps, cfg, seed, seed_adjust, seed_batch_control,
+        scheduler, riflex_freq_index,
         starting_images=None, control_images_1=None, control_images_2=None, control_images_3=None, control_images_4=None, control_images_5=None, color_match_args=None, simple_scale_Args=None,
         text_embeds=None,
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None, 
@@ -3598,11 +3623,14 @@ class WanVideoLoopingSampler:
             preallocated_images = None
             preallocated_offset = 0
 
+        batchSeed = seed
+
         for start_idx in range(0, total_frames, batch_length - 1): # we always throw away the last generated frame
             batchCount += 1
             # Stop the loop early if remaining_frames <= 0
             if remaining_frames <= 0:
                 break
+            print(f"-------- WanVideoLoopingSampler batch {batchCount}/{number_of_batches} START -------------")
             endIndex = min(start_idx + batch_length, total_frames)
             numberOfFramesForBatch = endIndex - start_idx
             remaining_frames -= numberOfFramesForBatch
@@ -3614,7 +3642,7 @@ class WanVideoLoopingSampler:
             numberOfBatchStartingImages = batch_starting_images.shape[0] if batch_starting_images is not None else 0
             batchControlsStart = max(0, start_idx - numberOfBatchStartingImages)
             totalNumberOfFramesForBatchEmbeds = batchControlsEnd - batchControlsStart
-
+            batchstartingImagesAreGenerated = not isFirstBatch
             print(f"WanVideoLoopingSampler Processing batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
             batchImageEmbeds = self.generateWanVaceEmbeds(
                 totalFramesToGenerate=totalNumberOfFramesForBatchEmbeds,
@@ -3625,7 +3653,8 @@ class WanVideoLoopingSampler:
                 vae=vae,
                 width=width,
                 height=height,
-                control_after_start=batchControlAfterStart
+                control_after_start=batchControlAfterStart,
+                startingImagesAreGenerated=batchstartingImagesAreGenerated
             )
 
             batchForceOffload = isLastBatch
@@ -3639,7 +3668,7 @@ class WanVideoLoopingSampler:
                 shift=shift,
                 steps=steps,
                 cfg=cfg,
-                seed=seed,
+                seed=batchSeed,
                 scheduler=scheduler,
                 riflex_freq_index=riflex_freq_index,
                 text_embeds=text_embeds,
@@ -3670,7 +3699,7 @@ class WanVideoLoopingSampler:
             # Clean up batch image embeds immediately after sampling
             del batchImageEmbeds
             
-            print(f"WanVideoLoopingSampler Processed batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
+            print(f"WanVideoLoopingSampler Processed batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}, batchSeed: {batchSeed}, batchControlAfterStart: {batchControlAfterStart}, batchControlsStart: {batchControlsStart}, batchControlsEnd: {batchControlsEnd}, numberOfBatchStartingImages: {numberOfBatchStartingImages}, batchstartingImagesAreGenerated: {batchstartingImagesAreGenerated}")
             # decode the created samples
             batchSamplesToDecode = batchSampledResult[1] # the 2nd item in the returned tuple is the denoised samples
             batchDecodedSamples = wanVideoDecode.decode(vae, batchSamplesToDecode, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
@@ -3769,16 +3798,23 @@ class WanVideoLoopingSampler:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            
-            isFirstBatch = False
 
+            if seed_batch_control == "Randomize":
+                # Randomize the seed for each batch
+                batchSeed = random.randint(0, 0xffffffffffffffff)
+            else:
+                batchSeed = (batchSeed + seed_adjust) % 0xffffffffffffffff
+
+            isFirstBatch = False
+            print(f"-------- WanVideoLoopingSampler batch {batchCount}/{number_of_batches} COMPLETED -------------")
+            
         # Final cleanup and return the properly sized tensor
         if preallocated_images is not None:
             # Return only the frames we actually used
             generated_images = preallocated_images[:preallocated_offset].clone()
             del preallocated_images
             
-        print(f"WanVideoLoopingSampler final output generated_images shape: {generated_images.shape}")
+        print(f"!!!!!! ------ WanVideoLoopingSampler final output generated_images shape: {generated_images.shape} ------ !!!!!!")
         
         # Final garbage collection
         gc.collect()
