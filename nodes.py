@@ -3565,7 +3565,7 @@ class WanVideoLoopingSampler:
         remaining_frames = total_frames
         generated_images = None
 
-        for start_idx in range(0, total_frames, batch_length):
+        for start_idx in range(0, total_frames, batch_length - 1): # we always throw away the last generated frame
             batchCount += 1
             # Stop the loop early if remaining_frames <= 0
             if remaining_frames <= 0:
@@ -3589,7 +3589,7 @@ class WanVideoLoopingSampler:
             wanVideoSampler = WanVideoSampler()
             batchSampledResult = wanVideoSampler.process(
                 model=model,
-                batchImageEmbeds=batchImageEmbeds,
+                image_embeds=batchImageEmbeds,
                 shift=shift,
                 steps=steps,
                 cfg=cfg,
@@ -3639,8 +3639,11 @@ class WanVideoLoopingSampler:
                 elapsed_time = end_time - start_time
                 print(f"Execution time for color matching block: {elapsed_time:.4f} seconds")
 
-            # as the decoded images include the prefix data, we only want the last numberOfFramesForBatch frames
-            batchDecodedSampleimages = batchDecodedSampleimages[-numberOfFramesForBatch:]
+            # as the decoded images include the prefix data and an extra unwanted frame at the end,
+            # we only want the last numberOfFramesForBatch frames, AND we want to remove the last frame IF we are not on the last batch
+            # Optimize: combine slicing operations to avoid intermediate tensor creation
+            end_idx = None if isLastBatch else -1
+            batchDecodedSampleimages = batchDecodedSampleimages[-numberOfFramesForBatch:end_idx]
             if generated_images is None:
                 print(f"WanVideoLoopingSampler creating generated_images")
                 generated_images = batchDecodedSampleimages
