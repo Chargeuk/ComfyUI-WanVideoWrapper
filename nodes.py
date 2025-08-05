@@ -110,15 +110,19 @@ class WanColorMatchArgs_VTS:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "source": ("IMAGE",),
                 "used_source": (
                 [   
                     'disable-match',
                     'provided',
-                    'first-frame', 
+                    'first-frame',
+                    'provided-frame', 
                 ], {
-                "default": 'first-frame'
-                }),  
+                    "default": 'first-frame'
+                }),
+            },
+            "optional": {
+                "source": ("IMAGE",),
+                "provided_frame":  ("INT", {"default": 0, "min": 0, "step": 1}),
                 "color_match_method": (
                 [   
                     'mkl',
@@ -160,14 +164,6 @@ class WanVideoDecodeSettings_VTS:
                     "tile_stride_y": ("INT", {"default": 128, "min": 32, "max": 2040, "step": 8, "tooltip": "Tile stride height in pixels. Smaller values use less VRAM but will introduce more seams."}),
                     },
                 }
-
-    @classmethod
-    def VALIDATE_INPUTS(s, tile_x, tile_y, tile_stride_x, tile_stride_y):
-        if tile_x <= tile_stride_x:
-            return "Tile width must be larger than the tile stride width."
-        if tile_y <= tile_stride_y:
-            return "Tile height must be larger than the tile stride height."
-        return True
 
     RETURN_TYPES = ("WANDECODEARGS",)
     RETURN_NAMES = ("decode_latent_args",)
@@ -3406,7 +3402,7 @@ class WanVideoLoopingSampler:
             nonlocal vaceEmbeds, previousVaceEmbeds
             
             usedControlImages = None
-            usedStrength = 0.5
+            usedStrength = 1.0
             usedStartPercent = 0.0
             usedEndPercent = 1.0
             usedTiledVae = False
@@ -3420,7 +3416,10 @@ class WanVideoLoopingSampler:
                 usedStartPercent = control_image_data.get("start_percent", 0.0)
                 usedEndPercent = control_image_data.get("end_percent", 1.0)
                 usedTiledVae = control_image_data.get("tiled_vae", False)
-            
+                if usedStrength == 0.0:
+                    print("Control image strength is 0, skipping control images processing.")
+                    return
+
             # Process frames and masks immediately without storing
             startToEndFrame = self._vace_start_to_end_frame.process(
                 num_frames=totalFramesToGenerate,
@@ -3490,6 +3489,7 @@ class WanVideoLoopingSampler:
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
         
         print("Processing video with WanVideoLoopingSampler")
+                
         decodeTile = False
         decodeTileX = 272
         decodeTileY = 272
@@ -3521,10 +3521,10 @@ class WanVideoLoopingSampler:
             encodeMask = encode_latent_Args.get("mask", encodeMask)
 
         color_match_source = None
-        generated_first_frame = None
         color_match_used_source = 'disable-match'
         color_match_method = 'hm-mvgd-hm'
         color_match_strength = 0.0
+        color_match_provided_frame = 0
         if color_match_args:
             print(f"Color match args is provided, using color match")
             color_match_used_source = color_match_args.get("used_source", color_match_used_source)
@@ -3537,7 +3537,8 @@ class WanVideoLoopingSampler:
                         print(f"WARNING - Color match source is None, using first frame as source")
                 color_match_method = color_match_args.get("color_match_method", color_match_method)
                 color_match_strength = color_match_args.get("color_match_strength", color_match_strength)
-                print(f"Color match method is {color_match_method}, strength is {color_match_strength}, used source is {color_match_used_source}")
+                color_match_provided_frame = color_match_args.get("provided_frame", color_match_provided_frame)
+                print(f"Color match method is {color_match_method}, strength is {color_match_strength}, used source is {color_match_used_source}, color_match_provided_frame is {color_match_provided_frame}")
             else:
                 print(f"Color match is set to disable-match, not using color match")
         else:
@@ -3564,7 +3565,6 @@ class WanVideoLoopingSampler:
 
         batch_starting_images = starting_images
         wanVideoDecode = WanVideoDecode()
-        wanVideoEncode = WanVideoEncode()
 
         if batch_length >= total_frames:
             number_of_batches = 1
@@ -3582,6 +3582,21 @@ class WanVideoLoopingSampler:
         remaining_frames = total_frames
         generated_images = None
         isFirstBatch = True
+
+        # Pre-allocate generated_images tensor for better memory efficiency
+        # Estimate final shape based on first batch to avoid repeated reallocations
+        try:
+            # Get device from starting_images or use default
+            target_device = starting_images.device if starting_images is not None else torch.device('cpu')
+            
+            # We'll allocate this after processing the first batch to know the exact dimensions
+            preallocated_images = None
+            preallocated_offset = 0
+        except Exception as e:
+            print(f"Warning: Could not determine device for pre-allocation: {e}")
+            target_device = torch.device('cpu')
+            preallocated_images = None
+            preallocated_offset = 0
 
         for start_idx in range(0, total_frames, batch_length - 1): # we always throw away the last generated frame
             batchCount += 1
@@ -3651,45 +3666,125 @@ class WanVideoLoopingSampler:
                 end_step=end_step,
                 add_noise_to_samples=add_noise_to_samples
             )
+            
+            # Clean up batch image embeds immediately after sampling
+            del batchImageEmbeds
+            
             print(f"WanVideoLoopingSampler Processed batch {batchCount}/{number_of_batches} from frame {start_idx} to {endIndex} = {numberOfFramesForBatch}. remaining_frames: {remaining_frames}. isLastBatch: {isLastBatch}")
             # decode the created samples
             batchSamplesToDecode = batchSampledResult[1] # the 2nd item in the returned tuple is the denoised samples
             batchDecodedSamples = wanVideoDecode.decode(vae, batchSamplesToDecode, decodeTile, decodeTileX, decodeTileY, decodeTileStrideX, decodeTileStrideY)
             batchDecodedSampleimages = batchDecodedSamples[0] # get the first item from the tuple
-
-            # color match the generated frames
-            if color_match_strength > 0.0:       
-                start_time = time.time()  # Start timing             
-                if color_match_source is None:
-                    # use the first frame of the decoded samples as the color match source
-                    color_match_source = batchDecodedSampleimages[0].unsqueeze(0).clone()
-                print(f"WanVideoLoopingSampler Color matching prefix samples with WanColorMatch")
-                color_match_result = colormatch(color_match_source, batchDecodedSampleimages, color_match_method, color_match_strength)
-                batchDecodedSampleimages = color_match_result[0]
-                end_time = time.time()  # End timing
-                elapsed_time = end_time - start_time
-                print(f"WanVideoLoopingSampler Execution time for color matching block: {elapsed_time:.4f} seconds")
+            
+            # Clean up intermediate decode results
+            del batchSamplesToDecode, batchDecodedSamples
 
             # as the decoded images include the prefix data and an extra unwanted frame at the end,
             # we only want the last numberOfFramesForBatch frames, AND we want to remove the last frame IF we are not on the last batch
             # Optimize: combine slicing operations to avoid intermediate tensor creation
             end_idx = None if isLastBatch else -1
             batchDecodedSampleimages = batchDecodedSampleimages[-numberOfFramesForBatch:end_idx]
+
+             # color match the generated frames
+            if color_match_strength > 0.0:       
+                start_time = time.time()  # Start timing             
+                if color_match_source is None:
+                    colorMatchFrameIndex = 0
+                    if color_match_used_source == "provided-frame":
+                        colorMatchFrameIndex = color_match_provided_frame
+
+                    # ensure colorMatchFrameIndex is less than the number of frames in batchDecodedSampleimages
+                    # and use the last frame if it is greater
+                    colorMatchFrameIndex = min(colorMatchFrameIndex, batchDecodedSampleimages.shape[0] - 1)
+                    # use the calculated frame of the decoded samples as the color match source
+                    color_match_source = batchDecodedSampleimages[colorMatchFrameIndex].unsqueeze(0).clone()
+                print(f"WanVideoLoopingSampler Color matching prefix samples with WanColorMatch")
+                color_match_result = colormatch(color_match_source, batchDecodedSampleimages, color_match_method, color_match_strength)
+                batchDecodedSampleimages = color_match_result[0]
+                
+                # Clean up color match result
+                del color_match_result
+                
+                end_time = time.time()  # End timing
+                elapsed_time = end_time - start_time
+                print(f"WanVideoLoopingSampler Execution time for color matching block: {elapsed_time:.4f} seconds")
+            
+            # Memory optimization: Pre-allocate or concatenate efficiently
             if generated_images is None:
                 print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} creating generated_images with shape {batchDecodedSampleimages.shape}")
-                generated_images = batchDecodedSampleimages
+                
+                # Pre-allocate the full tensor if we can estimate the final size
+                if preallocated_images is None:
+                    try:
+                        # Calculate total expected frames (accounting for overlap removal)
+                        total_expected_frames = total_frames
+                        final_shape = (total_expected_frames,) + batchDecodedSampleimages.shape[1:]
+                        
+                        # Pre-allocate on the same device as the batch images
+                        preallocated_images = torch.empty(final_shape, dtype=batchDecodedSampleimages.dtype, device=batchDecodedSampleimages.device)
+                        print(f"Pre-allocated tensor with shape {final_shape}")
+                    except Exception as e:
+                        print(f"Could not pre-allocate tensor: {e}, falling back to concatenation")
+                        preallocated_images = None
+                
+                if preallocated_images is not None:
+                    # Use pre-allocated tensor
+                    frames_to_copy = batchDecodedSampleimages.shape[0]
+                    preallocated_images[preallocated_offset:preallocated_offset + frames_to_copy] = batchDecodedSampleimages
+                    preallocated_offset += frames_to_copy
+                    generated_images = preallocated_images  # This will be sliced at the end
+                else:
+                    # Fallback to regular assignment
+                    generated_images = batchDecodedSampleimages
             else:
                 print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} extending generated_images with shape {batchDecodedSampleimages.shape}")
-                generated_images = torch.cat((generated_images, batchDecodedSampleimages), dim=0)
-            print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} generated_images shape: {generated_images.shape}")
+                
+                if preallocated_images is not None:
+                    # Use pre-allocated tensor
+                    frames_to_copy = batchDecodedSampleimages.shape[0]
+                    preallocated_images[preallocated_offset:preallocated_offset + frames_to_copy] = batchDecodedSampleimages
+                    preallocated_offset += frames_to_copy
+                else:
+                    # Fallback to concatenation - use torch.cat for efficiency
+                    generated_images = torch.cat((generated_images, batchDecodedSampleimages), dim=0)
+            
+            # Clean up batch decoded images immediately after use
+            del batchDecodedSampleimages
+            
+            # Clean up batch sampled result
+            del batchSampledResult
+            
+            print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} generated_images shape: {generated_images.shape if preallocated_images is None else preallocated_images[:preallocated_offset].shape}")
 
             # get overlap_length frames from the end of the generated images
             if not isLastBatch:
                 print(f"WanVideoLoopingSampler batch {batchCount}/{number_of_batches} getting {overlap_length} overlap frames from the end of the generated images")
-                batch_starting_images = generated_images[-overlap_length:]
+                if preallocated_images is not None:
+                    # Get overlap from pre-allocated tensor
+                    batch_starting_images = preallocated_images[preallocated_offset - overlap_length:preallocated_offset].clone()
+                else:
+                    batch_starting_images = generated_images[-overlap_length:].clone()
+            
+            # Force garbage collection after each batch to free memory
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             isFirstBatch = False
 
+        # Final cleanup and return the properly sized tensor
+        if preallocated_images is not None:
+            # Return only the frames we actually used
+            generated_images = preallocated_images[:preallocated_offset].clone()
+            del preallocated_images
+            
         print(f"WanVideoLoopingSampler final output generated_images shape: {generated_images.shape}")
+        
+        # Final garbage collection
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         return (generated_images,)
 
 
