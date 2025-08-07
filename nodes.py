@@ -1585,11 +1585,11 @@ class WanVideoContextOptions:
 class WanVideoLoopingControlImagesOptions:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {
-                "control_images": ("IMAGE", {"tooltip": "Control images for the context"}),
-            },
+        return {
             "optional": {
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength of the control signal"}),
+                "control_images": ("IMAGE", {"tooltip": "Control images for the context"}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength of the control signal on the 1st pass"}),
+                "strength_later": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength of the control signal on the later passes"}),
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of the control signal"}),
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of the control signal"}),
                 "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE for control images"}),
@@ -1605,10 +1605,13 @@ class WanVideoLoopingControlImagesOptions:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Control images for a full video created by a looping Wan Video."
 
-    def process(self, control_images, strength=1.0, start_percent=0.0, end_percent=1.0, tiled_vae=False, use_provided_starting_images=True, use_generated_starting_images=True, custom_name="NoName"):
+    def process(self, control_images=None, strength=1.0, strength_later=None, start_percent=0.0, end_percent=1.0, tiled_vae=False, use_provided_starting_images=True, use_generated_starting_images=True, custom_name="NoName"):
+        if strength_later is None:
+            strength_later = strength
         control_images_options = {
             "control_images": control_images,
             "strength": strength,
+            "strength_later": strength_later,
             "start_percent": start_percent,
             "end_percent": end_percent,
             "tiled_vae": tiled_vae,
@@ -3474,6 +3477,7 @@ class WanVideoLoopingSampler:
             height,
             control_after_start,
             startingImagesAreGenerated,
+            batchIndex,
             ):
         numberOfStartingImages = starting_images.shape[0] if (starting_images is not None and starting_images.shape is not None) else 0
         print(f"WanVideoLoopingSampler Generating VACE embeds. totalFramesToGenerate: {totalFramesToGenerate}, numberOfStartingImages: {numberOfStartingImages}, controlImageStartindex: {controlImageStartindex}, controlImageEndIndex: {controlImageEndIndex}, width: {width}, height: {height}")
@@ -3489,11 +3493,11 @@ class WanVideoLoopingSampler:
         previousVaceEmbeds = None
         
         # Helper function to process a single control image set
-        def process_control_image_set(control_image_data, is_fallback=False):
+        def process_control_image_set(control_image_data, is_fallback=False, defaultStrength=1.0):
             nonlocal vaceEmbeds, previousVaceEmbeds
             
             usedControlImages = None
-            usedStrength = 1.0
+            usedStrength = defaultStrength
             usedStartPercent = 0.0
             usedEndPercent = 1.0
             usedTiledVae = False
@@ -3502,21 +3506,24 @@ class WanVideoLoopingSampler:
             customName = "Fallback"
             
             if not is_fallback and control_image_data is not None:
+                usedStrength = control_image_data.get("strength", 0.5)
+                if batchIndex > 0:
+                    usedStrength = control_image_data.get("strength_later", usedStrength)
+                customName = control_image_data.get("custom_name", "NoName")
+                if usedStrength == 0.0:
+                    print(f"WanVideoLoopingSampler - {customName} control image strength is 0, skipping control images processing.")
+                    return usedStrength
                 usedControlImages = control_image_data.get("control_images", None)
                 if usedControlImages is not None:
                     # use controlImageStartindex & controlImageEndIndex to get the actual images needed, given the shape is (B, H, W, C)
                     usedControlImages = usedControlImages[controlImageStartindex:controlImageEndIndex]
-                usedStrength = control_image_data.get("strength", 0.5)
+                
                 usedStartPercent = control_image_data.get("start_percent", 0.0)
                 usedEndPercent = control_image_data.get("end_percent", 1.0)
                 usedTiledVae = control_image_data.get("tiled_vae", False)
                 useProvidedStartingimages = control_image_data.get("use_provided_starting_images", True)
                 useGeneratedStartingImages = control_image_data.get("use_generated_starting_images", True)
-                customName = control_image_data.get("custom_name", "NoName")
-                if usedStrength == 0.0:
-                    print("WanVideoLoopingSampler - {customName} control image strength is 0, skipping control images processing.")
-                    return
-               
+
             useStartingImages = True
             if startingImagesAreGenerated:
                 useStartingImages = useGeneratedStartingImages
@@ -3524,12 +3531,15 @@ class WanVideoLoopingSampler:
                 useStartingImages = useProvidedStartingimages
 
             usedStartingImages = starting_images if useStartingImages else None
+            if usedStartingImages is None and usedControlImages is None:
+                print(f"WanVideoLoopingSampler - {customName} no starting images or control images provided, skipping control images processing.")
+                return 0.0
             print(f"WanVideoLoopingSampler - Processing {customName} control images: {usedControlImages.shape if usedControlImages is not None else 'None'}, strength: {usedStrength}, start_percent: {usedStartPercent}, end_percent: {usedEndPercent}, tiled_vae: {usedTiledVae}, useProvidedStartingimages: {useProvidedStartingimages}, useGeneratedStartingImages: {useGeneratedStartingImages}, usedStartingImages.shape: {usedStartingImages.shape if usedStartingImages is not None else 'None'}")
 
             # Process frames and masks immediately without storing
             startToEndFrame = self._vace_start_to_end_frame.process(
                 num_frames=totalFramesToGenerate,
-                empty_frame_level=0.5,
+                empty_frame_level=1.0,
                 start_image=usedStartingImages,
                 end_image=None, # end image
                 control_images=usedControlImages,
@@ -3545,18 +3555,18 @@ class WanVideoLoopingSampler:
             
             # Process VACE embeds immediately
             vaceEmbeds = self._vace_encode.process(
-                    vae,
-                    width,
-                    height,
-                    totalFramesToGenerate,
-                    usedStrength,
-                    usedStartPercent,
-                    usedEndPercent,
-                    usedInputFrames,
-                    None, # ref_images
-                    usedInputMasks,
-                    previousVaceEmbeds,
-                    usedTiledVae
+                    vae = vae,
+                    width = width,
+                    height = height,
+                    num_frames = totalFramesToGenerate,
+                    strength = usedStrength,
+                    vace_start_percent = usedStartPercent,
+                    vace_end_percent = usedEndPercent,
+                    input_frames = usedInputFrames,
+                    ref_images = None, # ref_images
+                    input_masks = usedInputMasks,
+                    prev_vace_embeds = previousVaceEmbeds,
+                    tiled_vae = usedTiledVae
                 )[0]
             
             # Clear intermediate data explicitly
@@ -3570,18 +3580,24 @@ class WanVideoLoopingSampler:
                 torch.cuda.empty_cache()
             
             previousVaceEmbeds = vaceEmbeds
+            return usedStrength
         
         # Process each control image set sequentially
         control_images_processed = False
+        totalUsedStrength = 0.0
         for i, control_image_data in enumerate(control_images):
             if control_image_data is None:
                 continue
-            process_control_image_set(control_image_data)
+            totalUsedStrength += process_control_image_set(control_image_data)
             control_images_processed = True
         
         # if no control images were processed, create fallback
         if not control_images_processed:
+            print(f"WanVideoLoopingSampler - No control images processed, processing fallback control images.")
             process_control_image_set(None, is_fallback=True)
+        elif totalUsedStrength < 1.0 and batchIndex > 0:
+            print(f"WanVideoLoopingSampler - Total used strength is {totalUsedStrength}, processing fallback control images to fill the gap.")
+            process_control_image_set(None, is_fallback=True, defaultStrength=1.0-totalUsedStrength)
         
         return vaceEmbeds
 
@@ -3692,6 +3708,7 @@ class WanVideoLoopingSampler:
 
         # Pre-allocate generated_images tensor for better memory efficiency
         # Estimate final shape based on first batch to avoid repeated reallocations
+        # Account for dropping the first image in batch 1
         try:
             # Get device from starting_images or use default
             target_device = starting_images.device if starting_images is not None else torch.device('cpu')
@@ -3699,11 +3716,14 @@ class WanVideoLoopingSampler:
             # We'll allocate this after processing the first batch to know the exact dimensions
             preallocated_images = None
             preallocated_offset = 0
+            # Adjust total frames to account for dropping first image in batch 1
+            adjusted_total_frames = total_frames - 1
         except Exception as e:
             print(f"Warning: Could not determine device for pre-allocation: {e}")
             target_device = torch.device('cpu')
             preallocated_images = None
             preallocated_offset = 0
+            adjusted_total_frames = total_frames - 1
 
         batchSeed = seed
 
@@ -3747,7 +3767,8 @@ class WanVideoLoopingSampler:
                 width=width,
                 height=height,
                 control_after_start=batchControlAfterStart,
-                startingImagesAreGenerated=batchstartingImagesAreGenerated
+                startingImagesAreGenerated=batchstartingImagesAreGenerated,
+                batchIndex=batchCount-1
             )
 
             ClearMemory(
@@ -3818,9 +3839,11 @@ class WanVideoLoopingSampler:
 
             # as the decoded images include the prefix data and an extra unwanted frame at the end,
             # we only want the last numberOfFramesForBatch frames, AND we want to remove the last frame IF we are not on the last batch
+            # For batch 1, also drop the first image
             # Optimize: combine slicing operations to avoid intermediate tensor creation
             end_idx = None if isLastBatch else -1
-            batchDecodedSampleimages = batchDecodedSampleimages[-numberOfFramesForBatch:end_idx]
+            start_idx_adjustment = 1 if batchCount == 1 else 0  # Drop first image in batch 1
+            batchDecodedSampleimages = batchDecodedSampleimages[-(numberOfFramesForBatch - start_idx_adjustment):end_idx]
 
             gc.collect()
 
@@ -3893,8 +3916,8 @@ class WanVideoLoopingSampler:
                 # Pre-allocate the full tensor if we can estimate the final size
                 if preallocated_images is None:
                     try:
-                        # Calculate total expected frames (accounting for overlap removal)
-                        total_expected_frames = total_frames
+                        # Calculate total expected frames (accounting for overlap removal and dropping first image in batch 1)
+                        total_expected_frames = adjusted_total_frames
                         final_shape = (total_expected_frames,) + batchDecodedSampleimages.shape[1:]
                         
                         # Pre-allocate on the same device as the batch images
