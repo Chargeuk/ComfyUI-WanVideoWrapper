@@ -15,13 +15,13 @@ import time
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 from .wanvideo.modules.model import rope_params
-from .fp8_optimization import convert_linear_with_lora_and_scale, remove_lora_from_module
+from .fp8_optimization_v2 import remove_lora_from_module, set_lora_params as set_lora_params_fp8
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps, scheduler_list
 from .gguf.gguf import set_lora_params
 from .multitalk.multitalk import timestep_transform, add_noise
 from .utils import(log, print_memory, apply_lora, clip_encode_image_tiled, fourier_filter, 
-                   is_image_black, add_noise_to_reference_video, optimized_scale, setup_radial_attention, 
-                   compile_model, dict_to_device, tangential_projection, set_module_tensor_to_device)
+                   add_noise_to_reference_video, optimized_scale, setup_radial_attention, 
+                   compile_model, dict_to_device, tangential_projection, set_module_tensor_to_device, get_raag_guidance)
 from .cache_methods.cache_methods import cache_report
 from .enhance_a_video.globals import set_enhance_weight, set_num_frames
 from .taehv import TAEHV
@@ -548,6 +548,7 @@ of the original Wan templates or a custom system prompt.
                     device=device,
                     force_offload=False,
                     custom_system_prompt=extender_args["system_prompt"],
+                    seed=extender_args["seed"]
                 )
                 log.info(f"Extended positive prompt: {positive_prompt}")
                 _extender_cache[extender_key] = positive_prompt
@@ -807,8 +808,12 @@ class WanVideoTextEncodeSingle:
             params_to_keep = {'norm', 'pos_embedding', 'token_embedding'}
             for name, param in encoder.model.named_parameters():
                 dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
-                set_module_tensor_to_device(encoder.model, name, device=device_to, dtype=dtype_to_use, value=encoder.state_dict[name])
-
+                value = encoder.state_dict[name] if hasattr(encoder, 'state_dict') else encoder.model.state_dict()[name]
+                set_module_tensor_to_device(encoder.model, name, device=device_to, dtype=dtype_to_use, value=value)
+            if hasattr(encoder, 'state_dict'):
+                del encoder.state_dict
+                mm.soft_empty_cache()
+                gc.collect()
             with torch.autocast(device_type=mm.get_autocast_device(device_to), dtype=encoder.dtype, enabled=encoder.quantization != 'disabled'):
                 encoded = encoder([prompt], device_to)
 
@@ -1146,8 +1151,6 @@ class WanVideoImageToVideoEncode:
                 y[:, 1:] = 0
             elif start_image is None:
                 y[:, -1:] = 0
-            else:
-                y[:, 1:-1] = 0 # doesn't seem to work anyway though...
 
         # Calculate maximum sequence length
         patches_per_frame = lat_h * lat_w // (PATCH_SIZE[1] * PATCH_SIZE[2])
@@ -1175,7 +1178,8 @@ class WanVideoImageToVideoEncode:
             "end_image": resized_end_image if end_image is not None else None,
             "fun_or_fl2v_model": fun_or_fl2v_model,
             "has_ref": has_ref,
-            "add_cond_latents": add_cond_latents
+            "add_cond_latents": add_cond_latents,
+            "mask": mask if control_embeds is not None else None, # for 2.2 Fun control as it can handle masks
         }
 
         return (image_embeds,)
@@ -1208,10 +1212,49 @@ class WanVideoEmptyEmbeds:
             "target_shape": target_shape,
             "num_frames": num_frames,
             "control_embeds": control_embeds["control_embeds"] if control_embeds is not None else None,
-            "extra_latents": extra_latents
         }
-    
+        if extra_latents is not None:
+            embeds["extra_latents"] = [{
+                "samples": extra_latents["samples"],
+                "index": 0,
+            }]
+
         return (embeds,)
+    
+class WanVideoAddExtraLatent:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "embeds": ("WANVIDIMAGE_EMBEDS",),
+                    "extra_latents": ("LATENT",),
+                    "latent_index": ("INT", {"default": 0, "min": -1000, "max": 1000, "step": 1, "tooltip": "Index to insert the extra latents at in latent space"}),
+                }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
+    RETURN_NAMES = ("image_embeds",)
+    FUNCTION = "add"
+    CATEGORY = "WanVideoWrapper"
+
+    def add(self, embeds, extra_latents, latent_index):
+        # Prepare the new extra latent entry
+        new_entry = {
+            "samples": extra_latents["samples"],
+            "index": latent_index,
+        }
+        # Get previous extra_latents list, or start a new one
+        prev_extra_latents = embeds.get("extra_latents", None)
+        if prev_extra_latents is None:
+            extra_latents_list = [new_entry]
+        elif isinstance(prev_extra_latents, list):
+            extra_latents_list = prev_extra_latents + [new_entry]
+        else:
+            extra_latents_list = [prev_extra_latents, new_entry]
+
+        # Return a new dict with updated extra_latents
+        updated = dict(embeds)
+        updated["extra_latents"] = extra_latents_list
+        return (updated,)
 
 class WanVideoMiniMaxRemoverEmbeds:
     @classmethod
@@ -1420,7 +1463,7 @@ class WanVideoVACEEncode:
         if input_masks is None:
             input_masks = torch.ones_like(input_frames, device=device)
         else:
-            print("input_masks shape", input_masks.shape)
+            log.info(f"input_masks shape: {input_masks.shape}")
             input_masks = input_masks[:num_frames]
             input_masks = common_upscale(input_masks.clone().unsqueeze(1), width, height, "nearest-exact", "disabled").squeeze(1)
             input_masks = input_masks.to(vae.dtype).to(device)
@@ -1499,7 +1542,6 @@ class WanVideoVACEEncode:
                 if masks is None:
                     ref_latent = vae.encode(refs, device=device, tiled=tiled_vae)
                 else:
-                    print("refs shape", refs.shape)#torch.Size([3, 1, 512, 512])
                     ref_latent = vae.encode(refs, device=device, tiled=tiled_vae)
                     ref_latent = [torch.cat((u, torch.zeros_like(u)), dim=0) for u in ref_latent]
                 assert all([x.shape[1] == 1 for x in ref_latent])
@@ -1679,6 +1721,7 @@ class WanVideoExperimentalArgs:
                 "fresca_scale_high": ("FLOAT", {"default": 1.25, "min": 0.0, "max": 10.0, "step": 0.01}),
                 "fresca_freq_cutoff": ("INT", {"default": 20, "min": 0, "max": 10000, "step": 1}),
                 "use_tcfg": ("BOOLEAN", {"default": False, "tooltip": "https://arxiv.org/abs/2503.18137 TCFG: Tangential Damping Classifier-free Guidance. CFG artifacts reduction."}),
+                "raag_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Alpha value for RAAG, 1.0 is default, 0.0 is disabled."}),
             },
         }
 
@@ -1770,22 +1813,30 @@ class WanVideoSampler:
         transformer = model.diffusion_model
 
         dtype = model["dtype"]
+        fp8_matmul = model["fp8_matmul"]
         gguf = model["gguf"]
+        scale_weights = model["scale_weights"]
         control_lora = model["control_lora"]
+
         transformer_options = patcher.model_options.get("transformer_options", None)
+        merge_loras = transformer_options["merge_loras"]
 
         is_5b = transformer.out_dim == 48
         vae_upscale_factor = 16 if is_5b else 8
 
-        if len(patcher.patches) != 0 and transformer_options.get("linear_with_lora", False) is True:
+        patch_linear = transformer_options.get("patch_linear", False)
+
+        if gguf:
+            set_lora_params(transformer, patcher.patches)
+        elif len(patcher.patches) != 0 and patch_linear:
             log.info(f"Using {len(patcher.patches)} LoRA weight patches for WanVideo model")
-            if not gguf:
-                convert_linear_with_lora_and_scale(transformer, patches=patcher.patches)
-            else:
-                set_lora_params(transformer, patcher.patches)
+            if not merge_loras and fp8_matmul:
+                raise NotImplementedError("FP8 matmul with unmerged LoRAs is not supported")
+            set_lora_params_fp8(transformer, patcher.patches)
         else:
-            log.info("Unloading all LoRAs")
             remove_lora_from_module(transformer)
+
+        transformer.lora_scheduling_enabled = transformer_options.get("lora_scheduling_enabled", False)
 
         #torch.compile
         if model["auto_cpu_offload"] is False:
@@ -1814,6 +1865,9 @@ class WanVideoSampler:
         log.info(f"sigmas: {sample_scheduler.sigmas}")
         
         steps = len(timesteps)
+
+        if end_step != -1 and start_step >= end_step:
+            raise ValueError("start_step must be less than end_step")
 
         if denoise_strength < 1.0:
             if start_step != 0:
@@ -1904,8 +1958,12 @@ class WanVideoSampler:
 
             control_embeds = image_embeds.get("control_embeds", None)
             if control_embeds is not None:
-                if transformer.in_dim not in [48, 32]:
+                if transformer.in_dim not in [52, 48, 32]:
                     raise ValueError("Control signal only works with Fun-Control model")
+                if transformer.in_dim == 52: #fun 2.2 control
+                    image_cond_mask = image_embeds.get("mask", None)
+                    if image_cond_mask is not None:
+                        image_cond = torch.cat([image_cond_mask, image_cond])
                 control_latents = control_embeds.get("control_images", None)
                 control_camera_latents = control_embeds.get("control_camera_latents", None)
                 control_camera_start_percent = control_embeds.get("control_camera_start_percent", 0.0)
@@ -1991,9 +2049,15 @@ class WanVideoSampler:
                         patcher = apply_lora(patcher, device, device, low_mem_load=False, control_lora=True)
                         patcher.model.is_patched = True
                 else:
-                    if transformer.in_dim not in [48, 32]:
+                    if transformer.in_dim not in [48, 32, 52]:
                         raise ValueError("Control signal only works with Fun-Control model")
                     image_cond = torch.zeros_like(noise).to(device) #fun control
+                    if transformer.in_dim == 52: #fun 2.2 control
+                        mask_latents = torch.tile(
+                            torch.zeros_like(noise[:1]), [4, 1, 1, 1]
+                        )
+                        masked_video_latents_input = torch.zeros_like(noise)
+                    image_cond = torch.cat([mask_latents, masked_video_latents_input], dim=0).to(device)
                     clip_fea = None
                     fun_ref_image = control_embeds.get("fun_ref_image", None)
                 control_start_percent = control_embeds.get("start_percent", 0.0)
@@ -2176,18 +2240,15 @@ class WanVideoSampler:
                     mask = torch.cat([torch.zeros(1, noise.shape[0], noise.shape[1] - mask.shape[2], noise.shape[2], noise.shape[3]), mask], dim=2)
         
         # extra latents (Pusa) and 5b
-        latents_to_insert = None
+        latents_to_insert = add_index = None
         if (extra_latents := image_embeds.get("extra_latents", None)) is not None:
-            latents_to_insert = extra_latents["samples"].squeeze(0).to(noise)
-            num_latents_to_insert = latents_to_insert.shape[1]
-            if (empty_latent_indices := extra_latents.get("empty_latent_indices", None)) is not None and len(empty_latent_indices) > 0:
-                noise_out = latents_to_insert.clone()
-                for idx in empty_latent_indices:
-                    #print(f"Adding noise to Empty latent index: {idx}")
-                    noise_out[:, idx] = noise[:, idx]
-                noise = noise_out
-            else:
-                noise[:,0:num_latents_to_insert] = latents_to_insert
+            all_indices = []
+            for entry in extra_latents:
+                add_index = entry["index"]
+                noise[:, add_index] = entry["samples"].squeeze(0).squeeze(1).to(noise)
+                log.info(f"Adding extra samples to latent index {add_index}")
+                all_indices.append(add_index)
+        
 
         latent = noise.to(device)
 
@@ -2239,7 +2300,8 @@ class WanVideoSampler:
             shot_num = len(text_embeds["prompt_embeds"])
             shot_len = [latent_video_length//shot_num] * (shot_num-1)
             shot_len.append(latent_video_length-sum(shot_len))
-            log.info(f"EchoShot - Number of shots in prompt: {shot_num}, Shot token lengths: {shot_len}")
+            rope_function = "default" #echoshot does not support comfy rope function
+            log.info(f"Number of shots in prompt: {shot_num}, Shot token lengths: {shot_len}")
 
         #region transformer settings
         #rope
@@ -2297,6 +2359,10 @@ class WanVideoSampler:
                     module.offload()
                 if hasattr(module, "onload"):
                     module.onload()
+            for block in transformer.blocks:
+                block.modulation = torch.nn.Parameter(block.modulation.to(device))
+            transformer.head.modulation = torch.nn.Parameter(transformer.head.modulation.to(device))
+
         elif model["manual_offloading"]:
             transformer.to(device)
 
@@ -2367,6 +2433,7 @@ class WanVideoSampler:
 
         # Experimental args
         use_cfg_zero_star = use_tangential = use_fresca = False
+        raag_alpha = 0.0
         if experimental_args is not None:
             video_attention_split_steps = experimental_args.get("video_attention_split_steps", [])
             if video_attention_split_steps:
@@ -2378,6 +2445,7 @@ class WanVideoSampler:
             use_cfg_zero_star = experimental_args.get("cfg_zero_star", False)
             use_tangential = experimental_args.get("use_tcfg", False)
             zero_star_steps = experimental_args.get("zero_star_steps", 0)
+            raag_alpha = experimental_args.get("raag_alpha", 0.0)
 
             use_fresca = experimental_args.get("use_fresca", False)
             if use_fresca:
@@ -2408,7 +2476,7 @@ class WanVideoSampler:
                             (control_end_percent > 0 and idx == 0 and current_step_percentage >= control_start_percent):
                             image_cond_input = torch.cat([control_latents.to(z), image_cond.to(z)])
                         else:
-                            image_cond_input = torch.cat([torch.zeros_like(image_cond, dtype=dtype), image_cond.to(z)])
+                            image_cond_input = torch.cat([torch.zeros_like(control_latents, dtype=dtype), image_cond.to(z)])
                         if fun_ref_image is not None:
                             fun_ref_input = fun_ref_image.to(z)
                         else:
@@ -2506,7 +2574,7 @@ class WanVideoSampler:
                         for human_idx in range(human_num):
                             audio_start = context_window[0] * 4
                             audio_end = context_window[-1] * 4 + 1
-                            print("audio_start: ", audio_start, "audio_end: ", audio_end)
+                            #print("audio_start: ", audio_start, "audio_end: ", audio_end)
                             center_indices = torch.arange(audio_start, audio_end, 1).unsqueeze(1) + indices.unsqueeze(0)
                             center_indices = torch.clamp(center_indices, min=0, max=audio_embedding[human_idx].shape[0] - 1)
                             audio_emb = audio_embedding[human_idx][center_indices].unsqueeze(0).to(device)
@@ -2660,7 +2728,7 @@ class WanVideoSampler:
                     if force_offload:
                         if model["manual_offloading"]:
                             offload_transformer(transformer)
-                    raise mm.InterruptProcessingException()
+                    raise e
 
                 #https://github.com/WeichenFan/CFG-Zero-star/
                 if use_cfg_zero_star:
@@ -2675,6 +2743,11 @@ class WanVideoSampler:
 
                 if use_tangential:
                     noise_pred_uncond_scaled = tangential_projection(noise_pred_cond, noise_pred_uncond_scaled)
+
+                # RAAG (RATIO-aware Adaptive Guidance)
+                if raag_alpha > 0.0:
+                    cfg_scale = get_raag_guidance(noise_pred_cond, noise_pred_uncond_scaled, cfg_scale, raag_alpha)
+                    log.info(f"RAAG modified cfg: {cfg_scale}")
 
                 #https://github.com/WikiChao/FreSca
                 if use_fresca:
@@ -2737,10 +2810,21 @@ class WanVideoSampler:
         current_latent = latent
         
         for iter_idx in range(iterations): 
+
             # FreeInit noise reinitialization (after first iteration)
             if freeinit_args is not None and iter_idx > 0:
                 # restart scheduler for each iteration
                 sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+
+                # Re-apply start_step and end_step logic to timesteps and sigmas
+                if end_step != -1:
+                    timesteps = timesteps[:end_step]
+                    sample_scheduler.sigmas = sample_scheduler.sigmas[:end_step+1]
+                if start_step > 0:
+                    timesteps = timesteps[start_step:]
+                    sample_scheduler.sigmas = sample_scheduler.sigmas[start_step:]
+                if hasattr(sample_scheduler, 'timesteps'):
+                    sample_scheduler.timesteps = timesteps
 
                 # Diffuse current latent to t=999
                 diffuse_timesteps = torch.full((noise.shape[0],), 999, device=device, dtype=torch.long)
@@ -2798,15 +2882,13 @@ class WanVideoSampler:
                 current_step_percentage = idx / len(timesteps)
 
                 timestep = torch.tensor([t]).to(device)
-                if scheduler == "flowmatch_pusa" or (is_5b and latents_to_insert is not None):
+                if scheduler == "flowmatch_pusa" or (is_5b and 'all_indices' in locals()):
+                    orig_timestep = timestep
                     timestep = timestep.unsqueeze(1).repeat(1, latent_video_length)
                     if extra_latents is not None:
-                        if empty_latent_indices is not None and len(empty_latent_indices) > 0:
-                            # Set timestep to zero for all non-noise (non-empty) indices
-                            non_noise_indices = [i for i in range(timestep.shape[1]) if i not in empty_latent_indices]
-                            timestep[:, non_noise_indices] = 0
-                        else:
-                            timestep[:,0:num_latents_to_insert] = 0                
+                        if 'all_indices' in locals() and all_indices:
+                            timestep[:, all_indices] = 0
+                        #print("timestep: ", timestep)
 
                 ### latent shift
                 if latent_shift_loop:
@@ -3024,7 +3106,7 @@ class WanVideoSampler:
 
                         partial_latent_model_input = latent_model_input[:, c]
                         if latents_to_insert is not None and c[0] != 0:
-                            partial_latent_model_input[:, 0:num_latents_to_insert] = latents_to_insert
+                            partial_latent_model_input[:, :1] = latents_to_insert
 
                         partial_unianim_data = None
                         if unianim_data is not None:
@@ -3044,7 +3126,7 @@ class WanVideoSampler:
 
                         if len(timestep.shape) != 1:
                             partial_timestep = timestep[:, c]
-                            partial_timestep[:, :num_latents_to_insert] = 0
+                            partial_timestep[:, :1] = 0
                         else:
                             partial_timestep = timestep
                         #print("Partial timestep:", partial_timestep)
@@ -3252,7 +3334,7 @@ class WanVideoSampler:
                         # cache generated samples
                         videos = torch.stack(videos).cpu() # B C T H W
                         if colormatch != "disabled":
-                            videos = videos[0].permute(1, 2, 3, 0).cpu().numpy()
+                            videos = videos[0].permute(1, 2, 3, 0).cpu().float().numpy()
                             from color_matcher import ColorMatcher
                             cm = ColorMatcher()
                             cm_result_list = []
@@ -3337,13 +3419,28 @@ class WanVideoSampler:
                 if flowedit_args is None:
                     latent = latent.to(intermediate_device)
                     
-                    if len(timestep.shape) != 1 and scheduler != "flowmatch_pusa": #pusa and 5b
-                        latent_slice = sample_scheduler.step(
-                            noise_pred[:, num_latents_to_insert:].unsqueeze(0),
-                            timestep.flatten()[-1],
-                            latent[:, num_latents_to_insert:].unsqueeze(0),
-                            **scheduler_step_args)[0].squeeze(0)
-                        latent = torch.cat([latent[:, :num_latents_to_insert], latent_slice], dim=1)                    
+                    if len(timestep.shape) != 1 and scheduler != "flowmatch_pusa": #5b
+                        # all_indices is a list of indices to skip
+                        total_indices = list(range(latent.shape[1]))
+                        process_indices = [i for i in total_indices if i not in all_indices]
+                        if process_indices:
+                            latent_to_process = latent[:, process_indices]
+                            noise_pred_to_process = noise_pred[:, process_indices]
+                            latent_slice = sample_scheduler.step(
+                                noise_pred_to_process.unsqueeze(0),
+                                orig_timestep,
+                                latent_to_process.unsqueeze(0),
+                                **scheduler_step_args
+                            )[0].squeeze(0)
+                        # Reconstruct the latent tensor: keep skipped indices as-is, update others
+                        new_latent = []
+                        for i in total_indices:
+                            if i in all_indices:
+                                new_latent.append(latent[:, i:i+1])
+                            else:
+                                j = process_indices.index(i)
+                                new_latent.append(latent_slice[:, j:j+1])
+                        latent = torch.cat(new_latent, dim=1)
                     else:
                         latent = sample_scheduler.step(
                             noise_pred[:, :orig_noise_len].unsqueeze(0) if recammaster is not None else noise_pred.unsqueeze(0),
@@ -3396,7 +3493,7 @@ class WanVideoSampler:
             "drop_last": drop_last,
             "generator_state": seed_g.get_state(),
         },{
-            "samples": callback_latent.unsqueeze(0).cpu(), 
+            "samples": callback_latent.unsqueeze(0).cpu() if callback is not None else None, 
         })
 
 class WanVideoLoopingSampler:
@@ -4092,8 +4189,6 @@ class WanVideoDecode:
         if drop_last:
             latents = latents[:, :, :-1]
 
-        #if is_looped:
-        #   latents = torch.cat([latents[:, :, :warmup_latent_count],latents], dim=2)
         if type(vae).__name__ == "TAEHV":      
             images = vae.decode_video(latents.permute(0, 2, 1, 3, 4))[0].permute(1, 0, 2, 3)
             images = torch.clamp(images, 0.0, 1.0)
@@ -4105,34 +4200,31 @@ class WanVideoDecode:
             images = vae.decode(latents, device=device, end_=(end_image is not None), tiled=enable_vae_tiling, tile_size=(tile_x//8, tile_y//8), tile_stride=(tile_stride_x//8, tile_stride_y//8))[0]
             vae.model.clear_cache()
         
-        images = images.cpu()
+        images = images.cpu().float()
 
         if normalization == "minmax":
-            images = (images - images.min()) / (images.max() - images.min())
+            images.sub_(images.min()).div_(images.max() - images.min())
         else:  
-            images = torch.clamp(images, -1.0, 1.0) 
-            images = (images + 1.0) / 2.0
+            images.clamp_(-1.0, 1.0)
+            images.add_(1.0).div_(2.0)
         
         if is_looped:
-            #images = images[:, warmup_latent_count * 4:]
             temp_latents = torch.cat([latents[:, :, -3:]] + [latents[:, :, :2]], dim=2)
             temp_images = vae.decode(temp_latents, device=device, end_=(end_image is not None), tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))[0]
+            temp_images = temp_images.cpu().float()
             temp_images = (temp_images - temp_images.min()) / (temp_images.max() - temp_images.min())
             images = torch.cat([temp_images[:, 9:].to(images), images[:, 5:]], dim=1)
 
         if end_image is not None: 
-            #end_image = (end_image - end_image.min()) / (end_image.max() - end_image.min())
-            #image[:, -1] = end_image[:, 0].to(image) #not sure about this
             images = images[:, 0:-1]
 
         vae.model.clear_cache()
         vae.to(offload_device)
         mm.soft_empty_cache()
 
-        images = torch.clamp(images, 0.0, 1.0)
-        images = images.permute(1, 2, 3, 0).float()
+        images.clamp_(0.0, 1.0)
 
-        return (images,)
+        return (images.permute(1, 2, 3, 0),)
 
 #region VideoEncode
 class WanVideoEncode:
@@ -4173,35 +4265,7 @@ class WanVideoEncode:
 
         if image.shape[-1] == 4:
             image = image[..., :3]
-        image = image.to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W
-
-
-        empty_frame_indices = []
-        for i in range(image.shape[2]):
-            if is_image_black(image[:, :, i]):
-                empty_frame_indices.append(i)
-        empty_frame_indices = []
-        for i in range(image.shape[2]):
-            if is_image_black(image[:, :, i]):
-                empty_frame_indices.append(i)
-        empty_latent_indices = []
-        if empty_frame_indices:
-            frames_per_latent = 4
-            num_frames = image.shape[2]
-            # Special mapping: latent 0 = [0], latent 1 = [1,2,3,4], latent 2 = [5,6,7,8], ...
-            latent_frame_ranges = []
-            latent_frame_ranges.append([0])
-            for i in range(1, math.ceil((num_frames - 1) / frames_per_latent) + 1):
-                start = 1 + (i - 1) * frames_per_latent
-                end = min(start + frames_per_latent, num_frames)
-                latent_frame_ranges.append(list(range(start, end)))
-            for latent_idx, latent_frames in enumerate(latent_frame_ranges):
-                print(f"latent {latent_idx}: frames {latent_frames}")
-                if latent_frames and set(latent_frames).issubset(empty_frame_indices):
-                    empty_latent_indices.append(latent_idx)
-            if empty_latent_indices:
-                log.info(f"Empty frames {empty_frame_indices} map to latents {empty_latent_indices}")
-        
+        image = image.to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W        
 
         if noise_aug_strength > 0.0:
             image = add_noise_to_reference_video(image, ratio=noise_aug_strength)
@@ -4220,9 +4284,6 @@ class WanVideoEncode:
         if mask is None:
             vae.to(offload_device)
         else:
-            #latent_mask = mask.clone().to(vae.dtype).to(device) * 2.0 - 1.0
-            #latent_mask = latent_mask.unsqueeze(0).unsqueeze(0).repeat(1, 3, 1, 1, 1)
-            #latent_mask = vae.encode(latent_mask, device=device, tiled=enable_vae_tiling, tile_size=(tile_x, tile_y), tile_stride=(tile_stride_x, tile_stride_y))
             target_h, target_w = latents.shape[3:]
 
             mask = torch.nn.functional.interpolate(
@@ -4238,7 +4299,46 @@ class WanVideoEncode:
             vae.to(offload_device)
         mm.soft_empty_cache()
  
-        return ({"samples": latents, "mask": latent_mask, "empty_latent_indices": empty_latent_indices},)
+        return ({"samples": latents, "mask": latent_mask},)
+
+class WanVideoLatentReScale:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "samples": ("LATENT",),
+                    "direction": (["comfy_to_wrapper", "wrapper_to_comfy"], {"tooltip": "Direction to rescale latents, from comfy to wrapper or vice versa"}),
+                }
+                }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "encode"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Rescale latents to match the expected range for encoding or decoding. Can be used to "
+
+    def encode(self, samples, direction):
+        samples = samples.copy()
+        latents = samples["samples"]
+
+        mean = [
+            -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
+            0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921
+        ]
+        std = [
+            2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
+            3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160
+        ]
+        mean = torch.tensor(mean).view(1, latents.shape[1], 1, 1, 1)
+        std = torch.tensor(std).view(1, latents.shape[1], 1, 1, 1)
+        inv_std = (1.0 / std).view(1, latents.shape[1], 1, 1, 1)
+        if direction == "comfy_to_wrapper":
+            latents = (latents - mean.to(latents)) * inv_std.to(latents)
+        elif direction == "wrapper_to_comfy":
+            latents = latents / inv_std.to(latents) + mean.to(latents)
+
+        samples["samples"] = latents
+
+        return (samples,)
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoSampler": WanVideoSampler,
@@ -4275,6 +4375,8 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoSetRadialAttention": WanVideoSetRadialAttention,
     "WanVideoBlockList": WanVideoBlockList,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
+    "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
+    "WanVideoLatentReScale": WanVideoLatentReScale,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSampler": "WanVideo Sampler",
@@ -4312,4 +4414,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSetRadialAttention": "WanVideo Set Radial Attention",
     "WanVideoBlockList": "WanVideo Block List",
     "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
+    "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
+    "WanVideoLatentReScale": "WanVideo Latent ReScale",
     }

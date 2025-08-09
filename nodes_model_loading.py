@@ -7,11 +7,10 @@ from tqdm import tqdm
 from .wanvideo.modules.model import WanModel
 from .wanvideo.modules.t5 import T5EncoderModel
 from .wanvideo.modules.clip import CLIPModel
+from .wanvideo.wan_video_vae import WanVideoVAE, WanVideoVAE38
 
 from accelerate import init_empty_weights
 from .utils import set_module_tensor_to_device
-
-from .fp8_optimization import convert_linear_with_lora_and_scale
 
 import folder_paths
 import comfy.model_management as mm
@@ -389,11 +388,12 @@ class WanVideoLoraSelect:
             low_mem_load = False  # Unmerged LoRAs don't need low_mem_load
         loras_list = []
 
-        strength = round(strength, 4)
-        if strength == 0.0:
-            if prev_lora is not None:
-                loras_list.extend(prev_lora)
-            return (loras_list,)
+        if not isinstance(strength, list):
+            strength = round(strength, 4)
+            if strength == 0.0:
+                if prev_lora is not None:
+                    loras_list.extend(prev_lora)
+                return (loras_list,)
 
         try:
             lora_path = get_full_path("loras", lora)
@@ -499,7 +499,7 @@ class WanVideoLoraSelectMulti:
             (lora_4, strength_4)
         ]
         for lora_name, strength in lora_inputs:
-            s = round(strength, 4)
+            s = round(strength, 4) if not isinstance(strength, list) else strength
             if not lora_name or lora_name == "none" or s == 0.0:
                 continue
             loras_list.append({
@@ -684,11 +684,16 @@ class WanVideoSetLoRAs:
             merge_loras = l.get("merge_loras", True)
         if merge_loras is True:
             raise ValueError("Set LoRA node does not use low_mem_load and can't merge LoRAs, disable 'merge_loras' in the LoRA select node.")
-
+        
+        patcher.model_options['transformer_options']["lora_scheduling_enabled"] = False
         for l in lora:
             log.info(f"Loading LoRA: {l['name']} with strength: {l['strength']}")
             lora_path = l["path"]
             lora_strength = l["strength"]
+            if isinstance(lora_strength, list):
+                if merge_loras:
+                    raise ValueError("LoRA strength should be a single value when merge_loras=True")
+                patcher.model_options['transformer_options']["lora_scheduling_enabled"] = True
             if lora_strength == 0:
                 log.warning(f"LoRA {lora_path} has strength 0, skipping...")
                 continue
@@ -699,6 +704,10 @@ class WanVideoSetLoRAs:
             lora_sd = standardize_lora_key_format(lora_sd)
             if l["blocks"]:
                 lora_sd = filter_state_dict_by_blocks(lora_sd, l["blocks"], l.get("layer_filter", []))
+
+            # Filter out any LoRA keys containing 'img' if the base model state_dict has no 'img' keys
+            if not any('img' in k for k in model.model.diffusion_model.state_dict().keys()):
+                lora_sd = {k: v for k, v in lora_sd.items() if 'img' not in k}
             
             if "diffusion_model.patch_embedding.lora_A.weight" in lora_sd:
                 raise NotImplementedError("Control LoRA patching is not implemented in this node.")
@@ -710,7 +719,7 @@ class WanVideoSetLoRAs:
         if 'transformer_options' not in patcher.model_options:
             patcher.model_options['transformer_options'] = {}
 
-        patcher.model_options['transformer_options']["linear_with_lora"] = True
+        patcher.model_options['transformer_options']["patch_linear"] = True
 
         return (patcher,)
 
@@ -723,7 +732,7 @@ class WanVideoModelLoader:
                 "model": (get_filename_list("unet_gguf") + get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
             "base_precision": (["fp32", "bf16", "fp16", "fp16_fast"], {"default": "bf16"}),
-            "quantization": (["disabled", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2", "fp8_e4m3fn_fast_no_ffn", "fp8_e4m3fn_scaled", "fp8_e5m2_scaled"], {"default": "disabled", "tooltip": "optional quantization method"}),
+            "quantization": (["disabled", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e4m3fn_scaled", "fp8_e4m3fn_scaled_fast", "fp8_e5m2", "fp8_e5m2_fast", "fp8_e5m2_scaled", "fp8_e5m2_scaled_fast"], {"default": "disabled", "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device", "tooltip": "Initial device to load the model to, NOT recommended with the larger models unless you have 48GB+ VRAM"}),
             },
             "optional": {
@@ -860,6 +869,7 @@ class WanVideoModelLoader:
         ffn_dim = sd["blocks.0.ffn.0.bias"].shape[0]
         ffn2_dim = sd["blocks.0.ffn.2.weight"].shape[1]
 
+        model_type = "t2v"
         if not "text_embedding.0.weight" in sd:
             model_type = "no_cross_attn" #minimaxremover
         elif "model_type.Wan2_1-FLF2V-14B-720P" in sd or "img_emb.emb_pos" in sd or "flf2v" in model.lower():
@@ -1038,16 +1048,16 @@ class WanVideoModelLoader:
             model_type=comfy.model_base.ModelType.FLOW,
             device=device,
         )
-        
+        scale_weights = {}
         if not gguf:
-            
-            scale_weights = {}
-            if "scaled" in quantization:
-                scale_weights = {}
+            if "fp8" in quantization:
                 for k, v in sd.items():
                     if k.endswith(".scale_weight"):
                         scale_weights[k] = v
-
+                if not merge_loras:
+                    from .fp8_optimization_v2 import _replace_linear
+                    transformer = _replace_linear(transformer, base_dtype, sd, scale_weights=scale_weights)
+                
             if "fp8_e4m3fn" in quantization:
                 dtype = torch.float8_e4m3fn
             elif "fp8_e5m2" in quantization:
@@ -1091,6 +1101,10 @@ class WanVideoModelLoader:
                 log.info(f"Loading LoRA: {l['name']} with strength: {l['strength']}")
                 lora_path = l["path"]
                 lora_strength = l["strength"]
+                if isinstance(lora_strength, list):
+                    if merge_loras:
+                        raise ValueError("LoRA strength should be a single value when merge_loras=True")
+                    transformer.lora_scheduling_enabled = True
                 if lora_strength == 0:
                     log.warning(f"LoRA {lora_path} has strength 0, skipping...")
                     continue
@@ -1101,8 +1115,13 @@ class WanVideoModelLoader:
                     transformer = update_transformer(transformer, lora_sd)
 
                 lora_sd = standardize_lora_key_format(lora_sd)
+
                 if l["blocks"]:
                     lora_sd = filter_state_dict_by_blocks(lora_sd, l["blocks"], l.get("layer_filter", []))
+
+                # Filter out any LoRA keys containing 'img' if the base model state_dict has no 'img' keys
+                if not any('img' in k for k in sd.keys()):
+                    lora_sd = {k: v for k, v in lora_sd.items() if 'img' not in k}
 
                 #spacepxl's control LoRA patch
                 # for key in lora_sd.keys():
@@ -1147,6 +1166,8 @@ class WanVideoModelLoader:
                     patcher, device, transformer_load_device, 
                     params_to_keep=params_to_keep, dtype=dtype, base_dtype=base_dtype, state_dict=sd, 
                     low_mem_load=lora_low_mem_load, control_lora=control_lora, scale_weights=scale_weights)
+                scale_weights.clear()
+                patcher.patches.clear()
         
         if gguf:
             #from diffusers.quantizers.gguf.utils import _replace_with_gguf_linear, GGUFParameter
@@ -1182,22 +1203,14 @@ class WanVideoModelLoader:
 
         patcher.model.is_patched = True
 
-
-        if "fast" in quantization:
-            if not merge_loras:
-                raise ValueError("FP8 fast quantization requires LoRAs to be merged into the model, please set merge_loras=True in the LoRA input")
-            from .fp8_optimization import convert_fp8_linear
-            if quantization == "fp8_e4m3fn_fast_no_ffn":
-                params_to_keep.update({"ffn"})
-            print(params_to_keep)
-            convert_fp8_linear(patcher.model.diffusion_model, base_dtype, params_to_keep=params_to_keep)
+        patch_linear = (True if "scaled" in quantization or (lora is not None and not merge_loras) else False)
         
-        if "scaled" in quantization and not merge_loras:
-            log.info("Using FP8 scaled linear quantization")
-            convert_linear_with_lora_and_scale(patcher.model.diffusion_model, scale_weights, patches=patcher.patches)
-        elif lora is not None and not merge_loras and not gguf:
-            log.info("LoRAs will be applied at runtime")
-            convert_linear_with_lora_and_scale(patcher.model.diffusion_model, patches=patcher.patches)
+        if "fast" in quantization:
+            if lora is not None and not merge_loras:
+                raise NotImplementedError("fp8_fast is not supported with unmerged LoRAs")
+            from .fp8_optimization import convert_fp8_linear
+            convert_fp8_linear(transformer, base_dtype, params_to_keep, scale_weight_keys=scale_weights)
+            patch_linear = False
 
         del sd
 
@@ -1262,11 +1275,14 @@ class WanVideoModelLoader:
         patcher.model["control_lora"] = control_lora
         patcher.model["compile_args"] = compile_args
         patcher.model["gguf"] = gguf
+        patcher.model["fp8_matmul"] = "fast" in quantization
+        patcher.model["scale_weights"] = scale_weights
 
         if 'transformer_options' not in patcher.model_options:
             patcher.model_options['transformer_options'] = {}
         patcher.model_options["transformer_options"]["block_swap_args"] = block_swap_args
-        patcher.model_options["transformer_options"]["linear_with_lora"] = True if not merge_loras else False
+        patcher.model_options["transformer_options"]["patch_linear"] = patch_linear
+        patcher.model_options["transformer_options"]["merge_loras"] = merge_loras
 
         for model in mm.current_loaded_models:
             if model._model() == patcher:
@@ -1319,6 +1335,7 @@ class WanVideoVAELoader:
                 "precision": (["fp16", "fp32", "bf16"],
                     {"default": "bf16"}
                 ),
+                "compile_args": ("WANCOMPILEARGS", ),
             }
         }
 
@@ -1328,9 +1345,7 @@ class WanVideoVAELoader:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Loads Wan VAE model from 'ComfyUI/models/vae'"
 
-    def loadmodel(self, model_name, precision):
-        from .wanvideo.wan_video_vae import WanVideoVAE, WanVideoVAE38
-
+    def loadmodel(self, model_name, precision, compile_args=None):
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         #with open(os.path.join(script_directory, 'configs', 'hy_vae_config.json')) as f:
         #    vae_config = json.load(f)
@@ -1349,7 +1364,8 @@ class WanVideoVAELoader:
         vae.load_state_dict(vae_sd)
         vae.eval()
         vae.to(device = offload_device, dtype = dtype)
-            
+        if compile_args is not None:
+            vae.model.decoder = torch.compile(vae.model.decoder, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
 
         return (vae,)
 
@@ -1370,7 +1386,7 @@ class WanVideoTinyVAELoader:
     RETURN_NAMES = ("vae", )
     FUNCTION = "loadmodel"
     CATEGORY = "WanVideoWrapper"
-    DESCRIPTION = "Loads Wan VAE model from 'ComfyUI/models/vae'"
+    DESCRIPTION = "Loads Wan VAE model from 'ComfyUI/models/vae_approx'"
 
     def loadmodel(self, model_name, precision, parallel=False):
         from .taehv import TAEHV
