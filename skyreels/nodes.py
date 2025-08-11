@@ -845,6 +845,43 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Prefix video of length: 2
 
     def detect_scene_change(self, prev_frame, current_frame, threshold=0.3):
+        sceneChangeRgb = self.detect_scene_change_rgb(prev_frame, current_frame, threshold)
+        sceneChangeLab = self.detect_scene_change_lab(prev_frame, current_frame, threshold)
+        return max(sceneChangeRgb, sceneChangeLab) * 20
+
+    def detect_scene_change_rgb(self, prev_frame, current_frame, threshold=0.3):
+        """
+        Detect if there's a significant scene change between frames
+        Returns a value between 0 (no change) and 1 (complete change)
+        """
+        # Use RGB directly for simpler, more predictable results
+        prev_flat = prev_frame.flatten()
+        curr_flat = current_frame.flatten()
+        
+        # Calculate histogram differences
+        prev_hist = torch.histc(prev_flat, bins=64, min=0, max=1)
+        curr_hist = torch.histc(curr_flat, bins=64, min=0, max=1)
+        
+        # Normalize histograms
+        prev_hist_norm = prev_hist / (prev_hist.sum() + 1e-8)
+        curr_hist_norm = curr_hist / (curr_hist.sum() + 1e-8)
+        
+        hist_diff = torch.abs(prev_hist_norm - curr_hist_norm).sum() * 0.5
+        
+        # Calculate mean difference per channel
+        prev_mean = prev_frame.mean(dim=[0, 1])
+        curr_mean = current_frame.mean(dim=[0, 1])
+        mean_diff = torch.abs(prev_mean - curr_mean).mean()
+        
+        # Combine metrics
+        scene_change_score = 0.7 * hist_diff + 0.3 * mean_diff
+        calculatedDiff = scene_change_score.item()
+        print(f"Scene change RGB score: {calculatedDiff:.3f} (hist: {hist_diff:.3f}, mean: {mean_diff:.3f}), threshold: {threshold:.3f}")
+        
+        return min(calculatedDiff, 1.0)
+
+
+    def detect_scene_change_lab(self, prev_frame, current_frame, threshold=0.3):
         """
         Detect if there's a significant scene change between frames
         Returns a value between 0 (no change) and 1 (complete change)
@@ -853,36 +890,41 @@ class WanVideoLoopingDiffusionForcingSampler:
         prev_lab = self.rgb_to_lab(prev_frame)
         curr_lab = self.rgb_to_lab(current_frame)
         
-        # Calculate histogram differences with proper normalization
+        # Calculate histogram differences with fewer bins for better sensitivity
         prev_flat = prev_lab.flatten()
         curr_flat = curr_lab.flatten()
         
-        prev_hist = torch.histc(prev_flat, bins=256, min=0, max=1)
-        curr_hist = torch.histc(curr_flat, bins=256, min=0, max=1)
+        # Use 64 bins instead of 256 for better population per bin
+        prev_hist = torch.histc(prev_flat, bins=64, min=0, max=1)
+        curr_hist = torch.histc(curr_flat, bins=64, min=0, max=1)
         
         # Normalize histograms to probabilities (sum = 1)
-        prev_hist_norm = prev_hist / prev_hist.sum()
-        curr_hist_norm = curr_hist / curr_hist.sum()
+        prev_hist_norm = prev_hist / (prev_hist.sum() + 1e-8)  # Add epsilon for safety
+        curr_hist_norm = curr_hist / (curr_hist.sum() + 1e-8)
         
-        hist_diff = torch.abs(prev_hist_norm - curr_hist_norm).mean()
+        # Use sum instead of mean for histogram difference (gives better range)
+        hist_diff = torch.abs(prev_hist_norm - curr_hist_norm).sum() * 0.5
         
-        # Calculate mean difference
-        mean_diff = torch.abs(prev_lab.mean() - curr_lab.mean())
+        # Calculate mean difference per channel for better sensitivity
+        prev_mean = prev_lab.mean(dim=[0, 1])  # [L, A, B] means
+        curr_mean = curr_lab.mean(dim=[0, 1])  # [L, A, B] means
+        mean_diff = torch.abs(prev_mean - curr_mean).mean()
         
-        # Combine metrics
-        scene_change_score = (hist_diff + mean_diff) / 2
+        # Weight histogram difference more heavily for scene changes
+        scene_change_score = 0.7 * hist_diff + 0.3 * mean_diff
         calculatedDiff = scene_change_score.item()
-        print(f"Scene change score: {calculatedDiff:.3f}, threshold: {threshold:.3f}")
+        print(f"Scene change LAB score: {calculatedDiff:.3f} (hist: {hist_diff:.3f}, mean: {mean_diff:.3f}), threshold: {threshold:.3f}")
         
         return min(calculatedDiff, 1.0)
+        
 
     def rgb_to_lab(self, rgb_tensor):
         """Simple RGB to LAB conversion approximation"""
         # This is a simplified version - you might want to use a proper color space conversion
         r, g, b = rgb_tensor[..., 0], rgb_tensor[..., 1], rgb_tensor[..., 2]
-        l = 0.299 * r + 0.587 * g + 0.114 * b
-        a = (r - g) * 0.5
-        b_comp = (r + g - 2 * b) * 0.25
+        l = 0.299 * r + 0.587 * g + 0.114 * b  # Range: 0-1
+        a = (r - g) * 0.5 + 0.5                # Range: 0-1 (shifted)
+        b_comp = (r + g - 2 * b) * 0.25 + 0.5  # Range: 0-1 (shifted)
         return torch.stack([l, a, b_comp], dim=-1)
 
     def temporal_color_smooth(self, current_frames, prev_frames, smoothing_factor=0.1):
@@ -914,11 +956,12 @@ class WanVideoLoopingDiffusionForcingSampler:
             return decoded_frames
         
         processed_frames = []
+        original_frames = list(decoded_frames)  # Keep track of original frames for scene change detection
         
         for i, current_frame in enumerate(decoded_frames):
             current_frame_batch = current_frame.unsqueeze(0)  # Add batch dimension
             
-            # Determine reference frame for this specific frame
+            # Determine reference frame for this specific frame (use CORRECTED frames)
             reference_frame = None
             adaptive_strength = color_match_strength
             
@@ -954,17 +997,17 @@ class WanVideoLoopingDiffusionForcingSampler:
             if color_match_adaptive:
                 scene_change_score = 0.0
                 if i > 0:
-                    # Compare with previous CORRECTED frame in batch
+                    # Compare ORIGINAL frames for scene change detection
                     scene_change_score = self.detect_scene_change(
-                        processed_frames[-1].unsqueeze(0), 
-                        current_frame_batch,
+                        original_frames[i-1].unsqueeze(0),  # Previous ORIGINAL frame
+                        current_frame_batch,                # Current ORIGINAL frame
                         color_match_scene_threshold
                     )
-                elif len(self.color_reference_buffer) > 0:
-                    # Compare with last CORRECTED frame from buffer
+                elif hasattr(self, 'original_reference_buffer') and len(self.original_reference_buffer) > 0:
+                    # Compare with last ORIGINAL frame from buffer
                     scene_change_score = self.detect_scene_change(
-                        self.color_reference_buffer[-1].unsqueeze(0), 
-                        current_frame_batch,
+                        self.original_reference_buffer[-1].unsqueeze(0),  # Last ORIGINAL frame from buffer
+                        current_frame_batch,                              # Current ORIGINAL frame
                         color_match_scene_threshold
                     )
                 
@@ -976,10 +1019,9 @@ class WanVideoLoopingDiffusionForcingSampler:
                     # Keep original strength for minor changes
                     adaptive_strength = color_match_strength
                 
-                # if i == 0:  # Only print for first frame to avoid spam
                 print(f"Frame {i}: Scene change score: {scene_change_score:.3f}, threshold: {color_match_scene_threshold:.3f}, adaptive strength: {adaptive_strength:.3f}")
             
-            # Apply color matching
+            # Apply color matching using CORRECTED reference frame
             if adaptive_strength > 0.0:
                 print(f"Frame {i}: Applying color matching with strength {adaptive_strength:.3f} using method {color_match_method}")
                 color_match_result = colormatch(reference_frame, current_frame_batch, color_match_method, adaptive_strength)
@@ -997,11 +1039,18 @@ class WanVideoLoopingDiffusionForcingSampler:
             
             processed_frames.append(processed_frame)
             
-            # Update rolling buffer with CORRECTED frame
+            # Update rolling buffer with CORRECTED frame for color matching
             if self.color_reference_method == "rolling_average":
                 if len(self.color_reference_buffer) >= self.buffer_size:
                     self.color_reference_buffer.pop(0)
                 self.color_reference_buffer.append(processed_frame.clone())
+            
+            # Also maintain original frame buffer for scene change detection
+            if not hasattr(self, 'original_reference_buffer'):
+                self.original_reference_buffer = []
+            if len(self.original_reference_buffer) >= self.buffer_size:
+                self.original_reference_buffer.pop(0)
+            self.original_reference_buffer.append(current_frame.clone())
         
         return torch.stack(processed_frames, dim=0)
 
@@ -1017,6 +1066,7 @@ class WanVideoLoopingDiffusionForcingSampler:
         
         # Reset color reference buffer for each process call to ensure clean state
         self.color_reference_buffer = []
+        self.original_reference_buffer = []  # Buffer for original frames (scene change detection)
         self.buffer_size = 5  # Keep last 5 frames as references
         
         if cache_args2 is None:
