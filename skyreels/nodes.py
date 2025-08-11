@@ -953,20 +953,27 @@ class WanVideoLoopingDiffusionForcingSampler:
                     # Compare with previous CORRECTED frame in batch
                     scene_change_score = self.detect_scene_change(
                         processed_frames[-1].unsqueeze(0), 
-                        current_frame_batch
+                        current_frame_batch,
+                        color_match_scene_threshold
                     )
                 elif len(self.color_reference_buffer) > 0:
                     # Compare with last CORRECTED frame from buffer
                     scene_change_score = self.detect_scene_change(
                         self.color_reference_buffer[-1].unsqueeze(0), 
-                        current_frame_batch
+                        current_frame_batch,
+                        color_match_scene_threshold
                     )
                 
-                # Reduce color matching strength for significant scene changes
-                adaptive_strength = color_match_strength * (1.0 - scene_change_score * 0.8)
+                # Use threshold to determine if scene change is significant enough to reduce color matching
+                if scene_change_score > color_match_scene_threshold:
+                    # Reduce color matching strength for significant scene changes
+                    adaptive_strength = color_match_strength * (1.0 - scene_change_score * 0.8)
+                else:
+                    # Keep original strength for minor changes
+                    adaptive_strength = color_match_strength
                 
                 if i == 0:  # Only print for first frame to avoid spam
-                    print(f"Frame {i}: Scene change score: {scene_change_score:.3f}, adaptive strength: {adaptive_strength:.3f}")
+                    print(f"Frame {i}: Scene change score: {scene_change_score:.3f}, threshold: {color_match_scene_threshold:.3f}, adaptive strength: {adaptive_strength:.3f}")
             
             # Apply color matching
             if adaptive_strength > 0.0:
@@ -1002,10 +1009,9 @@ class WanVideoLoopingDiffusionForcingSampler:
         # Store reference method as instance variable for use in frame processing
         self.color_reference_method = color_reference_method
         
-        # Initialize color reference buffer for rolling average
-        if not hasattr(self, 'color_reference_buffer'):
-            self.color_reference_buffer = []
-            self.buffer_size = 5  # Keep last 5 frames as references
+        # Reset color reference buffer for each process call to ensure clean state
+        self.color_reference_buffer = []
+        self.buffer_size = 5  # Keep last 5 frames as references
         
         if cache_args2 is None:
             cache_args2 = cache_args
