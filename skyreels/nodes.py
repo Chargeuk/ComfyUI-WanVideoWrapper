@@ -805,7 +805,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "color_match_args": ("COLOURMATCHARGS", ),
                 "use_model_upscale": ("BOOLEAN", {"default": True, "tooltip": "Use provided upscale model to upscale the generated video"}),
                 "simple_scale_Args": ("WANSIMPLESCALEARGS", {"tooltip": "Arguments for simple scaling."}),
-                "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
                 "denoising_multiplier_end": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive at the end of the video"}),
@@ -816,7 +816,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "prefix_steps": ("INT", {"default": 6, "min": 1}),
                 "prefix_shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "prefix_frame_count": ("INT", {"default": 1, "min": 1}),
-                "prefix_noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "prefix_noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001}),
             }
         }
 
