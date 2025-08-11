@@ -805,6 +805,10 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "color_match_args": ("COLOURMATCHARGS", ),
                 "use_model_upscale": ("BOOLEAN", {"default": True, "tooltip": "Use provided upscale model to upscale the generated video"}),
                 "simple_scale_Args": ("WANSIMPLESCALEARGS", {"tooltip": "Arguments for simple scaling."}),
+                "color_match_scene_threshold": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Threshold for scene change detection"}),
+                "color_match_adaptive": ("BOOLEAN", {"default": True, "tooltip": "Use adaptive color matching strength"}),
+                "temporal_smoothing": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal smoothing factor"}),
+                "color_reference_method": (["first_frame", "rolling_average", "previous_frame"], {"default": "rolling_average"}),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
@@ -840,12 +844,75 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Batch samples shape: torch.Size([1, 16, 25, 58, 104])
     # Prefix video of length: 2
 
+    def detect_scene_change(self, prev_frame, current_frame, threshold=0.3):
+        """
+        Detect if there's a significant scene change between frames
+        Returns a value between 0 (no change) and 1 (complete change)
+        """
+        # Convert to LAB color space for perceptual difference
+        prev_lab = self.rgb_to_lab(prev_frame)
+        curr_lab = self.rgb_to_lab(current_frame)
+        
+        # Calculate histogram differences
+        prev_hist = torch.histc(prev_lab.flatten(), bins=256, min=0, max=1)
+        curr_hist = torch.histc(curr_lab.flatten(), bins=256, min=0, max=1)
+        hist_diff = torch.abs(prev_hist - curr_hist).mean()
+        
+        # Calculate mean difference
+        mean_diff = torch.abs(prev_lab.mean() - curr_lab.mean())
+        
+        # Combine metrics
+        scene_change_score = (hist_diff + mean_diff) / 2
+        
+        return min(scene_change_score.item(), 1.0)
+
+    def rgb_to_lab(self, rgb_tensor):
+        """Simple RGB to LAB conversion approximation"""
+        # This is a simplified version - you might want to use a proper color space conversion
+        r, g, b = rgb_tensor[..., 0], rgb_tensor[..., 1], rgb_tensor[..., 2]
+        l = 0.299 * r + 0.587 * g + 0.114 * b
+        a = (r - g) * 0.5
+        b_comp = (r + g - 2 * b) * 0.25
+        return torch.stack([l, a, b_comp], dim=-1)
+
+    def temporal_color_smooth(self, current_frames, prev_frames, smoothing_factor=0.1):
+        """
+        Apply temporal smoothing to reduce sudden color changes
+        """
+        if prev_frames is None or smoothing_factor <= 0.0:
+            return current_frames
+        
+        # Convert to LAB for better perceptual smoothing
+        current_lab = self.rgb_to_lab(current_frames)
+        prev_lab = self.rgb_to_lab(prev_frames[-current_frames.shape[0]:])
+        
+        # Apply exponential smoothing
+        smoothed_lab = (1 - smoothing_factor) * current_lab + smoothing_factor * prev_lab
+        
+        # Convert back to RGB (simplified approximation)
+        l, a, b_comp = smoothed_lab[..., 0], smoothed_lab[..., 1], smoothed_lab[..., 2]
+        r = l + a
+        g = l - a
+        b = l - 4 * b_comp
+        
+        # Clamp values to valid range
+        rgb_smoothed = torch.stack([r, g, b], dim=-1)
+        rgb_smoothed = torch.clamp(rgb_smoothed, 0.0, 1.0)
+        
+        return rgb_smoothed
+
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
-                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None):
+                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None, color_match_scene_threshold=0.3, color_match_adaptive=True, temporal_smoothing=0.1, color_reference_method="rolling_average"):
         vae_stride = (4, 8, 8)
+        
+        # Initialize color reference buffer for rolling average
+        if not hasattr(self, 'color_reference_buffer'):
+            self.color_reference_buffer = []
+            self.buffer_size = 5  # Keep last 5 frames as references
+        
         if cache_args2 is None:
             cache_args2 = cache_args
         if denoising_multiplier_end is None:
@@ -1051,9 +1118,13 @@ class WanVideoLoopingDiffusionForcingSampler:
                 if color_match_source is None:
                     # use the first frame of the decoded prefix samples as the color match source
                     color_match_source = used_decoded_sample_images[0].unsqueeze(0).clone()
-                # we need to color match the decoded_sample_images
-                color_match_result = colormatch(color_match_source, used_decoded_sample_images, color_match_method, color_match_strength)
+                
+                # Apply adaptive color matching to prefix samples as well
+                adaptive_strength = color_match_strength
+                print(f"Color matching prefix samples with adaptive strength {adaptive_strength}")
+                color_match_result = colormatch(color_match_source, used_decoded_sample_images, color_match_method, adaptive_strength)
                 used_decoded_sample_images = color_match_result[0]
+                
                 # we need to reencode the decoded prefix samples
                 print(f"Re-encoding decoded prefix samples with wanVideoEncode")
                 encoded_samples = wanVideoEncode.encode(
@@ -1292,14 +1363,48 @@ class WanVideoLoopingDiffusionForcingSampler:
                     print(f"Execution time for model upscale block: {elapsed_time:.4f} seconds")
 
                 if color_match_strength > 0.0:       
-                    start_time = time.time()  # Start timing             
-                    if color_match_source is None:
-                        # use the first frame of the decoded samples as the color match source
+                    start_time = time.time()
+                    
+                    # Update reference buffer for rolling average
+                    if color_reference_method == "rolling_average" and generated_images is not None and generated_images.shape[0] > 0:
+                        if len(self.color_reference_buffer) >= self.buffer_size:
+                            self.color_reference_buffer.pop(0)
+                        self.color_reference_buffer.append(generated_images[-1].clone())
+                    
+                    # Determine color match source based on method
+                    if color_reference_method == "rolling_average" and len(self.color_reference_buffer) > 0:
+                        color_match_source = torch.stack(self.color_reference_buffer).mean(dim=0).unsqueeze(0)
+                    elif color_reference_method == "previous_frame" and generated_images is not None and generated_images.shape[0] > 0:
+                        color_match_source = generated_images[-1].unsqueeze(0).clone()
+                    else:
+                        # Default to first frame
                         color_match_source = used_decoded_sample_images[0].unsqueeze(0).clone()
-                    print(f"Color matching prefix samples with WanColorMatch")
-                    color_match_result = colormatch(color_match_source, used_decoded_sample_images, color_match_method, color_match_strength)
+                    
+                    # Adaptive strength based on scene change
+                    adaptive_strength = color_match_strength
+                    if color_match_adaptive and generated_images is not None and generated_images.shape[0] > 0:
+                        scene_change_score = self.detect_scene_change(
+                            generated_images[-1].unsqueeze(0), 
+                            used_decoded_sample_images[0].unsqueeze(0)
+                        )
+                        # Reduce color matching strength for significant scene changes
+                        adaptive_strength = color_match_strength * (1.0 - scene_change_score * 0.8)
+                        print(f"Scene change score: {scene_change_score:.3f}, adaptive strength: {adaptive_strength:.3f}")
+                    
+                    print(f"Color matching with adaptive strength {adaptive_strength}")
+                    color_match_result = colormatch(color_match_source, used_decoded_sample_images, color_match_method, adaptive_strength)
                     used_decoded_sample_images = color_match_result[0]
-                    end_time = time.time()  # End timing
+                    
+                    # Apply temporal smoothing if enabled
+                    if temporal_smoothing > 0.0 and generated_images is not None and generated_images.shape[0] > 0:
+                        print(f"Applying temporal smoothing with factor {temporal_smoothing}")
+                        used_decoded_sample_images = self.temporal_color_smooth(
+                            used_decoded_sample_images, 
+                            generated_images, 
+                            temporal_smoothing
+                        )
+                    
+                    end_time = time.time()
                     elapsed_time = end_time - start_time
                     print(f"Execution time for color matching block: {elapsed_time:.4f} seconds")
 
