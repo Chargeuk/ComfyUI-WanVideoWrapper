@@ -853,18 +853,28 @@ class WanVideoLoopingDiffusionForcingSampler:
         prev_lab = self.rgb_to_lab(prev_frame)
         curr_lab = self.rgb_to_lab(current_frame)
         
-        # Calculate histogram differences
-        prev_hist = torch.histc(prev_lab.flatten(), bins=256, min=0, max=1)
-        curr_hist = torch.histc(curr_lab.flatten(), bins=256, min=0, max=1)
-        hist_diff = torch.abs(prev_hist - curr_hist).mean()
+        # Calculate histogram differences with proper normalization
+        prev_flat = prev_lab.flatten()
+        curr_flat = curr_lab.flatten()
+        
+        prev_hist = torch.histc(prev_flat, bins=256, min=0, max=1)
+        curr_hist = torch.histc(curr_flat, bins=256, min=0, max=1)
+        
+        # Normalize histograms to probabilities (sum = 1)
+        prev_hist_norm = prev_hist / prev_hist.sum()
+        curr_hist_norm = curr_hist / curr_hist.sum()
+        
+        hist_diff = torch.abs(prev_hist_norm - curr_hist_norm).mean()
         
         # Calculate mean difference
         mean_diff = torch.abs(prev_lab.mean() - curr_lab.mean())
         
         # Combine metrics
         scene_change_score = (hist_diff + mean_diff) / 2
+        calculatedDiff = scene_change_score.item()
+        print(f"Scene change score: {calculatedDiff:.3f}, threshold: {threshold:.3f}")
         
-        return min(scene_change_score.item(), 1.0)
+        return min(calculatedDiff, 1.0)
 
     def rgb_to_lab(self, rgb_tensor):
         """Simple RGB to LAB conversion approximation"""
@@ -878,28 +888,21 @@ class WanVideoLoopingDiffusionForcingSampler:
     def temporal_color_smooth(self, current_frames, prev_frames, smoothing_factor=0.1):
         """
         Apply temporal smoothing to reduce sudden color changes
+        Uses direct RGB smoothing to avoid color space conversion issues
         """
         if prev_frames is None or smoothing_factor <= 0.0:
             return current_frames
         
-        # Convert to LAB for better perceptual smoothing
-        current_lab = self.rgb_to_lab(current_frames)
-        prev_lab = self.rgb_to_lab(prev_frames[-current_frames.shape[0]:])
+        # Get the right number of previous frames to match current frames
+        prev_frames_matched = prev_frames[-current_frames.shape[0]:]
         
-        # Apply exponential smoothing
-        smoothed_lab = (1 - smoothing_factor) * current_lab + smoothing_factor * prev_lab
-        
-        # Convert back to RGB (simplified approximation)
-        l, a, b_comp = smoothed_lab[..., 0], smoothed_lab[..., 1], smoothed_lab[..., 2]
-        r = l + a
-        g = l - a
-        b = l - 4 * b_comp
+        # Direct RGB smoothing (safer, avoids color space conversion issues)
+        smoothed_rgb = (1 - smoothing_factor) * current_frames + smoothing_factor * prev_frames_matched
         
         # Clamp values to valid range
-        rgb_smoothed = torch.stack([r, g, b], dim=-1)
-        rgb_smoothed = torch.clamp(rgb_smoothed, 0.0, 1.0)
+        smoothed_rgb = torch.clamp(smoothed_rgb, 0.0, 1.0)
         
-        return rgb_smoothed
+        return smoothed_rgb
 
     def process_batch_with_frame_by_frame_colormatch(self, decoded_frames, color_match_strength, color_match_method, 
                                                     color_match_adaptive, color_match_scene_threshold, temporal_smoothing, color_match_source=None):
@@ -940,6 +943,7 @@ class WanVideoLoopingDiffusionForcingSampler:
             
             # If no reference available, use current frame as reference (no change)
             if reference_frame is None:
+                print(f"Frame {i}: No reference frame available, using current frame as reference, so no change")
                 reference_frame = current_frame_batch.clone()
                 
             # Set initial color_match_source if not set yet and this is the first frame
@@ -972,14 +976,16 @@ class WanVideoLoopingDiffusionForcingSampler:
                     # Keep original strength for minor changes
                     adaptive_strength = color_match_strength
                 
-                if i == 0:  # Only print for first frame to avoid spam
-                    print(f"Frame {i}: Scene change score: {scene_change_score:.3f}, threshold: {color_match_scene_threshold:.3f}, adaptive strength: {adaptive_strength:.3f}")
+                # if i == 0:  # Only print for first frame to avoid spam
+                print(f"Frame {i}: Scene change score: {scene_change_score:.3f}, threshold: {color_match_scene_threshold:.3f}, adaptive strength: {adaptive_strength:.3f}")
             
             # Apply color matching
             if adaptive_strength > 0.0:
+                print(f"Frame {i}: Applying color matching with strength {adaptive_strength:.3f} using method {color_match_method}")
                 color_match_result = colormatch(reference_frame, current_frame_batch, color_match_method, adaptive_strength)
                 processed_frame = color_match_result[0][0]  # Remove batch dimension
             else:
+                print(f"Frame {i}: No color matching applied, adaptive strength is 0.0!!!!")
                 processed_frame = current_frame
             
             # Apply temporal smoothing if enabled
