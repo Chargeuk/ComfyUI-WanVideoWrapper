@@ -809,6 +809,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "color_match_adaptive": ("BOOLEAN", {"default": True, "tooltip": "Use adaptive color matching strength"}),
                 "temporal_smoothing": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal smoothing factor"}),
                 "color_reference_method": (["first_frame", "rolling_average", "previous_frame"], {"default": "rolling_average"}),
+                "color_correction_method": (["frame_by_frame", "advanced"], {"default": "frame_by_frame", "tooltip": "Choose color correction method: frame_by_frame (original) or advanced (luminance-preserving)"}),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
@@ -844,221 +845,11 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Batch samples shape: torch.Size([1, 16, 25, 58, 104])
     # Prefix video of length: 2
 
-    def detect_scene_change(self, prev_frame, current_frame, threshold=0.3):
-        sceneChangeRgb = self.detect_scene_change_rgb(prev_frame, current_frame, threshold)
-        sceneChangeLab = self.detect_scene_change_lab(prev_frame, current_frame, threshold)
-        return max(sceneChangeRgb, sceneChangeLab) * 20
-
-    def detect_scene_change_rgb(self, prev_frame, current_frame, threshold=0.3):
-        """
-        Detect if there's a significant scene change between frames
-        Returns a value between 0 (no change) and 1 (complete change)
-        """
-        # Use RGB directly for simpler, more predictable results
-        prev_flat = prev_frame.flatten()
-        curr_flat = current_frame.flatten()
-        
-        # Calculate histogram differences
-        prev_hist = torch.histc(prev_flat, bins=64, min=0, max=1)
-        curr_hist = torch.histc(curr_flat, bins=64, min=0, max=1)
-        
-        # Normalize histograms
-        prev_hist_norm = prev_hist / (prev_hist.sum() + 1e-8)
-        curr_hist_norm = curr_hist / (curr_hist.sum() + 1e-8)
-        
-        hist_diff = torch.abs(prev_hist_norm - curr_hist_norm).sum() * 0.5
-        
-        # Calculate mean difference per channel
-        prev_mean = prev_frame.mean(dim=[0, 1])
-        curr_mean = current_frame.mean(dim=[0, 1])
-        mean_diff = torch.abs(prev_mean - curr_mean).mean()
-        
-        # Combine metrics
-        scene_change_score = 0.7 * hist_diff + 0.3 * mean_diff
-        calculatedDiff = scene_change_score.item()
-        print(f"Scene change RGB score: {calculatedDiff:.3f} (hist: {hist_diff:.3f}, mean: {mean_diff:.3f}), threshold: {threshold:.3f}")
-        
-        return min(calculatedDiff, 1.0)
-
-
-    def detect_scene_change_lab(self, prev_frame, current_frame, threshold=0.3):
-        """
-        Detect if there's a significant scene change between frames
-        Returns a value between 0 (no change) and 1 (complete change)
-        """
-        # Convert to LAB color space for perceptual difference
-        prev_lab = self.rgb_to_lab(prev_frame)
-        curr_lab = self.rgb_to_lab(current_frame)
-        
-        # Calculate histogram differences with fewer bins for better sensitivity
-        prev_flat = prev_lab.flatten()
-        curr_flat = curr_lab.flatten()
-        
-        # Use 64 bins instead of 256 for better population per bin
-        prev_hist = torch.histc(prev_flat, bins=64, min=0, max=1)
-        curr_hist = torch.histc(curr_flat, bins=64, min=0, max=1)
-        
-        # Normalize histograms to probabilities (sum = 1)
-        prev_hist_norm = prev_hist / (prev_hist.sum() + 1e-8)  # Add epsilon for safety
-        curr_hist_norm = curr_hist / (curr_hist.sum() + 1e-8)
-        
-        # Use sum instead of mean for histogram difference (gives better range)
-        hist_diff = torch.abs(prev_hist_norm - curr_hist_norm).sum() * 0.5
-        
-        # Calculate mean difference per channel for better sensitivity
-        prev_mean = prev_lab.mean(dim=[0, 1])  # [L, A, B] means
-        curr_mean = curr_lab.mean(dim=[0, 1])  # [L, A, B] means
-        mean_diff = torch.abs(prev_mean - curr_mean).mean()
-        
-        # Weight histogram difference more heavily for scene changes
-        scene_change_score = 0.7 * hist_diff + 0.3 * mean_diff
-        calculatedDiff = scene_change_score.item()
-        print(f"Scene change LAB score: {calculatedDiff:.3f} (hist: {hist_diff:.3f}, mean: {mean_diff:.3f}), threshold: {threshold:.3f}")
-        
-        return min(calculatedDiff, 1.0)
-        
-
-    def rgb_to_lab(self, rgb_tensor):
-        """Simple RGB to LAB conversion approximation"""
-        # This is a simplified version - you might want to use a proper color space conversion
-        r, g, b = rgb_tensor[..., 0], rgb_tensor[..., 1], rgb_tensor[..., 2]
-        l = 0.299 * r + 0.587 * g + 0.114 * b  # Range: 0-1
-        a = (r - g) * 0.5 + 0.5                # Range: 0-1 (shifted)
-        b_comp = (r + g - 2 * b) * 0.25 + 0.5  # Range: 0-1 (shifted)
-        return torch.stack([l, a, b_comp], dim=-1)
-
-    def temporal_color_smooth(self, current_frames, prev_frames, smoothing_factor=0.1):
-        """
-        Apply temporal smoothing to reduce sudden color changes
-        Uses direct RGB smoothing to avoid color space conversion issues
-        """
-        if prev_frames is None or smoothing_factor <= 0.0:
-            return current_frames
-        
-        # Get the right number of previous frames to match current frames
-        prev_frames_matched = prev_frames[-current_frames.shape[0]:]
-        
-        # Direct RGB smoothing (safer, avoids color space conversion issues)
-        smoothed_rgb = (1 - smoothing_factor) * current_frames + smoothing_factor * prev_frames_matched
-        
-        # Clamp values to valid range
-        smoothed_rgb = torch.clamp(smoothed_rgb, 0.0, 1.0)
-        
-        return smoothed_rgb
-
-    def process_batch_with_frame_by_frame_colormatch(self, decoded_frames, color_match_strength, color_match_method, 
-                                                    color_match_adaptive, color_match_scene_threshold, temporal_smoothing, color_match_source=None):
-        """
-        Process each frame in a batch individually for more precise color matching
-        Updates references with the corrected frames
-        """
-        if color_match_strength <= 0.0:
-            return decoded_frames
-        
-        processed_frames = []
-        original_frames = list(decoded_frames)  # Keep track of original frames for scene change detection
-        
-        for i, current_frame in enumerate(decoded_frames):
-            current_frame_batch = current_frame.unsqueeze(0)  # Add batch dimension
-            
-            # Determine reference frame for this specific frame (use CORRECTED frames)
-            reference_frame = None
-            adaptive_strength = color_match_strength
-            
-            if self.color_reference_method == "rolling_average" and len(self.color_reference_buffer) > 0:
-                # Use rolling average as reference
-                reference_frame = torch.stack(self.color_reference_buffer).mean(dim=0).unsqueeze(0)
-            elif self.color_reference_method == "previous_frame":
-                if i > 0:
-                    # Use previous CORRECTED frame in current batch
-                    reference_frame = processed_frames[-1].unsqueeze(0)
-                elif len(self.color_reference_buffer) > 0:
-                    # Use last CORRECTED frame from buffer if this is first frame in batch
-                    reference_frame = self.color_reference_buffer[-1].unsqueeze(0)
-            else:
-                # Default to first frame method or provided color_match_source
-                if color_match_source is not None:
-                    reference_frame = color_match_source
-                elif len(self.color_reference_buffer) > 0:
-                    reference_frame = self.color_reference_buffer[0].unsqueeze(0)
-                elif i > 0:
-                    reference_frame = processed_frames[0].unsqueeze(0)
-            
-            # If no reference available, use current frame as reference (no change)
-            if reference_frame is None:
-                print(f"Frame {i}: No reference frame available, using current frame as reference, so no change")
-                reference_frame = current_frame_batch.clone()
-                
-            # Set initial color_match_source if not set yet and this is the first frame
-            if i == 0 and color_match_source is None:
-                color_match_source = current_frame_batch.clone()
-            
-            # Apply adaptive color matching if enabled
-            if color_match_adaptive:
-                scene_change_score = 0.0
-                if i > 0:
-                    # Compare ORIGINAL frames for scene change detection
-                    scene_change_score = self.detect_scene_change(
-                        original_frames[i-1].unsqueeze(0),  # Previous ORIGINAL frame
-                        current_frame_batch,                # Current ORIGINAL frame
-                        color_match_scene_threshold
-                    )
-                elif hasattr(self, 'original_reference_buffer') and len(self.original_reference_buffer) > 0:
-                    # Compare with last ORIGINAL frame from buffer
-                    scene_change_score = self.detect_scene_change(
-                        self.original_reference_buffer[-1].unsqueeze(0),  # Last ORIGINAL frame from buffer
-                        current_frame_batch,                              # Current ORIGINAL frame
-                        color_match_scene_threshold
-                    )
-                
-                # Use threshold to determine if scene change is significant enough to reduce color matching
-                if scene_change_score > color_match_scene_threshold:
-                    # Reduce color matching strength for significant scene changes
-                    adaptive_strength = color_match_strength * (1.0 - scene_change_score * 0.8)
-                else:
-                    # Keep original strength for minor changes
-                    adaptive_strength = color_match_strength
-                
-                print(f"Frame {i}: Scene change score: {scene_change_score:.3f}, threshold: {color_match_scene_threshold:.3f}, adaptive strength: {adaptive_strength:.3f}")
-            
-            # Apply color matching using CORRECTED reference frame
-            if adaptive_strength > 0.0:
-                print(f"Frame {i}: Applying color matching with strength {adaptive_strength:.3f} using method {color_match_method}")
-                color_match_result = colormatch(reference_frame, current_frame_batch, color_match_method, adaptive_strength)
-                processed_frame = color_match_result[0][0]  # Remove batch dimension
-            else:
-                print(f"Frame {i}: No color matching applied, adaptive strength is 0.0!!!!")
-                processed_frame = current_frame
-            
-            # Apply temporal smoothing if enabled
-            if temporal_smoothing > 0.0 and i > 0:
-                processed_frame_batch = processed_frame.unsqueeze(0)
-                prev_frame_batch = processed_frames[-1].unsqueeze(0)
-                smoothed_frame = self.temporal_color_smooth(processed_frame_batch, prev_frame_batch, temporal_smoothing)
-                processed_frame = smoothed_frame[0]
-            
-            processed_frames.append(processed_frame)
-            
-            # Update rolling buffer with CORRECTED frame for color matching
-            if self.color_reference_method == "rolling_average":
-                if len(self.color_reference_buffer) >= self.buffer_size:
-                    self.color_reference_buffer.pop(0)
-                self.color_reference_buffer.append(processed_frame.clone())
-            
-            # Also maintain original frame buffer for scene change detection
-            if not hasattr(self, 'original_reference_buffer'):
-                self.original_reference_buffer = []
-            if len(self.original_reference_buffer) >= self.buffer_size:
-                self.original_reference_buffer.pop(0)
-            self.original_reference_buffer.append(current_frame.clone())
-        
-        return torch.stack(processed_frames, dim=0)
-
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
-                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None, color_match_scene_threshold=0.3, color_match_adaptive=True, temporal_smoothing=0.1, color_reference_method="rolling_average"):
+                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None, color_match_scene_threshold=0.3, color_match_adaptive=True, temporal_smoothing=0.1, color_reference_method="rolling_average", color_correction_method="frame_by_frame"):
         vae_stride = (4, 8, 8)
         
         # Store reference method as instance variable for use in frame processing
@@ -1275,17 +1066,29 @@ class WanVideoLoopingDiffusionForcingSampler:
                     # use the first frame of the decoded prefix samples as the color match source
                     color_match_source = used_decoded_sample_images[0].unsqueeze(0).clone()
                 
-                # Apply frame-by-frame color matching to prefix samples as well
-                print(f"Applying frame-by-frame color matching to prefix samples")
-                used_decoded_sample_images = self.process_batch_with_frame_by_frame_colormatch(
-                    used_decoded_sample_images,
-                    color_match_strength,
-                    color_match_method,
-                    color_match_adaptive,
-                    color_match_scene_threshold,
-                    temporal_smoothing,
-                    color_match_source
-                )
+                # Apply color matching to prefix samples based on selected method
+                if color_correction_method == "advanced":
+                    print(f"Applying advanced color correction to prefix samples")
+                    used_decoded_sample_images = self.process_batch_with_advanced_color_correction(
+                        used_decoded_sample_images,
+                        color_match_strength,
+                        color_match_method,
+                        color_match_adaptive,
+                        color_match_scene_threshold,
+                        temporal_smoothing,
+                        color_match_source
+                    )
+                else:
+                    print(f"Applying frame-by-frame color matching to prefix samples")
+                    used_decoded_sample_images = self.process_batch_with_frame_by_frame_colormatch(
+                        used_decoded_sample_images,
+                        color_match_strength,
+                        color_match_method,
+                        color_match_adaptive,
+                        color_match_scene_threshold,
+                        temporal_smoothing,
+                        color_match_source
+                    )
                 
                 # we need to reencode the decoded prefix samples
                 print(f"Re-encoding decoded prefix samples with wanVideoEncode")
@@ -1527,16 +1330,28 @@ class WanVideoLoopingDiffusionForcingSampler:
                 if color_match_strength > 0.0:       
                     start_time = time.time()
                     
-                    print(f"Applying frame-by-frame color matching with method: {color_reference_method}")
-                    used_decoded_sample_images = self.process_batch_with_frame_by_frame_colormatch(
-                        used_decoded_sample_images,
-                        color_match_strength,
-                        color_match_method,
-                        color_match_adaptive,
-                        color_match_scene_threshold,
-                        temporal_smoothing,
-                        color_match_source
-                    )
+                    if color_correction_method == "advanced":
+                        print(f"Applying advanced color correction with method: {color_reference_method}")
+                        used_decoded_sample_images = self.process_batch_with_advanced_color_correction(
+                            used_decoded_sample_images,
+                            color_match_strength,
+                            color_match_method,
+                            color_match_adaptive,
+                            color_match_scene_threshold,
+                            temporal_smoothing,
+                            color_match_source
+                        )
+                    else:
+                        print(f"Applying frame-by-frame color matching with method: {color_reference_method}")
+                        used_decoded_sample_images = self.process_batch_with_frame_by_frame_colormatch(
+                            used_decoded_sample_images,
+                            color_match_strength,
+                            color_match_method,
+                            color_match_adaptive,
+                            color_match_scene_threshold,
+                            temporal_smoothing,
+                            color_match_source
+                        )
                     
                     end_time = time.time()
                     elapsed_time = end_time - start_time
@@ -1699,6 +1514,474 @@ class WanVideoLoopingDiffusionForcingSampler:
             generated_images,
             color_match_source,
             generated_first_frame,)
+
+
+
+    def detect_scene_change(self, prev_frame, current_frame, threshold=0.3):
+        sceneChangeRgb = self.detect_scene_change_rgb(prev_frame, current_frame, threshold)
+        sceneChangeLab = self.detect_scene_change_lab(prev_frame, current_frame, threshold)
+        return max(sceneChangeRgb, sceneChangeLab) * 20
+
+    def detect_scene_change_rgb(self, prev_frame, current_frame, threshold=0.3):
+        """
+        Detect if there's a significant scene change between frames
+        Returns a value between 0 (no change) and 1 (complete change)
+        """
+        # Use RGB directly for simpler, more predictable results
+        prev_flat = prev_frame.flatten()
+        curr_flat = current_frame.flatten()
+        
+        # Calculate histogram differences
+        prev_hist = torch.histc(prev_flat, bins=64, min=0, max=1)
+        curr_hist = torch.histc(curr_flat, bins=64, min=0, max=1)
+        
+        # Normalize histograms
+        prev_hist_norm = prev_hist / (prev_hist.sum() + 1e-8)
+        curr_hist_norm = curr_hist / (curr_hist.sum() + 1e-8)
+        
+        hist_diff = torch.abs(prev_hist_norm - curr_hist_norm).sum() * 0.5
+        
+        # Calculate mean difference per channel
+        prev_mean = prev_frame.mean(dim=[0, 1])
+        curr_mean = current_frame.mean(dim=[0, 1])
+        mean_diff = torch.abs(prev_mean - curr_mean).mean()
+        
+        # Combine metrics
+        scene_change_score = 0.7 * hist_diff + 0.3 * mean_diff
+        calculatedDiff = scene_change_score.item()
+        print(f"Scene change RGB score: {calculatedDiff:.3f} (hist: {hist_diff:.3f}, mean: {mean_diff:.3f}), threshold: {threshold:.3f}")
+        
+        return min(calculatedDiff, 1.0)
+
+
+    def detect_scene_change_lab(self, prev_frame, current_frame, threshold=0.3):
+        """
+        Detect if there's a significant scene change between frames
+        Returns a value between 0 (no change) and 1 (complete change)
+        """
+        # Convert to LAB color space for perceptual difference
+        prev_lab = self.rgb_to_lab(prev_frame)
+        curr_lab = self.rgb_to_lab(current_frame)
+        
+        # Calculate histogram differences with fewer bins for better sensitivity
+        prev_flat = prev_lab.flatten()
+        curr_flat = curr_lab.flatten()
+        
+        # Use 64 bins instead of 256 for better population per bin
+        prev_hist = torch.histc(prev_flat, bins=64, min=0, max=1)
+        curr_hist = torch.histc(curr_flat, bins=64, min=0, max=1)
+        
+        # Normalize histograms to probabilities (sum = 1)
+        prev_hist_norm = prev_hist / (prev_hist.sum() + 1e-8)  # Add epsilon for safety
+        curr_hist_norm = curr_hist / (curr_hist.sum() + 1e-8)
+        
+        # Use sum instead of mean for histogram difference (gives better range)
+        hist_diff = torch.abs(prev_hist_norm - curr_hist_norm).sum() * 0.5
+        
+        # Calculate mean difference per channel for better sensitivity
+        prev_mean = prev_lab.mean(dim=[0, 1])  # [L, A, B] means
+        curr_mean = curr_lab.mean(dim=[0, 1])  # [L, A, B] means
+        mean_diff = torch.abs(prev_mean - curr_mean).mean()
+        
+        # Weight histogram difference more heavily for scene changes
+        scene_change_score = 0.7 * hist_diff + 0.3 * mean_diff
+        calculatedDiff = scene_change_score.item()
+        print(f"Scene change LAB score: {calculatedDiff:.3f} (hist: {hist_diff:.3f}, mean: {mean_diff:.3f}), threshold: {threshold:.3f}")
+        
+        return min(calculatedDiff, 1.0)
+        
+
+    def rgb_to_lab(self, rgb_tensor):
+        """Simple RGB to LAB conversion approximation"""
+        # This is a simplified version - you might want to use a proper color space conversion
+        r, g, b = rgb_tensor[..., 0], rgb_tensor[..., 1], rgb_tensor[..., 2]
+        l = 0.299 * r + 0.587 * g + 0.114 * b  # Range: 0-1
+        a = (r - g) * 0.5 + 0.5                # Range: 0-1 (shifted)
+        b_comp = (r + g - 2 * b) * 0.25 + 0.5  # Range: 0-1 (shifted)
+        return torch.stack([l, a, b_comp], dim=-1)
+
+    def temporal_color_smooth(self, current_frames, prev_frames, smoothing_factor=0.1):
+        """
+        Apply temporal smoothing to reduce sudden color changes
+        Uses direct RGB smoothing to avoid color space conversion issues
+        """
+        if prev_frames is None or smoothing_factor <= 0.0:
+            return current_frames
+        
+        # Get the right number of previous frames to match current frames
+        prev_frames_matched = prev_frames[-current_frames.shape[0]:]
+        
+        # Direct RGB smoothing (safer, avoids color space conversion issues)
+        smoothed_rgb = (1 - smoothing_factor) * current_frames + smoothing_factor * prev_frames_matched
+        
+        # Clamp values to valid range
+        smoothed_rgb = torch.clamp(smoothed_rgb, 0.0, 1.0)
+        
+        return smoothed_rgb
+
+    def process_batch_with_frame_by_frame_colormatch(self, decoded_frames, color_match_strength, color_match_method, 
+                                                    color_match_adaptive, color_match_scene_threshold, temporal_smoothing, color_match_source=None):
+        """
+        Process each frame in a batch individually for more precise color matching
+        Updates references with the corrected frames
+        """
+        if color_match_strength <= 0.0:
+            return decoded_frames
+        
+        processed_frames = []
+        original_frames = list(decoded_frames)  # Keep track of original frames for scene change detection
+        
+        for i, current_frame in enumerate(decoded_frames):
+            current_frame_batch = current_frame.unsqueeze(0)  # Add batch dimension
+            
+            # Determine reference frame for this specific frame (use CORRECTED frames)
+            reference_frame = None
+            adaptive_strength = color_match_strength
+            
+            if self.color_reference_method == "rolling_average" and len(self.color_reference_buffer) > 0:
+                # Use rolling average as reference
+                reference_frame = torch.stack(self.color_reference_buffer).mean(dim=0).unsqueeze(0)
+            elif self.color_reference_method == "previous_frame":
+                if i > 0:
+                    # Use previous CORRECTED frame in current batch
+                    reference_frame = processed_frames[-1].unsqueeze(0)
+                elif len(self.color_reference_buffer) > 0:
+                    # Use last CORRECTED frame from buffer if this is first frame in batch
+                    reference_frame = self.color_reference_buffer[-1].unsqueeze(0)
+            else:
+                # Default to first frame method or provided color_match_source
+                if color_match_source is not None:
+                    reference_frame = color_match_source
+                elif len(self.color_reference_buffer) > 0:
+                    reference_frame = self.color_reference_buffer[0].unsqueeze(0)
+                elif i > 0:
+                    reference_frame = processed_frames[0].unsqueeze(0)
+            
+            # If no reference available, use current frame as reference (no change)
+            if reference_frame is None:
+                print(f"Frame {i}: No reference frame available, using current frame as reference, so no change")
+                reference_frame = current_frame_batch.clone()
+                
+            # Set initial color_match_source if not set yet and this is the first frame
+            if i == 0 and color_match_source is None:
+                color_match_source = current_frame_batch.clone()
+            
+            # Apply adaptive color matching if enabled
+            if color_match_adaptive:
+                scene_change_score = 0.0
+                if i > 0:
+                    # Compare ORIGINAL frames for scene change detection
+                    scene_change_score = self.detect_scene_change(
+                        original_frames[i-1].unsqueeze(0),  # Previous ORIGINAL frame
+                        current_frame_batch,                # Current ORIGINAL frame
+                        color_match_scene_threshold
+                    )
+                elif hasattr(self, 'original_reference_buffer') and len(self.original_reference_buffer) > 0:
+                    # Compare with last ORIGINAL frame from buffer
+                    scene_change_score = self.detect_scene_change(
+                        self.original_reference_buffer[-1].unsqueeze(0),  # Last ORIGINAL frame from buffer
+                        current_frame_batch,                              # Current ORIGINAL frame
+                        color_match_scene_threshold
+                    )
+                
+                # Use threshold to determine if scene change is significant enough to reduce color matching
+                if scene_change_score > color_match_scene_threshold:
+                    # Reduce color matching strength for significant scene changes
+                    adaptive_strength = color_match_strength * (1.0 - scene_change_score * 0.8)
+                else:
+                    # Keep original strength for minor changes
+                    adaptive_strength = color_match_strength
+                
+                print(f"Frame {i}: Scene change score: {scene_change_score:.3f}, threshold: {color_match_scene_threshold:.3f}, adaptive strength: {adaptive_strength:.3f}")
+            
+            # Apply color matching using CORRECTED reference frame
+            if adaptive_strength > 0.0:
+                print(f"Frame {i}: Applying color matching with strength {adaptive_strength:.3f} using method {color_match_method}")
+                color_match_result = colormatch(reference_frame, current_frame_batch, color_match_method, adaptive_strength)
+                processed_frame = color_match_result[0][0]  # Remove batch dimension
+            else:
+                print(f"Frame {i}: No color matching applied, adaptive strength is 0.0!!!!")
+                processed_frame = current_frame
+            
+            # Apply temporal smoothing if enabled
+            if temporal_smoothing > 0.0 and i > 0:
+                processed_frame_batch = processed_frame.unsqueeze(0)
+                prev_frame_batch = processed_frames[-1].unsqueeze(0)
+                smoothed_frame = self.temporal_color_smooth(processed_frame_batch, prev_frame_batch, temporal_smoothing)
+                processed_frame = smoothed_frame[0]
+            
+            processed_frames.append(processed_frame)
+            
+            # Update rolling buffer with CORRECTED frame for color matching
+            if self.color_reference_method == "rolling_average":
+                if len(self.color_reference_buffer) >= self.buffer_size:
+                    self.color_reference_buffer.pop(0)
+                self.color_reference_buffer.append(processed_frame.clone())
+            
+            # Also maintain original frame buffer for scene change detection
+            if not hasattr(self, 'original_reference_buffer'):
+                self.original_reference_buffer = []
+            if len(self.original_reference_buffer) >= self.buffer_size:
+                self.original_reference_buffer.pop(0)
+            self.original_reference_buffer.append(current_frame.clone())
+        
+        return torch.stack(processed_frames, dim=0)
+
+    def apply_white_balance_correction(self, reference_frame, current_frame, strength=0.5):
+        """
+        Apply white balance correction instead of global color matching
+        Preserves scene brightness characteristics while correcting color cast
+        """
+        # Calculate average color cast difference
+        ref_mean = reference_frame.mean(dim=[0, 1])  # [R, G, B] averages
+        curr_mean = current_frame.mean(dim=[0, 1])   # [R, G, B] averages
+        
+        # Calculate white balance correction (ratios, not absolute differences)
+        wb_ratios = ref_mean / (curr_mean + 1e-8)
+        
+        # Limit correction to prevent over-correction
+        wb_ratios = torch.clamp(wb_ratios, 0.8, 1.2)
+        
+        # Apply white balance with strength control
+        corrected = current_frame * (1.0 + strength * (wb_ratios - 1.0))
+        
+        # Clamp to valid range
+        return torch.clamp(corrected, 0.0, 1.0)
+
+    def apply_luminance_preserving_correction(self, reference_frame, current_frame, strength=0.5):
+        """
+        Correct color while preserving original luminance structure
+        Prevents washing out of dark subjects
+        """
+        # Convert to YUV-like space (luminance + chrominance)
+        def rgb_to_yuv(rgb):
+            y = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+            u = rgb[..., 2] - y  # Blue chrominance
+            v = rgb[..., 0] - y  # Red chrominance
+            return y, u, v
+        
+        def yuv_to_rgb(y, u, v):
+            r = y + v
+            g = y - 0.299 * v / 0.587 - 0.114 * u / 0.587
+            b = y + u
+            return torch.stack([r, g, b], dim=-1)
+        
+        # Extract luminance and chrominance
+        curr_y, curr_u, curr_v = rgb_to_yuv(current_frame)
+        ref_y, ref_u, ref_v = rgb_to_yuv(reference_frame)
+        
+        # Calculate average chrominance shift (preserve local luminance)
+        ref_u_mean = ref_u.mean()
+        ref_v_mean = ref_v.mean()
+        curr_u_mean = curr_u.mean()
+        curr_v_mean = curr_v.mean()
+        
+        # Apply chrominance correction while keeping original luminance
+        corrected_u = curr_u + strength * (ref_u_mean - curr_u_mean)
+        corrected_v = curr_v + strength * (ref_v_mean - curr_v_mean)
+        
+        # Reconstruct RGB with original luminance
+        corrected_rgb = yuv_to_rgb(curr_y, corrected_u, corrected_v)
+        
+        return torch.clamp(corrected_rgb, 0.0, 1.0)
+
+    def apply_zone_based_histogram_matching(self, reference_frame, current_frame, strength=0.5):
+        """
+        Apply histogram matching separately for different luminance zones
+        Prevents dark subjects from being washed out
+        """
+        # Calculate luminance
+        ref_lum = 0.299 * reference_frame[..., 0] + 0.587 * reference_frame[..., 1] + 0.114 * reference_frame[..., 2]
+        curr_lum = 0.299 * current_frame[..., 0] + 0.587 * current_frame[..., 1] + 0.114 * current_frame[..., 2]
+        
+        # Define luminance zones
+        dark_mask = curr_lum < 0.3
+        mid_mask = (curr_lum >= 0.3) & (curr_lum < 0.7)
+        bright_mask = curr_lum >= 0.7
+        
+        result = current_frame.clone()
+        
+        # Apply different corrections to different zones
+        for mask, zone_name in [(dark_mask, "dark"), (mid_mask, "mid"), (bright_mask, "bright")]:
+            if mask.sum() > 0:  # If zone has pixels
+                # Extract pixels in this zone
+                zone_curr = current_frame[mask]
+                
+                # Find corresponding reference zone (with some tolerance)
+                if zone_name == "dark":
+                    ref_zone_mask = ref_lum < 0.4  # Slightly larger range for reference
+                elif zone_name == "mid":
+                    ref_zone_mask = (ref_lum >= 0.25) & (ref_lum < 0.75)
+                else:  # bright
+                    ref_zone_mask = ref_lum >= 0.6
+                
+                if ref_zone_mask.sum() > 0:
+                    ref_zone = reference_frame[ref_zone_mask]
+                    
+                    # Calculate color correction for this zone only
+                    zone_curr_mean = zone_curr.mean(dim=0)
+                    ref_zone_mean = ref_zone.mean(dim=0)
+                    
+                    # Apply gentle correction
+                    correction = strength * (ref_zone_mean - zone_curr_mean)
+                    result[mask] = torch.clamp(zone_curr + correction, 0.0, 1.0)
+        
+        return result
+
+    def analyze_luminance_characteristics(self, reference_frame, current_frame):
+        """Analyze frame characteristics to choose appropriate correction method"""
+        ref_lum = 0.299 * reference_frame[..., 0] + 0.587 * reference_frame[..., 1] + 0.114 * reference_frame[..., 2]
+        curr_lum = 0.299 * current_frame[..., 0] + 0.587 * current_frame[..., 1] + 0.114 * current_frame[..., 2]
+        
+        # Calculate luminance histogram changes
+        ref_hist = torch.histc(ref_lum.flatten(), bins=32, min=0, max=1)
+        curr_hist = torch.histc(curr_lum.flatten(), bins=32, min=0, max=1)
+        
+        ref_hist_norm = ref_hist / (ref_hist.sum() + 1e-8)
+        curr_hist_norm = curr_hist / (curr_hist.sum() + 1e-8)
+        
+        # Check for changes in dark and bright regions
+        dark_region_change = torch.abs(ref_hist_norm[:10] - curr_hist_norm[:10]).sum()
+        bright_region_change = torch.abs(ref_hist_norm[22:] - curr_hist_norm[22:]).sum()
+        
+        return {
+            'has_high_contrast': (curr_lum.std() > 0.2),
+            'luminance_variance_high': (torch.abs(ref_lum.std() - curr_lum.std()) > 0.15),
+            'color_cast_detected': (torch.abs(current_frame.mean(dim=[0,1]) - reference_frame.mean(dim=[0,1])).max() > 0.1),
+            'dark_region_change': dark_region_change.item(),
+            'bright_region_change': bright_region_change.item(),
+            'mixed_lighting': (dark_region_change > 0.3 and bright_region_change > 0.3)
+        }
+
+    def process_batch_with_advanced_color_correction(self, decoded_frames, color_match_strength, color_match_method, 
+                                                   color_match_adaptive, color_match_scene_threshold, temporal_smoothing, color_match_source=None):
+        """
+        Enhanced processing with multiple color correction methods to prevent washing out
+        """
+        if color_match_strength <= 0.0:
+            return decoded_frames
+        
+        processed_frames = []
+        original_frames = list(decoded_frames)  # Keep track of original frames for scene change detection
+        
+        for i, current_frame in enumerate(decoded_frames):
+            current_frame_batch = current_frame.unsqueeze(0)  # Add batch dimension
+            
+            # Determine reference frame for this specific frame (use CORRECTED frames)
+            reference_frame = None
+            adaptive_strength = color_match_strength
+            
+            if self.color_reference_method == "rolling_average" and len(self.color_reference_buffer) > 0:
+                # Use rolling average as reference
+                reference_frame = torch.stack(self.color_reference_buffer).mean(dim=0).unsqueeze(0)
+            elif self.color_reference_method == "previous_frame":
+                if i > 0:
+                    # Use previous CORRECTED frame in current batch
+                    reference_frame = processed_frames[-1].unsqueeze(0)
+                elif len(self.color_reference_buffer) > 0:
+                    # Use last CORRECTED frame from buffer if this is first frame in batch
+                    reference_frame = self.color_reference_buffer[-1].unsqueeze(0)
+            else:
+                # Default to first frame method or provided color_match_source
+                if color_match_source is not None:
+                    reference_frame = color_match_source
+                elif len(self.color_reference_buffer) > 0:
+                    reference_frame = self.color_reference_buffer[0].unsqueeze(0)
+                elif i > 0:
+                    reference_frame = processed_frames[0].unsqueeze(0)
+            
+            # If no reference available, use current frame as reference (no change)
+            if reference_frame is None:
+                print(f"Frame {i}: No reference frame available, using current frame as reference, so no change")
+                reference_frame = current_frame_batch.clone()
+                
+            # Set initial color_match_source if not set yet and this is the first frame
+            if i == 0 and color_match_source is None:
+                color_match_source = current_frame_batch.clone()
+            
+            # Apply adaptive color matching if enabled
+            if color_match_adaptive:
+                scene_change_score = 0.0
+                if i > 0:
+                    # Compare ORIGINAL frames for scene change detection
+                    scene_change_score = self.detect_scene_change(
+                        original_frames[i-1].unsqueeze(0),  # Previous ORIGINAL frame
+                        current_frame_batch,                # Current ORIGINAL frame
+                        color_match_scene_threshold
+                    )
+                elif hasattr(self, 'original_reference_buffer') and len(self.original_reference_buffer) > 0:
+                    # Compare with last ORIGINAL frame from buffer
+                    scene_change_score = self.detect_scene_change(
+                        self.original_reference_buffer[-1].unsqueeze(0),  # Last ORIGINAL frame from buffer
+                        current_frame_batch,                              # Current ORIGINAL frame
+                        color_match_scene_threshold
+                    )
+                
+                # Use threshold to determine if scene change is significant enough to reduce color matching
+                if scene_change_score > color_match_scene_threshold:
+                    # Reduce color matching strength for significant scene changes
+                    adaptive_strength = color_match_strength * (1.0 - scene_change_score * 0.8)
+                else:
+                    # Keep original strength for minor changes
+                    adaptive_strength = color_match_strength
+                
+                print(f"Frame {i}: Scene change score: {scene_change_score:.3f}, threshold: {color_match_scene_threshold:.3f}, adaptive strength: {adaptive_strength:.3f}")
+            
+            # Analyze frame characteristics to choose correction method
+            if adaptive_strength > 0.0:
+                luminance_info = self.analyze_luminance_characteristics(reference_frame[0], current_frame)
+                
+                # Choose correction method based on scene characteristics
+                if luminance_info['mixed_lighting'] and luminance_info['has_high_contrast']:
+                    # Scene with mixed lighting - use zone-based correction
+                    print(f"Frame {i}: Using zone-based histogram matching (mixed lighting detected)")
+                    processed_frame = self.apply_zone_based_histogram_matching(
+                        reference_frame[0], current_frame, adaptive_strength * 0.7
+                    )
+                elif luminance_info['color_cast_detected'] and not luminance_info['has_high_contrast']:
+                    # Color cast issue - use white balance correction
+                    print(f"Frame {i}: Using white balance correction (color cast detected)")
+                    processed_frame = self.apply_white_balance_correction(
+                        reference_frame[0], current_frame, adaptive_strength
+                    )
+                elif luminance_info['has_high_contrast']:
+                    # High contrast scene - use luminance-preserving correction
+                    print(f"Frame {i}: Using luminance-preserving correction (high contrast)")
+                    processed_frame = self.apply_luminance_preserving_correction(
+                        reference_frame[0], current_frame, adaptive_strength
+                    )
+                else:
+                    # Normal scene - use regular color matching
+                    print(f"Frame {i}: Using regular color matching")
+                    color_match_result = colormatch(reference_frame, current_frame_batch, color_match_method, adaptive_strength)
+                    processed_frame = color_match_result[0][0]  # Remove batch dimension
+            else:
+                print(f"Frame {i}: No color matching applied, adaptive strength is 0.0")
+                processed_frame = current_frame
+            
+            # Apply temporal smoothing if enabled
+            if temporal_smoothing > 0.0 and i > 0:
+                processed_frame_batch = processed_frame.unsqueeze(0)
+                prev_frame_batch = processed_frames[-1].unsqueeze(0)
+                smoothed_frame = self.temporal_color_smooth(processed_frame_batch, prev_frame_batch, temporal_smoothing)
+                processed_frame = smoothed_frame[0]
+            
+            processed_frames.append(processed_frame)
+            
+            # Update rolling buffer with CORRECTED frame for color matching
+            if self.color_reference_method == "rolling_average":
+                if len(self.color_reference_buffer) >= self.buffer_size:
+                    self.color_reference_buffer.pop(0)
+                self.color_reference_buffer.append(processed_frame.clone())
+            
+            # Also maintain original frame buffer for scene change detection
+            if not hasattr(self, 'original_reference_buffer'):
+                self.original_reference_buffer = []
+            if len(self.original_reference_buffer) >= self.buffer_size:
+                self.original_reference_buffer.pop(0)
+            self.original_reference_buffer.append(current_frame.clone())
+        
+        return torch.stack(processed_frames, dim=0)
 
 
     def scale(self, image, width, height, upscale_method, crop):
