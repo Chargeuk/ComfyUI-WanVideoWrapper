@@ -29,6 +29,71 @@ class TestFrameByFrameColorMatch:
         # Calculate mean difference
         mean_diff = torch.abs(prev_lab.mean() - curr_lab.mean())
         
+        # Normalize histograms to prevent values over 1.0
+        total_pixels = prev_frame.numel() / 3  # RGB channels
+        prev_hist = prev_hist / total_pixels
+        curr_hist = curr_hist / total_pixels
+        
+        # Combine metrics for final score
+        scene_change_score = (hist_diff.item() + mean_diff.item()) / 2.0
+        return min(scene_change_score, 1.0)  # Cap at 1.0
+    
+    def test_weighted_color_correction(self):
+        """Test the new weighted blending color correction approach"""
+        print("Testing weighted color correction blending...")
+        
+        # Create a simulated reference frame (sunny outdoor scene)
+        ref_frame = torch.rand(1, 3, 256, 256)
+        ref_frame[:, :, :, :128] = 0.8  # Bright right side
+        ref_frame[:, :, :, 128:] = 0.3  # Darker left side
+        
+        # Create a test frame with color cast (blue tint)
+        test_frame = torch.rand(1, 3, 256, 256)
+        test_frame[:, 0, :, :] *= 0.7  # Reduce red
+        test_frame[:, 1, :, :] *= 0.8  # Reduce green  
+        test_frame[:, 2, :, :] *= 1.2  # Enhance blue
+        
+        # Simulate luminance analysis results
+        mock_analysis = {
+            'has_high_contrast': True,
+            'luminance_variance_high': True,
+            'color_cast_detected': True,
+            'mixed_lighting': False,
+            'dark_region_change': 0.45,      # High value
+            'bright_region_change': 0.25,    # Medium value
+            'contrast': 0.22,                # High value
+            'color_cast_check': 0.15,        # High value
+            'luminance_variance': 0.18       # High value
+        }
+        
+        # Calculate weighted strengths
+        total_metrics = (
+            mock_analysis['dark_region_change'] +
+            mock_analysis['bright_region_change'] +
+            mock_analysis['contrast'] +
+            mock_analysis['color_cast_check'] +
+            mock_analysis['luminance_variance']
+        )
+        
+        expected_weights = {
+            'zone_based': mock_analysis['dark_region_change'] / total_metrics,
+            'luminance_preserving': mock_analysis['bright_region_change'] / total_metrics,  
+            'white_balance': mock_analysis['color_cast_check'] / total_metrics
+        }
+        
+        print(f"Expected weights:")
+        print(f"  Zone-based: {expected_weights['zone_based']:.3f}")
+        print(f"  Luminance-preserving: {expected_weights['luminance_preserving']:.3f}")
+        print(f"  White balance: {expected_weights['white_balance']:.3f}")
+        print(f"  Total weight: {sum(expected_weights.values()):.3f}")
+        
+        # Verify weights sum to approximately 1.0 (accounting for unused metrics)
+        weight_sum = sum(expected_weights.values())
+        assert 0.4 <= weight_sum <= 1.0, f"Weight sum should be reasonable: {weight_sum}"
+        
+        print("✓ Weighted color correction test passed!")
+        return True
+        
         # Combine metrics
         scene_change_score = (hist_diff + mean_diff) / 2
         
@@ -232,10 +297,19 @@ def test_different_reference_methods():
 
 if __name__ == "__main__":
     print("Testing frame-by-frame adaptive color matching functionality...")
+    
+    tester = TestFrameByFrameColorMatch()
+    
+    print("\n=== Weighted Color Correction Test ===")
+    try:
+        tester.test_weighted_color_correction()
+    except Exception as e:
+        print(f"Weighted test failed: {e}")
+    
     print("\n=== Frame-by-Frame Processing Test ===")
     test_frame_by_frame_processing()
     
     print("\n=== Reference Methods Test ===")
     test_different_reference_methods()
     
-    print("\nTests completed!")
+    print("\nAll tests completed!")

@@ -1856,16 +1856,18 @@ class WanVideoLoopingDiffusionForcingSampler:
         print(f"Dark region change: {dark_region_change:.3f}, Bright region change: {bright_region_change:.3f}, Luminance Variance: {luminance_variance:.3f}, contrast: {contrast:.3f}, color_cast_check: {color_cast_check:.3f}")
 
         return {
-            # 'has_high_contrast': (contrast > 0.2),
+            # Boolean flags (for fallback logic)
             'has_high_contrast': (contrast > 0.18),
-            # 'luminance_variance_high': (luminance_variance > 0.15),
             'luminance_variance_high': (luminance_variance > 0.015),
-            # 'color_cast_detected': (color_cast_check > 0.1),
             'color_cast_detected': (color_cast_check > 0.01),
+            'mixed_lighting': (dark_region_change > 0.03 and bright_region_change > 0.03),
+            
+            # Raw values (for weighted blending)
             'dark_region_change': dark_region_change.item(),
             'bright_region_change': bright_region_change.item(),
-            # 'mixed_lighting': (dark_region_change > 0.3 and bright_region_change > 0.3)
-            'mixed_lighting': (dark_region_change > 0.03 and bright_region_change > 0.03)
+            'contrast': contrast.item(),
+            'color_cast_check': color_cast_check.item(),
+            'luminance_variance': luminance_variance.item()
         }
 
     def process_batch_with_advanced_color_correction(self, decoded_frames, color_match_strength, color_match_method, 
@@ -1950,37 +1952,97 @@ class WanVideoLoopingDiffusionForcingSampler:
             # Analyze frame characteristics to choose correction method
             if adaptive_strength > 0.0:
                 luminance_info = self.analyze_luminance_characteristics(reference_frame[0], current_frame)
+                processed_frame = current_frame.clone()
+                applied_methods = []
                 
-                # Choose correction method based on scene characteristics
-                if luminance_info['mixed_lighting'] and luminance_info['has_high_contrast']:
-                    # Scene with mixed lighting - use zone-based correction
-                    # Zone-based: Perfect for complex scenes with multiple lighting zones
-                    # Example: Indoor scene with bright window and dark corners
-                    print(f"Frame {i}: Using zone-based histogram matching (mixed lighting detected)")
-                    processed_frame = self.apply_zone_based_histogram_matching(
-                        reference_frame[0], current_frame, adaptive_strength * 0.7
-                    )
-                elif luminance_info['color_cast_detected'] and not luminance_info['has_high_contrast']:
-                    # Color cast issue - use white balance correction
-                    # White balance: Perfect for uniform color cast issues
-                    # Example: Entire scene has warm/cool tint but consistent lighting
-                    print(f"Frame {i}: Using white balance correction (color cast detected)")
-                    processed_frame = self.apply_white_balance_correction(
-                        reference_frame[0], current_frame, adaptive_strength
-                    )
-                elif luminance_info['has_high_contrast']:
-                    # High contrast scene - use luminance-preserving correction
-                    # Luminance-preserving: Great for high contrast without mixed lighting
-                    # Example: Portrait with strong directional lighting
-                    print(f"Frame {i}: Using luminance-preserving correction (high contrast)")
-                    processed_frame = self.apply_luminance_preserving_correction(
-                        reference_frame[0], current_frame, adaptive_strength
-                    )
+                # Calculate weights based on actual measured values (not just boolean flags)
+                color_cast_strength = min(luminance_info['color_cast_check'] * 100, 1.0)  # Scale up the 0.01+ values
+                contrast_strength = min(luminance_info['contrast'] / 0.25, 1.0)  # Normalize against max expected contrast
+                mixed_lighting_strength = min((luminance_info['dark_region_change'] + luminance_info['bright_region_change']) * 3, 1.0)
+
+                total_correction_needed = color_cast_strength + contrast_strength + mixed_lighting_strength
+                print(f"Frame {i}: total_correction_needed: {total_correction_needed:.3f} color_cast: {color_cast_strength:.3f}, contrast: {contrast_strength:.3f}, mixed_lighting: {mixed_lighting_strength:.3f}")
+                
+                if total_correction_needed > 0.1:  # Only apply corrections if there's something significant to fix
+                    # Distribute the adaptive_strength across methods based on their relative importance
+                    remaining_strength = adaptive_strength
+                    
+                    # Step 1: White balance correction (proportional to color cast strength)
+                    if color_cast_strength > 0.1 and remaining_strength > 0.05:
+                        wb_weight = color_cast_strength / total_correction_needed
+                        wb_strength = min(remaining_strength * wb_weight * 0.8, adaptive_strength * 0.4)  # Cap at 40% of total
+                        
+                        if wb_strength > 0.05:
+                            processed_frame = self.apply_white_balance_correction(
+                                reference_frame[0], processed_frame, wb_strength
+                            )
+                            applied_methods.append(f"white_balance({wb_strength:.2f})")
+                            remaining_strength -= wb_strength
+                            
+                            # Re-analyze after white balance to see what's left to fix
+                            luminance_info_updated = self.analyze_luminance_characteristics(reference_frame[0], processed_frame)
+                            # Update remaining correction needs
+                            contrast_strength = min(luminance_info_updated['contrast'] / 0.25, 1.0)
+                            mixed_lighting_strength = min((luminance_info_updated['dark_region_change'] + luminance_info_updated['bright_region_change']) * 15, 1.0)
+                    
+                    # Step 2: Luminance-preserving correction (proportional to contrast strength)
+                    if contrast_strength > 0.1 and remaining_strength > 0.05:
+                        lum_weight = contrast_strength / max(contrast_strength + mixed_lighting_strength, 0.1)
+                        lum_strength = min(remaining_strength * lum_weight * 0.7, adaptive_strength * 0.5)  # Cap at 50% of total
+                        
+                        if lum_strength > 0.05:
+                            processed_frame = self.apply_luminance_preserving_correction(
+                                reference_frame[0], processed_frame, lum_strength
+                            )
+                            applied_methods.append(f"luminance_preserving({lum_strength:.2f})")
+                            remaining_strength -= lum_strength
+                    
+                    # Step 3: Zone-based correction (proportional to mixed lighting strength)
+                    if mixed_lighting_strength > 0.1 and remaining_strength > 0.05:
+                        zone_strength = min(remaining_strength * 0.8, adaptive_strength * 0.4)  # Cap at 40% of total
+                        
+                        if zone_strength > 0.05:
+                            processed_frame = self.apply_zone_based_histogram_matching(
+                                reference_frame[0], processed_frame, zone_strength
+                            )
+                            applied_methods.append(f"zone_based({zone_strength:.2f})")
+                            remaining_strength -= zone_strength
+                    
+                    # Step 4: Fallback to regular color matching if significant strength remains unused
+                    if remaining_strength > adaptive_strength * 0.2:  # If more than 20% of strength is unused
+                        current_frame_batch_temp = processed_frame.unsqueeze(0)
+                        color_match_result = colormatch(reference_frame, current_frame_batch_temp, color_match_method, remaining_strength)
+                        processed_frame = color_match_result[0][0]
+                        applied_methods.append(f"regular_colormatch({remaining_strength:.2f})")
+                    
+                    if applied_methods:
+                        print(f"Frame {i}: Applied weighted corrections: {' -> '.join(applied_methods)}")
+                    else:
+                        print(f"Frame {i}: No corrections applied (strengths too low)")
+                
                 else:
-                    # Normal scene - use regular color matching
-                    print(f"Frame {i}: Using regular color matching")
-                    color_match_result = colormatch(reference_frame, current_frame_batch, color_match_method, adaptive_strength)
-                    processed_frame = color_match_result[0][0]  # Remove batch dimension
+                    # Very minor changes - fallback to original single-method logic
+                    print(f"Frame {i}: Minor changes detected, using single-method fallback")
+                    if luminance_info['mixed_lighting'] and luminance_info['has_high_contrast']:
+                        print(f"Frame {i}: Using zone-based histogram matching (fallback)")
+                        processed_frame = self.apply_zone_based_histogram_matching(
+                            reference_frame[0], current_frame, adaptive_strength * 0.7
+                        )
+                    elif luminance_info['color_cast_detected'] and not luminance_info['has_high_contrast']:
+                        print(f"Frame {i}: Using white balance correction (fallback)")
+                        processed_frame = self.apply_white_balance_correction(
+                            reference_frame[0], current_frame, adaptive_strength
+                        )
+                    elif luminance_info['has_high_contrast']:
+                        print(f"Frame {i}: Using luminance-preserving correction (fallback)")
+                        processed_frame = self.apply_luminance_preserving_correction(
+                            reference_frame[0], current_frame, adaptive_strength
+                        )
+                    else:
+                        print(f"Frame {i}: Using regular color matching (fallback)")
+                        color_match_result = colormatch(reference_frame, current_frame_batch, color_match_method, adaptive_strength)
+                        processed_frame = color_match_result[0][0]
+                        
             else:
                 print(f"Frame {i}: No color matching applied, adaptive strength is 0.0")
                 processed_frame = current_frame
