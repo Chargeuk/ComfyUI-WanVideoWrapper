@@ -810,10 +810,13 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "temporal_smoothing": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal smoothing factor"}),
                 "color_reference_method": (["first_frame", "rolling_average", "previous_frame"], {"default": "rolling_average"}),
                 "color_correction_method": (["frame_by_frame", "advanced"], {"default": "frame_by_frame", "tooltip": "Choose color correction method: frame_by_frame (original) or advanced (luminance-preserving)"}),
-                "requiredTotalCorrection": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Minimum total correction needed to apply advanced color correction"}),
-                "whiteBalanceMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Multiplier for white balance correction strength"}),
-                "luminanceMultiply": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Multiplier for luminance-preserving correction strength"}),
-                "mixedLightingMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Multiplier for zone-based correction strength"}),
+                "requiredTotalCorrection": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Minimum total correction needed to apply advanced color correction"}),
+                "whiteBalanceMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Multiplier for white balance correction strength"}),
+                "luminanceMultiply": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Multiplier for luminance-preserving correction strength"}),
+                "mixedLightingMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Multiplier for zone-based correction strength"}),
+                "whiteBalancePercentage": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 1000.0, "step": 1.0, "tooltip": "Percentage of white balance correction to apply"}),
+                "luminancePercentage": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 1000.0, "step": 1.0, "tooltip": "Percentage of luminance-preserving correction to apply"}),
+                "mixedLightingPercentage": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 1000.0, "step": 1.0, "tooltip": "Percentage of zone-based correction to apply"}),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
@@ -854,7 +857,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
                 prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None, color_match_scene_threshold=0.3, color_match_adaptive=True, temporal_smoothing=0.1, color_reference_method="rolling_average", color_correction_method="frame_by_frame",
-                requiredTotalCorrection=0.1, whiteBalanceMultiply=0.8, luminanceMultiply=0.7, mixedLightingMultiply=0.8):
+                requiredTotalCorrection=0.1, whiteBalanceMultiply=0.8, luminanceMultiply=0.7, mixedLightingMultiply=0.8,
+                whiteBalancePercentage=100.0, luminancePercentage=100.0, mixedLightingPercentage=100.0):
         vae_stride = (4, 8, 8)
         
         # Store reference method as instance variable for use in frame processing
@@ -1085,7 +1089,10 @@ class WanVideoLoopingDiffusionForcingSampler:
                         requiredTotalCorrection,
                         whiteBalanceMultiply,
                         luminanceMultiply,
-                        mixedLightingMultiply
+                        mixedLightingMultiply,
+                        whiteBalancePercentage,
+                        luminancePercentage,
+                        mixedLightingPercentage
                     )
                 else:
                     print(f"Applying frame-by-frame color matching to prefix samples")
@@ -1352,7 +1359,10 @@ class WanVideoLoopingDiffusionForcingSampler:
                             requiredTotalCorrection,
                             whiteBalanceMultiply,
                             luminanceMultiply,
-                            mixedLightingMultiply
+                            mixedLightingMultiply,
+                            whiteBalancePercentage,
+                            luminancePercentage,
+                            mixedLightingPercentage
                         )
                     else:
                         print(f"Applying frame-by-frame color matching with method: {color_reference_method}")
@@ -1886,7 +1896,8 @@ class WanVideoLoopingDiffusionForcingSampler:
     def process_batch_with_advanced_color_correction(self, decoded_frames, color_match_strength, color_match_method, 
                                                    color_match_adaptive, color_match_scene_threshold, temporal_smoothing,
                                                    color_match_source=None, requiredTotalCorrection=0.1,
-                                                   whiteBalanceMultiply=0.8, luminanceMultiply=0.7, mixedLightingMultiply=0.8):
+                                                   whiteBalanceMultiply=0.8, luminanceMultiply=0.7, mixedLightingMultiply=0.8,
+                                                   whiteBalancePercentage=100.0, luminancePercentage=100.0, mixedLightingPercentage=100.0):
         """
         Enhanced processing with multiple color correction methods to prevent washing out
         """
@@ -1989,7 +2000,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                         
                         if wb_strength > 0.05:
                             processed_frame = self.apply_white_balance_correction(
-                                reference_frame[0], processed_frame, wb_strength
+                                reference_frame[0], processed_frame, wb_strength * (whiteBalancePercentage / 100.0)
                             )
                             applied_methods.append(f"white_balance({wb_strength:.2f})")
                             remaining_strength -= wb_strength
@@ -2007,7 +2018,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                         
                         if lum_strength > 0.05:
                             processed_frame = self.apply_luminance_preserving_correction(
-                                reference_frame[0], processed_frame, lum_strength
+                                reference_frame[0], processed_frame, lum_strength * (luminancePercentage / 100.0)
                             )
                             applied_methods.append(f"luminance_preserving({lum_strength:.2f})")
                             remaining_strength -= lum_strength
@@ -2018,7 +2029,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                         
                         if zone_strength > 0.05:
                             processed_frame = self.apply_zone_based_histogram_matching(
-                                reference_frame[0], processed_frame, zone_strength
+                                reference_frame[0], processed_frame, zone_strength * (mixedLightingPercentage / 100.0)
                             )
                             applied_methods.append(f"zone_based({zone_strength:.2f})")
                             remaining_strength -= zone_strength
