@@ -810,6 +810,10 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "temporal_smoothing": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal smoothing factor"}),
                 "color_reference_method": (["first_frame", "rolling_average", "previous_frame"], {"default": "rolling_average"}),
                 "color_correction_method": (["frame_by_frame", "advanced"], {"default": "frame_by_frame", "tooltip": "Choose color correction method: frame_by_frame (original) or advanced (luminance-preserving)"}),
+                "requiredTotalCorrection": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Minimum total correction needed to apply advanced color correction"}),
+                "whiteBalanceMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Multiplier for white balance correction strength"}),
+                "luminanceMultiply": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Multiplier for luminance-preserving correction strength"}),
+                "mixedLightingMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Multiplier for zone-based correction strength"}),
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
@@ -849,7 +853,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
-                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None, color_match_scene_threshold=0.3, color_match_adaptive=True, temporal_smoothing=0.1, color_reference_method="rolling_average", color_correction_method="frame_by_frame"):
+                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None, color_match_scene_threshold=0.3, color_match_adaptive=True, temporal_smoothing=0.1, color_reference_method="rolling_average", color_correction_method="frame_by_frame",
+                requiredTotalCorrection=0.1, whiteBalanceMultiply=0.8, luminanceMultiply=0.7, mixedLightingMultiply=0.8):
         vae_stride = (4, 8, 8)
         
         # Store reference method as instance variable for use in frame processing
@@ -1076,7 +1081,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                         color_match_adaptive,
                         color_match_scene_threshold,
                         temporal_smoothing,
-                        color_match_source
+                        color_match_source,
+                        requiredTotalCorrection,
+                        whiteBalanceMultiply,
+                        luminanceMultiply,
+                        mixedLightingMultiply
                     )
                 else:
                     print(f"Applying frame-by-frame color matching to prefix samples")
@@ -1339,7 +1348,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                             color_match_adaptive,
                             color_match_scene_threshold,
                             temporal_smoothing,
-                            color_match_source
+                            color_match_source,
+                            requiredTotalCorrection,
+                            whiteBalanceMultiply,
+                            luminanceMultiply,
+                            mixedLightingMultiply
                         )
                     else:
                         print(f"Applying frame-by-frame color matching with method: {color_reference_method}")
@@ -1871,7 +1884,9 @@ class WanVideoLoopingDiffusionForcingSampler:
         }
 
     def process_batch_with_advanced_color_correction(self, decoded_frames, color_match_strength, color_match_method, 
-                                                   color_match_adaptive, color_match_scene_threshold, temporal_smoothing, color_match_source=None):
+                                                   color_match_adaptive, color_match_scene_threshold, temporal_smoothing,
+                                                   color_match_source=None, requiredTotalCorrection=0.1,
+                                                   whiteBalanceMultiply=0.8, luminanceMultiply=0.7, mixedLightingMultiply=0.8):
         """
         Enhanced processing with multiple color correction methods to prevent washing out
         """
@@ -1963,14 +1978,14 @@ class WanVideoLoopingDiffusionForcingSampler:
                 total_correction_needed = color_cast_strength + contrast_strength + mixed_lighting_strength
                 print(f"Frame {i}: total_correction_needed: {total_correction_needed:.3f} color_cast: {color_cast_strength:.3f}, contrast: {contrast_strength:.3f}, mixed_lighting: {mixed_lighting_strength:.3f}")
                 
-                if total_correction_needed > 0.1:  # Only apply corrections if there's something significant to fix
+                if total_correction_needed > requiredTotalCorrection:  # Only apply corrections if there's something significant to fix
                     # Distribute the adaptive_strength across methods based on their relative importance
                     remaining_strength = adaptive_strength
                     
                     # Step 1: White balance correction (proportional to color cast strength)
                     if color_cast_strength > 0.1 and remaining_strength > 0.05:
                         wb_weight = color_cast_strength / total_correction_needed
-                        wb_strength = min(remaining_strength * wb_weight * 0.8, adaptive_strength * 0.4)  # Cap at 40% of total
+                        wb_strength = min(remaining_strength * wb_weight * whiteBalanceMultiply, adaptive_strength * 0.4)  # Cap at 40% of total
                         
                         if wb_strength > 0.05:
                             processed_frame = self.apply_white_balance_correction(
@@ -1988,7 +2003,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                     # Step 2: Luminance-preserving correction (proportional to contrast strength)
                     if contrast_strength > 0.1 and remaining_strength > 0.05:
                         lum_weight = contrast_strength / max(contrast_strength + mixed_lighting_strength, 0.1)
-                        lum_strength = min(remaining_strength * lum_weight * 0.7, adaptive_strength * 0.5)  # Cap at 50% of total
+                        lum_strength = min(remaining_strength * lum_weight * luminanceMultiply, adaptive_strength * 0.5)  # Cap at 50% of total
                         
                         if lum_strength > 0.05:
                             processed_frame = self.apply_luminance_preserving_correction(
@@ -1999,7 +2014,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                     
                     # Step 3: Zone-based correction (proportional to mixed lighting strength)
                     if mixed_lighting_strength > 0.1 and remaining_strength > 0.05:
-                        zone_strength = min(remaining_strength * 0.8, adaptive_strength * 0.4)  # Cap at 40% of total
+                        zone_strength = min(remaining_strength * mixedLightingMultiply, adaptive_strength * 0.4)  # Cap at 40% of total
                         
                         if zone_strength > 0.05:
                             processed_frame = self.apply_zone_based_histogram_matching(
@@ -2009,7 +2024,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                             remaining_strength -= zone_strength
                     
                     # Step 4: Fallback to regular color matching if significant strength remains unused
-                    if remaining_strength > adaptive_strength * 0.2:  # If more than 20% of strength is unused
+                    if remaining_strength > adaptive_strength * 0.01:  # If more than 1% of strength is unused
                         current_frame_batch_temp = processed_frame.unsqueeze(0)
                         color_match_result = colormatch(reference_frame, current_frame_batch_temp, color_match_method, remaining_strength)
                         processed_frame = color_match_result[0][0]
