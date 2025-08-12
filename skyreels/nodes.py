@@ -849,25 +849,14 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "use_model_upscale": ("BOOLEAN", {"default": True, "tooltip": "Use provided upscale model to upscale the generated video"}),
                 "simple_scale_Args": ("WANSIMPLESCALEARGS", {"tooltip": "Arguments for simple scaling."}),
 
-                # "color_match_scene_threshold": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Threshold for scene change detection"}),
-                # "color_match_adaptive": ("BOOLEAN", {"default": True, "tooltip": "Use adaptive color matching strength"}),
-                # "temporal_smoothing": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal smoothing factor"}),
-                # "color_reference_method": (["first_frame", "rolling_average", "previous_frame", "firstFramesHistogram"], {"default": "rolling_average"}),
-                # "numberOfFirstFrames": ("INT", {"default": 20, "min": 1, "step": 1, "tooltip": "Number of first frames to use as brightness reference library (only used with firstFramesHistogram method)"}),
-                # "color_correction_method": (["frame_by_frame", "advanced"], {"default": "frame_by_frame", "tooltip": "Choose color correction method: frame_by_frame (original) or advanced (luminance-preserving)"}),
-                # "requiredTotalCorrection": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Minimum total correction needed to apply advanced color correction"}),
-                # "whiteBalanceMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Multiplier for white balance correction strength"}),
-                # "luminanceMultiply": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Multiplier for luminance-preserving correction strength"}),
-                # "mixedLightingMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Multiplier for zone-based correction strength"}),
-                # "whiteBalancePercentage": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 1000.0, "step": 1.0, "tooltip": "Percentage of white balance correction to apply"}),
-                # "luminancePercentage": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 1000.0, "step": 1.0, "tooltip": "Percentage of luminance-preserving correction to apply"}),
-                # "mixedLightingPercentage": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 1000.0, "step": 1.0, "tooltip": "Percentage of zone-based correction to apply"}),
-
                 "numberOfFirstFrames": ("INT", {"default": 20, "min": 1, "max": 100, "step": 1, "tooltip": "Number of first frames to use as brightness reference library"}),
                 "contrast_stabilization": ("BOOLEAN", {"default": False, "tooltip": "Enable contrast stabilization to prevent shadow/highlight drift"}),
                 "shadow_threshold": ("FLOAT", {"default": 0.3, "min": 0.1, "max": 0.5, "step": 0.05, "tooltip": "Luminance threshold to define shadow areas"}),
                 "highlight_threshold": ("FLOAT", {"default": 0.7, "min": 0.5, "max": 0.9, "step": 0.05, "tooltip": "Luminance threshold to define highlight areas"}),
-                "contrast_strength": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 100.0, "step": 0.1, "tooltip": "Strength of contrast stabilization"}),
+                "shadow_strength": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 10.0, "step": 0.1, "tooltip": "Strength of shadow correction - automatically brightens dark shadows and restores saturation. 0.0=no correction, 1.0=full correction, >1.0=over-correction"}),
+                "highlight_strength": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 10.0, "step": 0.1, "tooltip": "Strength of highlight correction - automatically tones down blown highlights and restores detail. 0.0=no correction, 1.0=full correction, >1.0=over-correction"}),
+                "shadow_anti_banding": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "Anti-banding smoothing for shadows. Higher values = smoother shadows but potentially softer detail"}),
+                "highlight_anti_banding": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "Anti-banding smoothing for highlights. Higher values = smoother highlights but potentially softer detail"}),
 
                 "noise_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001}),
                 "reduction_factor_change": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
@@ -909,7 +898,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
                 prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None,
-                numberOfFirstFrames=20, contrast_stabilization=False, shadow_threshold=0.3, highlight_threshold=0.7, contrast_strength=0.8):
+                numberOfFirstFrames=20, contrast_stabilization=False, shadow_threshold=0.3, highlight_threshold=0.7,
+                shadow_strength=0.8, highlight_strength=0.8, shadow_anti_banding=0.3, highlight_anti_banding=0.2):
         vae_stride = (4, 8, 8)
         
         # Initialize brightness lookup
@@ -1132,37 +1122,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                     contrast_stabilization,
                     shadow_threshold,
                     highlight_threshold,
-                    contrast_strength
+                    shadow_strength,
+                    highlight_strength,
+                    shadow_anti_banding,
+                    highlight_anti_banding
                 )
-                # if color_correction_method == "advanced":
-                #     print(f"Applying advanced color correction to prefix samples")
-                #     used_decoded_sample_images = self.process_batch_with_advanced_color_correction(
-                #         used_decoded_sample_images,
-                #         color_match_strength,
-                #         color_match_method,
-                #         color_match_adaptive,
-                #         color_match_scene_threshold,
-                #         temporal_smoothing,
-                #         color_match_source,
-                #         requiredTotalCorrection,
-                #         whiteBalanceMultiply,
-                #         luminanceMultiply,
-                #         mixedLightingMultiply,
-                #         whiteBalancePercentage,
-                #         luminancePercentage,
-                #         mixedLightingPercentage
-                #     )
-                # else:
-                #     print(f"Applying frame-by-frame color matching to prefix samples")
-                #     used_decoded_sample_images = self.process_batch_with_frame_by_frame_colormatch(
-                #         used_decoded_sample_images,
-                #         color_match_strength,
-                #         color_match_method,
-                #         color_match_adaptive,
-                #         color_match_scene_threshold,
-                #         temporal_smoothing,
-                #         color_match_source
-                #     )
                 
                 # we need to reencode the decoded prefix samples
                 print(f"Re-encoding decoded prefix samples with wanVideoEncode")
@@ -1413,38 +1377,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                         contrast_stabilization,
                         shadow_threshold,
                         highlight_threshold,
-                        contrast_strength
+                        shadow_strength,
+                        highlight_strength,
+                        shadow_anti_banding,
+                        highlight_anti_banding
                     )
-                    
-                    # if color_correction_method == "advanced":
-                    #     print(f"Applying advanced color correction with method: {color_reference_method}")
-                    #     used_decoded_sample_images = self.process_batch_with_advanced_color_correction(
-                    #         used_decoded_sample_images,
-                    #         color_match_strength,
-                    #         color_match_method,
-                    #         color_match_adaptive,
-                    #         color_match_scene_threshold,
-                    #         temporal_smoothing,
-                    #         color_match_source,
-                    #         requiredTotalCorrection,
-                    #         whiteBalanceMultiply,
-                    #         luminanceMultiply,
-                    #         mixedLightingMultiply,
-                    #         whiteBalancePercentage,
-                    #         luminancePercentage,
-                    #         mixedLightingPercentage
-                    #     )
-                    # else:
-                    #     print(f"Applying frame-by-frame color matching with method: {color_reference_method}")
-                    #     used_decoded_sample_images = self.process_batch_with_frame_by_frame_colormatch(
-                    #         used_decoded_sample_images,
-                    #         color_match_strength,
-                    #         color_match_method,
-                    #         color_match_adaptive,
-                    #         color_match_scene_threshold,
-                    #         temporal_smoothing,
-                    #         color_match_source
-                    #     )
                     
                     end_time = time.time()
                     elapsed_time = end_time - start_time
@@ -1610,83 +1547,25 @@ class WanVideoLoopingDiffusionForcingSampler:
 
 
     def calculate_brightness_signature(self, frame):
-            """Calculate comprehensive brightness signature for frame matching"""
-            lum = 0.299 * frame[..., 0] + 0.587 * frame[..., 1] + 0.114 * frame[..., 2]
-            
-            # Histogram-based signature (most important)
-            hist = torch.histc(lum.flatten(), bins=16, min=0, max=1)
-            hist_norm = hist / (hist.sum() + 1e-8)
-            
-            # Statistical measures
-            mean_lum = lum.mean().item()
-            std_lum = lum.std().item()
-            
-            # Percentiles for distribution shape
-            percentiles = torch.quantile(lum.flatten(), torch.tensor([0.1, 0.25, 0.5, 0.75, 0.9]))
-            
-            return {
-                'histogram': hist_norm,
-                'mean': mean_lum,
-                'std': std_lum,
-                'percentiles': percentiles
-            }
-
-    def calculate_brightness_signature_with_zones(self, frame, shadow_threshold=0.3, highlight_threshold=0.7):
-        """Calculate brightness signature including shadow/highlight zone analysis"""
+        """Calculate comprehensive brightness signature for frame matching"""
         lum = 0.299 * frame[..., 0] + 0.587 * frame[..., 1] + 0.114 * frame[..., 2]
         
-        # Define tonal zones
-        shadow_mask = lum < shadow_threshold
-        midtone_mask = (lum >= shadow_threshold) & (lum <= highlight_threshold)
-        highlight_mask = lum > highlight_threshold
-        
-        # Standard brightness signature
+        # Histogram-based signature (most important)
         hist = torch.histc(lum.flatten(), bins=16, min=0, max=1)
         hist_norm = hist / (hist.sum() + 1e-8)
+        
+        # Statistical measures
         mean_lum = lum.mean().item()
         std_lum = lum.std().item()
+        
+        # Percentiles for distribution shape
         percentiles = torch.quantile(lum.flatten(), torch.tensor([0.1, 0.25, 0.5, 0.75, 0.9]))
-        
-        # Zone-specific analysis
-        shadow_stats = self.analyze_zone(frame, shadow_mask, "shadows")
-        highlight_stats = self.analyze_zone(frame, highlight_mask, "highlights")
-        
-        # Contrast characteristics
-        contrast_ratio = percentiles[4] - percentiles[0]  # 90th - 10th percentile
         
         return {
             'histogram': hist_norm,
             'mean': mean_lum,
             'std': std_lum,
-            'percentiles': percentiles,
-            'shadow_stats': shadow_stats,
-            'highlight_stats': highlight_stats,
-            'contrast_ratio': contrast_ratio.item()
-        }
-
-    def analyze_zone(self, frame, mask, zone_name):
-        """Analyze specific tonal zone characteristics"""
-        if mask.sum() == 0:
-            return {
-                'area_ratio': 0.0,
-                'mean_luminance': 0.5,
-                'mean_color': torch.tensor([0.5, 0.5, 0.5]),
-                'saturation': 0.0
-            }
-        
-        zone_pixels = frame[mask]
-        zone_lum = (0.299 * zone_pixels[..., 0] + 0.587 * zone_pixels[..., 1] + 0.114 * zone_pixels[..., 2])
-        
-        # Calculate saturation (approximate)
-        zone_max, _ = zone_pixels.max(dim=-1)
-        zone_min, _ = zone_pixels.min(dim=-1)
-        saturation = ((zone_max - zone_min) / (zone_max + 1e-8)).mean()
-        
-        return {
-            'area_ratio': (mask.sum().float() / mask.numel()).item(),
-            'mean_luminance': zone_lum.mean().item(),
-            'mean_color': zone_pixels.mean(dim=0),
-            'saturation': saturation.item()
+            'percentiles': percentiles
         }
 
     def find_best_brightness_match(self, target_signature, brightness_lookup):
@@ -1717,66 +1596,136 @@ class WanVideoLoopingDiffusionForcingSampler:
         
         return best_frame_data
 
-    def apply_contrast_stabilization(self, reference_frame, current_frame, strength=0.8, shadow_threshold=0.3, highlight_threshold=0.7):
-        """Apply contrast stabilization to prevent shadow/highlight drift"""
+    def apply_contrast_stabilization(self, current_frame, shadow_strength=0.8, highlight_strength=0.8, 
+                                   shadow_threshold=0.3, highlight_threshold=0.7, 
+                                   shadow_anti_banding=0.3, highlight_anti_banding=0.2):
+        """Apply contrast stabilization to prevent shadow/highlight drift without using reference frames"""
         curr_lum = 0.299 * current_frame[..., 0] + 0.587 * current_frame[..., 1] + 0.114 * current_frame[..., 2]
-        ref_lum = 0.299 * reference_frame[..., 0] + 0.587 * reference_frame[..., 1] + 0.114 * reference_frame[..., 2]
-        
-        # Define current and reference zones
-        curr_shadows = curr_lum < shadow_threshold
-        curr_highlights = curr_lum > highlight_threshold
-        ref_shadows = ref_lum < shadow_threshold
-        ref_highlights = ref_lum > highlight_threshold
         
         result = current_frame.clone()
-        corrections_applied = []
         
-        # Shadow stabilization (prevent darkening + restore saturation)
-        if curr_shadows.sum() > 0 and ref_shadows.sum() > 0:
-            curr_shadow_pixels = current_frame[curr_shadows]
-            ref_shadow_pixels = reference_frame[ref_shadows]
-            
-            # Luminance correction (prevent darkening)
-            curr_shadow_lum = curr_lum[curr_shadows]
-            ref_shadow_lum = ref_lum[ref_shadows]
-            lum_correction_factor = ref_shadow_lum.mean() / (curr_shadow_lum.mean() + 1e-8)
-            lum_correction_factor = torch.clamp(lum_correction_factor, 0.8, 1.3)  # Limit correction
-            
-            # Color correction (restore saturation and color balance)
-            color_correction = ref_shadow_pixels.mean(dim=0) - curr_shadow_pixels.mean(dim=0)
-            
-            # Apply combined correction with strength control
-            corrected_shadows = curr_shadow_pixels * (1.0 + strength * 0.3 * (lum_correction_factor - 1.0))
-            corrected_shadows = corrected_shadows + strength * 0.7 * color_correction
-            
-            result[curr_shadows] = torch.clamp(corrected_shadows, 0.0, 1.0)
-            corrections_applied.append("shadows")
+        # Create smooth transition masks instead of hard thresholds
+        # Shadow mask: strong at 0, fades to 0 at shadow_threshold, extends slightly beyond
+        shadow_fade_end = shadow_threshold + 0.1
+        shadow_mask = torch.clamp((shadow_fade_end - curr_lum) / (shadow_fade_end - 0.0), 0.0, 1.0)
+        shadow_mask = shadow_mask * (curr_lum < shadow_fade_end).float()
         
-        # Highlight stabilization (prevent blowout)
-        if curr_highlights.sum() > 0 and ref_highlights.sum() > 0:
-            curr_highlight_pixels = current_frame[curr_highlights]
-            ref_highlight_pixels = reference_frame[ref_highlights]
-            
-            # Prevent highlight blowout
-            curr_highlight_lum = curr_lum[curr_highlights]
-            ref_highlight_lum = ref_lum[ref_highlights]
-            lum_correction_factor = ref_highlight_lum.mean() / (curr_highlight_lum.mean() + 1e-8)
-            lum_correction_factor = torch.clamp(lum_correction_factor, 0.7, 1.2)  # Limit correction
-            
-            # Color correction for highlights
-            color_correction = ref_highlight_pixels.mean(dim=0) - curr_highlight_pixels.mean(dim=0)
-            
-            # Apply correction (more conservative for highlights)
-            corrected_highlights = curr_highlight_pixels * (1.0 + strength * 0.5 * (lum_correction_factor - 1.0))
-            corrected_highlights = corrected_highlights + strength * 0.5 * color_correction
-            
-            result[curr_highlights] = torch.clamp(corrected_highlights, 0.0, 1.0)
-            corrections_applied.append("highlights")
+        # Highlight mask: starts at highlight_threshold, strong at 1.0, with smooth transition
+        highlight_fade_start = highlight_threshold - 0.1
+        highlight_mask = torch.clamp((curr_lum - highlight_fade_start) / (1.0 - highlight_fade_start), 0.0, 1.0)
+        highlight_mask = highlight_mask * (curr_lum > highlight_fade_start).float()
         
-        return result, corrections_applied
+        # Shadow stabilization: prevent shadows from getting darker and less saturated
+        if shadow_mask.sum() > 0 and shadow_strength > 0:
+            # Calculate per-pixel lift factor based on how dark the pixel is
+            lift_factor = torch.ones_like(curr_lum)
+            shadow_areas = shadow_mask > 0.1
+            
+            if shadow_areas.any():
+                # Stronger lift for darker pixels, gentler for lighter shadows
+                darkness_factor = (shadow_threshold - curr_lum[shadow_areas]) / shadow_threshold
+                lift_amount = 1.0 + (darkness_factor * 0.2 * shadow_strength)  # Max 20% lift
+                lift_factor[shadow_areas] = lift_amount
+            
+            # Apply luminance lift and saturation restoration
+            for c in range(3):
+                # Lift shadows
+                shadow_correction = (current_frame[..., c] * lift_factor - current_frame[..., c]) * shadow_mask
+                
+                # Restore saturation by pushing towards channel mean in shadow areas
+                if shadow_areas.any():
+                    channel_mean = current_frame[..., c][shadow_mask > 0.1].mean()
+                    saturation_restore = (channel_mean - current_frame[..., c]) * 0.1 * shadow_strength * shadow_mask
+                    result[..., c] = result[..., c] + shadow_correction + saturation_restore
+                else:
+                    result[..., c] = result[..., c] + shadow_correction
+        
+        # Highlight stabilization: prevent highlights from getting lighter and blown out
+        if highlight_mask.sum() > 0 and highlight_strength > 0:
+            # Calculate per-pixel compression factor based on how bright the pixel is
+            compress_factor = torch.ones_like(curr_lum)
+            highlight_areas = highlight_mask > 0.1
+            
+            if highlight_areas.any():
+                # Stronger compression for brighter pixels
+                brightness_factor = (curr_lum[highlight_areas] - highlight_threshold) / (1.0 - highlight_threshold)
+                compress_amount = 1.0 - (brightness_factor * 0.15 * highlight_strength)  # Max 15% compression
+                compress_factor[highlight_areas] = torch.clamp(compress_amount, 0.7, 1.0)
+            
+            # Apply luminance compression and detail restoration
+            for c in range(3):
+                # Compress highlights
+                highlight_correction = (current_frame[..., c] * compress_factor - current_frame[..., c]) * highlight_mask
+                
+                # Restore detail by preserving local contrast
+                if highlight_areas.any():
+                    local_mean = torch.nn.functional.avg_pool2d(
+                        current_frame[..., c].unsqueeze(0).unsqueeze(0), 
+                        kernel_size=5, stride=1, padding=2
+                    ).squeeze()
+                    detail_preserve = (current_frame[..., c] - local_mean) * 0.8 * highlight_mask
+                    result[..., c] = result[..., c] + highlight_correction + detail_preserve
+                else:
+                    result[..., c] = result[..., c] + highlight_correction
+        
+        # Apply anti-banding smoothing
+        if shadow_anti_banding > 0 and shadow_mask.sum() > 0:
+            result = self.apply_zone_smoothing(result, current_frame, shadow_mask, shadow_anti_banding, "shadow")
+        
+        if highlight_anti_banding > 0 and highlight_mask.sum() > 0:
+            result = self.apply_zone_smoothing(result, current_frame, highlight_mask, highlight_anti_banding, "highlight")
+        
+        result = torch.clamp(result, 0.0, 1.0)
+        return result
+
+    def apply_zone_smoothing(self, result, original, mask, smoothing_strength, zone_type):
+        """Fast edge-preserving smoothing with optimized operations"""
+        if smoothing_strength <= 0:
+            return result
+        
+        # Reduced kernel sizes for speed
+        kernel_size = 3  # Same size for both shadow and highlight for simplicity
+        padding = kernel_size // 2
+        
+        # Simple edge detection (faster than full gradient calculation)
+        orig_gray = 0.299 * original[..., 0] + 0.587 * original[..., 1] + 0.114 * original[..., 2]
+        
+        # Faster edge detection using built-in conv2d
+        edge_kernel = torch.tensor([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], 
+                                   dtype=torch.float32, device=original.device).unsqueeze(0).unsqueeze(0)
+        
+        orig_padded = orig_gray.unsqueeze(0).unsqueeze(0)
+        orig_padded = torch.nn.functional.pad(orig_padded, (1, 1, 1, 1), mode='reflect')
+        edge_response = torch.nn.functional.conv2d(orig_padded, edge_kernel).squeeze()
+        edge_strength = torch.abs(edge_response)
+        
+        # Simplified edge weighting
+        edge_threshold = 0.1
+        smooth_weights = torch.exp(-edge_strength / edge_threshold)
+        zone_smooth_weights = mask * smooth_weights * smoothing_strength
+        
+        # Fast box filter using separable convolution
+        smoothed = result.clone()
+        box_kernel = torch.ones(1, 1, kernel_size, 1, device=result.device) / kernel_size
+        
+        for c in range(3):
+            channel = result[..., c].unsqueeze(0).unsqueeze(0)
+            # Horizontal pass
+            channel_h = torch.nn.functional.pad(channel, (0, 0, padding, padding), mode='reflect')
+            channel_h = torch.nn.functional.conv2d(channel_h, box_kernel)
+            # Vertical pass  
+            channel_v = torch.nn.functional.pad(channel_h, (padding, padding, 0, 0), mode='reflect')
+            channel_smooth = torch.nn.functional.conv2d(channel_v, box_kernel.transpose(-1, -2))
+            
+            # Blend with original
+            blend_factor = zone_smooth_weights
+            smoothed[..., c] = (1 - blend_factor) * result[..., c] + blend_factor * channel_smooth.squeeze()
+        
+        return smoothed
 
     def process_first_frames_sequence(self, decoded_frames, color_match_method, color_match_strength, editInPlace, gc_interval,
-                                     contrast_stabilization=False, shadow_threshold=0.3, highlight_threshold=0.7, contrast_strength=0.8):
+                                     contrast_stabilization=False, shadow_threshold=0.3, highlight_threshold=0.7, 
+                                     shadow_strength=0.8, highlight_strength=0.8, shadow_anti_banding=0.3, highlight_anti_banding=0.2):
         """
         Enhanced processing with optional contrast stabilization
         """
@@ -1788,61 +1737,57 @@ class WanVideoLoopingDiffusionForcingSampler:
         for i, current_frame in enumerate(decoded_frames):
             current_frame_batch = current_frame.unsqueeze(0)  # Add batch dimension
             
-            # if i < self.numberOfFirstFrames:
             if self.brightness_lookup is None or len(self.brightness_lookup) < self.numberOfFirstFrames:
-                # Build enhanced brightness lookup with tonal zone analysis
-                if contrast_stabilization:
-                    signature = self.calculate_brightness_signature_with_zones(current_frame, shadow_threshold, highlight_threshold)
-                    zone_info = f", shadows: {signature['shadow_stats']['area_ratio']:.2f}, highlights: {signature['highlight_stats']['area_ratio']:.2f}"
-                else:
-                    signature = self.calculate_brightness_signature(current_frame)
-                    zone_info = ""
-                
+                # Build brightness lookup from first frames (no color matching applied)
+                signature = self.calculate_brightness_signature(current_frame)
                 self.brightness_lookup.append({
                     'frame': current_frame.clone(),
                     'signature': signature,
                     'frame_index': i
                 })
-                print(f"Frame {i}: Added to lookup (lum: {signature['mean']:.3f}, std: {signature['std']:.3f}{zone_info})")
-                processed_frames.append(current_frame)
-            else:
-                # Find best matching reference frame
-                if contrast_stabilization:
-                    target_signature = self.calculate_brightness_signature_with_zones(current_frame, shadow_threshold, highlight_threshold)
-                else:
-                    target_signature = self.calculate_brightness_signature(current_frame)
+                print(f"Frame {i}: Added to brightness lookup (mean luminance: {signature['mean']:.3f}, std: {signature['std']:.3f})")
                 
+                # Apply contrast stabilization to reference frames if enabled
+                if contrast_stabilization:
+                    processed_frame = self.apply_contrast_stabilization(
+                        current_frame, shadow_strength, highlight_strength,
+                        shadow_threshold, highlight_threshold,
+                        shadow_anti_banding, highlight_anti_banding
+                    )
+                else:
+                    processed_frame = current_frame
+                    
+                processed_frames.append(processed_frame)
+            else:
+                # Use brightness lookup to find best matching reference frame
+                target_signature = self.calculate_brightness_signature(current_frame)
                 best_match = self.find_best_brightness_match(target_signature, self.brightness_lookup)
                 
                 if best_match is not None:
                     reference_frame = best_match['frame'].unsqueeze(0)
-                    processed_frame = current_frame.clone()
-                    applied_corrections = []
+                    print(f"Frame {i}: Matched with reference frame {best_match['frame_index']} (target mean lum: {target_signature['mean']:.3f})")
                     
-                    # Apply color matching if enabled
+                    # Apply color matching using the matched reference frame
                     if color_match_strength > 0.0:
                         color_match_result = colormatch(reference_frame, current_frame_batch, color_match_method, color_match_strength, editInPlace, gc_interval)
-                        processed_frame = color_match_result[0][0]
-                        applied_corrections.append("color_match")
-                    
-                    # Apply contrast stabilization if enabled
-                    if contrast_stabilization:
-                        processed_frame, corrections = self.apply_contrast_stabilization(
-                            best_match['frame'], processed_frame, contrast_strength, shadow_threshold, highlight_threshold
-                        )
-                        if corrections:
-                            applied_corrections.extend(corrections)
-                    
-                    correction_desc = " + ".join(applied_corrections) if applied_corrections else "none"
-                    print(f"Frame {i}: Matched with ref {best_match['frame_index']} (lum: {target_signature['mean']:.3f}) - applied: {correction_desc}")
-                    
-                    processed_frames.append(processed_frame)
+                        processed_frame = color_match_result[0][0]  # Remove batch dimension
+                    else:
+                        processed_frame = current_frame
                 else:
-                    print(f"Frame {i}: No suitable match found, using original frame")
-                    processed_frames.append(current_frame)
+                    print(f"Frame {i}: No suitable match found in brightness lookup, using original frame")
+                    processed_frame = current_frame
+                
+                # Apply contrast stabilization if enabled
+                if contrast_stabilization:
+                    processed_frame = self.apply_contrast_stabilization(
+                        processed_frame, shadow_strength, highlight_strength,
+                        shadow_threshold, highlight_threshold,
+                        shadow_anti_banding, highlight_anti_banding
+                    )
+                
+                processed_frames.append(processed_frame)
         
         return torch.stack(processed_frames, dim=0)
-
 
     def scale(self, image, width, height, upscale_method, crop):
         # Get the dimensions of the image
