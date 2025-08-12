@@ -808,7 +808,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "color_match_scene_threshold": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Threshold for scene change detection"}),
                 "color_match_adaptive": ("BOOLEAN", {"default": True, "tooltip": "Use adaptive color matching strength"}),
                 "temporal_smoothing": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Temporal smoothing factor"}),
-                "color_reference_method": (["first_frame", "rolling_average", "previous_frame"], {"default": "rolling_average"}),
+                "color_reference_method": (["first_frame", "rolling_average", "previous_frame", "firstFramesHistogram"], {"default": "rolling_average"}),
+                "numberOfFirstFrames": ("INT", {"default": 20, "min": 1, "step": 1, "tooltip": "Number of first frames to use as brightness reference library (only used with firstFramesHistogram method)"}),
                 "color_correction_method": (["frame_by_frame", "advanced"], {"default": "frame_by_frame", "tooltip": "Choose color correction method: frame_by_frame (original) or advanced (luminance-preserving)"}),
                 "requiredTotalCorrection": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Minimum total correction needed to apply advanced color correction"}),
                 "whiteBalanceMultiply": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Multiplier for white balance correction strength"}),
@@ -856,7 +857,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
-                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None, color_match_scene_threshold=0.3, color_match_adaptive=True, temporal_smoothing=0.1, color_reference_method="rolling_average", color_correction_method="frame_by_frame",
+                prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None, color_match_scene_threshold=0.3, color_match_adaptive=True, temporal_smoothing=0.1, color_reference_method="rolling_average",  numberOfFirstFrames=20, color_correction_method="frame_by_frame",
                 requiredTotalCorrection=0.1, whiteBalanceMultiply=0.8, luminanceMultiply=0.7, mixedLightingMultiply=0.8,
                 whiteBalancePercentage=100.0, luminancePercentage=100.0, mixedLightingPercentage=100.0):
         vae_stride = (4, 8, 8)
@@ -868,6 +869,8 @@ class WanVideoLoopingDiffusionForcingSampler:
         self.color_reference_buffer = []
         self.original_reference_buffer = []  # Buffer for original frames (scene change detection)
         self.buffer_size = 5  # Keep last 5 frames as references
+        self.brightness_lookup = []  # For firstFramesHistogram method
+        self.numberOfFirstFrames = numberOfFirstFrames
         
         if cache_args2 is None:
             cache_args2 = cache_args
@@ -1623,6 +1626,56 @@ class WanVideoLoopingDiffusionForcingSampler:
         b_comp = (r + g - 2 * b) * 0.25 + 0.5  # Range: 0-1 (shifted)
         return torch.stack([l, a, b_comp], dim=-1)
 
+    def calculate_brightness_signature(self, frame):
+        """Calculate comprehensive brightness signature for frame matching"""
+        lum = 0.299 * frame[..., 0] + 0.587 * frame[..., 1] + 0.114 * frame[..., 2]
+        
+        # Histogram-based signature (most important)
+        hist = torch.histc(lum.flatten(), bins=16, min=0, max=1)
+        hist_norm = hist / (hist.sum() + 1e-8)
+        
+        # Statistical measures
+        mean_lum = lum.mean().item()
+        std_lum = lum.std().item()
+        
+        # Percentiles for distribution shape
+        percentiles = torch.quantile(lum.flatten(), torch.tensor([0.1, 0.25, 0.5, 0.75, 0.9]))
+        
+        return {
+            'histogram': hist_norm,
+            'mean': mean_lum,
+            'std': std_lum,
+            'percentiles': percentiles
+        }
+
+    def find_best_brightness_match(self, target_signature, brightness_lookup):
+        """Find the best matching frame from brightness lookup"""
+        best_distance = float('inf')
+        best_frame_data = None
+        
+        for frame_data in brightness_lookup:
+            ref_sig = frame_data['signature']
+            
+            # Primary: Histogram distance
+            hist_distance = torch.sum(torch.abs(target_signature['histogram'] - ref_sig['histogram'])).item()
+            
+            # Secondary: Statistical distances
+            mean_distance = abs(target_signature['mean'] - ref_sig['mean'])
+            std_distance = abs(target_signature['std'] - ref_sig['std'])
+            perc_distance = torch.mean(torch.abs(target_signature['percentiles'] - ref_sig['percentiles'])).item()
+            
+            # Weighted combination
+            total_distance = (0.6 * hist_distance + 
+                             0.2 * mean_distance + 
+                             0.1 * std_distance + 
+                             0.1 * perc_distance)
+            
+            if total_distance < best_distance:
+                best_distance = total_distance
+                best_frame_data = frame_data
+        
+        return best_frame_data
+
     def temporal_color_smooth(self, current_frames, prev_frames, smoothing_factor=0.1):
         """
         Apply temporal smoothing to reduce sudden color changes
@@ -1657,33 +1710,60 @@ class WanVideoLoopingDiffusionForcingSampler:
         for i, current_frame in enumerate(decoded_frames):
             current_frame_batch = current_frame.unsqueeze(0)  # Add batch dimension
             
-            # Determine reference frame for this specific frame (use CORRECTED frames)
-            reference_frame = None
-            adaptive_strength = color_match_strength
-            
-            if self.color_reference_method == "rolling_average" and len(self.color_reference_buffer) > 0:
-                # Use rolling average as reference
-                reference_frame = torch.stack(self.color_reference_buffer).mean(dim=0).unsqueeze(0)
-            elif self.color_reference_method == "previous_frame":
-                if i > 0:
-                    # Use previous CORRECTED frame in current batch
-                    reference_frame = processed_frames[-1].unsqueeze(0)
-                elif len(self.color_reference_buffer) > 0:
-                    # Use last CORRECTED frame from buffer if this is first frame in batch
-                    reference_frame = self.color_reference_buffer[-1].unsqueeze(0)
+            # Handle firstFramesHistogram method - build lookup in first frames, use it for remaining frames
+            if self.color_reference_method == "firstFramesHistogram":
+                if i < self.numberOfFirstFrames:
+                    # Build brightness lookup from first frames (no color matching applied)
+                    signature = self.calculate_brightness_signature(current_frame)
+                    self.brightness_lookup.append({
+                        'frame': current_frame.clone(),
+                        'signature': signature,
+                        'frame_index': i
+                    })
+                    print(f"Frame {i}: Added to brightness lookup (mean luminance: {signature['mean']:.3f})")
+                    processed_frames.append(current_frame)
+                    continue
+                else:
+                    # Use brightness lookup to find best matching reference frame
+                    target_signature = self.calculate_brightness_signature(current_frame)
+                    best_match = self.find_best_brightness_match(target_signature, self.brightness_lookup)
+                    
+                    if best_match is not None:
+                        reference_frame = best_match['frame'].unsqueeze(0)
+                        print(f"Frame {i}: Matched with reference frame {best_match['frame_index']} (distance calculated from histogram)")
+                    else:
+                        print(f"Frame {i}: No suitable match found in brightness lookup, using current frame")
+                        reference_frame = current_frame_batch.clone()
             else:
-                # Default to first frame method or provided color_match_source
-                if color_match_source is not None:
-                    reference_frame = color_match_source
-                elif len(self.color_reference_buffer) > 0:
-                    reference_frame = self.color_reference_buffer[0].unsqueeze(0)
-                elif i > 0:
-                    reference_frame = processed_frames[0].unsqueeze(0)
+                # Original reference frame determination logic
+                # Determine reference frame for this specific frame (use CORRECTED frames)
+                reference_frame = None
+                
+                if self.color_reference_method == "rolling_average" and len(self.color_reference_buffer) > 0:
+                    # Use rolling average as reference
+                    reference_frame = torch.stack(self.color_reference_buffer).mean(dim=0).unsqueeze(0)
+                elif self.color_reference_method == "previous_frame":
+                    if i > 0:
+                        # Use previous CORRECTED frame in current batch
+                        reference_frame = processed_frames[-1].unsqueeze(0)
+                    elif len(self.color_reference_buffer) > 0:
+                        # Use last CORRECTED frame from buffer if this is first frame in batch
+                        reference_frame = self.color_reference_buffer[-1].unsqueeze(0)
+                else:
+                    # Default to first frame method or provided color_match_source
+                    if color_match_source is not None:
+                        reference_frame = color_match_source
+                    elif len(self.color_reference_buffer) > 0:
+                        reference_frame = self.color_reference_buffer[0].unsqueeze(0)
+                    elif i > 0:
+                        reference_frame = processed_frames[0].unsqueeze(0)
+                
+                # If no reference available, use current frame as reference (no change)
+                if reference_frame is None:
+                    print(f"Frame {i}: No reference frame available, using current frame as reference, so no change")
+                    reference_frame = current_frame_batch.clone()
             
-            # If no reference available, use current frame as reference (no change)
-            if reference_frame is None:
-                print(f"Frame {i}: No reference frame available, using current frame as reference, so no change")
-                reference_frame = current_frame_batch.clone()
+            adaptive_strength = color_match_strength
                 
             # Set initial color_match_source if not set yet and this is the first frame
             if i == 0 and color_match_source is None:
@@ -1710,7 +1790,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                 # Use threshold to determine if scene change is significant enough to reduce color matching
                 if scene_change_score > color_match_scene_threshold:
                     # Calculate how much the scene change exceeds the threshold (0.0 to 1.0 range)
-                    excess_change = min((scene_change_score - color_match_scene_threshold) / (1.0 - color_match_scene_threshold), 1.0)
+                    # Handle edge case where threshold is 1.0 (divisor would be 0)
+                    if color_match_scene_threshold >= 1.0:
+                        excess_change = 1.0  # Maximum reduction when threshold is at maximum
+                    else:
+                        excess_change = min((scene_change_score - color_match_scene_threshold) / (1.0 - color_match_scene_threshold), 1.0)
                     
                     # Gradually reduce strength from full strength to minimum (e.g., 20% of original)
                     min_strength_ratio = 0.2  # Don't go below 20% of original strength
@@ -1740,18 +1824,19 @@ class WanVideoLoopingDiffusionForcingSampler:
             
             processed_frames.append(processed_frame)
             
-            # Update rolling buffer with CORRECTED frame for color matching
+            # Update rolling buffer with CORRECTED frame for color matching (skip for firstFramesHistogram)
             if self.color_reference_method == "rolling_average":
                 if len(self.color_reference_buffer) >= self.buffer_size:
                     self.color_reference_buffer.pop(0)
                 self.color_reference_buffer.append(processed_frame.clone())
             
-            # Also maintain original frame buffer for scene change detection
-            if not hasattr(self, 'original_reference_buffer'):
-                self.original_reference_buffer = []
-            if len(self.original_reference_buffer) >= self.buffer_size:
-                self.original_reference_buffer.pop(0)
-            self.original_reference_buffer.append(current_frame.clone())
+            # Also maintain original frame buffer for scene change detection (skip for firstFramesHistogram)
+            if self.color_reference_method != "firstFramesHistogram":
+                if not hasattr(self, 'original_reference_buffer'):
+                    self.original_reference_buffer = []
+                if len(self.original_reference_buffer) >= self.buffer_size:
+                    self.original_reference_buffer.pop(0)
+                self.original_reference_buffer.append(current_frame.clone())
         
         return torch.stack(processed_frames, dim=0)
 
@@ -1910,33 +1995,60 @@ class WanVideoLoopingDiffusionForcingSampler:
         for i, current_frame in enumerate(decoded_frames):
             current_frame_batch = current_frame.unsqueeze(0)  # Add batch dimension
             
-            # Determine reference frame for this specific frame (use CORRECTED frames)
-            reference_frame = None
-            adaptive_strength = color_match_strength
-            
-            if self.color_reference_method == "rolling_average" and len(self.color_reference_buffer) > 0:
-                # Use rolling average as reference
-                reference_frame = torch.stack(self.color_reference_buffer).mean(dim=0).unsqueeze(0)
-            elif self.color_reference_method == "previous_frame":
-                if i > 0:
-                    # Use previous CORRECTED frame in current batch
-                    reference_frame = processed_frames[-1].unsqueeze(0)
-                elif len(self.color_reference_buffer) > 0:
-                    # Use last CORRECTED frame from buffer if this is first frame in batch
-                    reference_frame = self.color_reference_buffer[-1].unsqueeze(0)
+            # Handle firstFramesHistogram method - build lookup in first frames, use it for remaining frames
+            if self.color_reference_method == "firstFramesHistogram":
+                if i < self.numberOfFirstFrames:
+                    # Build brightness lookup from first frames (no color matching applied)
+                    signature = self.calculate_brightness_signature(current_frame)
+                    self.brightness_lookup.append({
+                        'frame': current_frame.clone(),
+                        'signature': signature,
+                        'frame_index': i
+                    })
+                    print(f"Frame {i}: Added to brightness lookup (mean luminance: {signature['mean']:.3f})")
+                    processed_frames.append(current_frame)
+                    continue
+                else:
+                    # Use brightness lookup to find best matching reference frame
+                    target_signature = self.calculate_brightness_signature(current_frame)
+                    best_match = self.find_best_brightness_match(target_signature, self.brightness_lookup)
+                    
+                    if best_match is not None:
+                        reference_frame = best_match['frame'].unsqueeze(0)
+                        print(f"Frame {i}: Matched with reference frame {best_match['frame_index']} (distance calculated from histogram)")
+                    else:
+                        print(f"Frame {i}: No suitable match found in brightness lookup, using current frame")
+                        reference_frame = current_frame_batch.clone()
             else:
-                # Default to first frame method or provided color_match_source
-                if color_match_source is not None:
-                    reference_frame = color_match_source
-                elif len(self.color_reference_buffer) > 0:
-                    reference_frame = self.color_reference_buffer[0].unsqueeze(0)
-                elif i > 0:
-                    reference_frame = processed_frames[0].unsqueeze(0)
+                # Original reference frame determination logic
+                # Determine reference frame for this specific frame (use CORRECTED frames)
+                reference_frame = None
+                
+                if self.color_reference_method == "rolling_average" and len(self.color_reference_buffer) > 0:
+                    # Use rolling average as reference
+                    reference_frame = torch.stack(self.color_reference_buffer).mean(dim=0).unsqueeze(0)
+                elif self.color_reference_method == "previous_frame":
+                    if i > 0:
+                        # Use previous CORRECTED frame in current batch
+                        reference_frame = processed_frames[-1].unsqueeze(0)
+                    elif len(self.color_reference_buffer) > 0:
+                        # Use last CORRECTED frame from buffer if this is first frame in batch
+                        reference_frame = self.color_reference_buffer[-1].unsqueeze(0)
+                else:
+                    # Default to first frame method or provided color_match_source
+                    if color_match_source is not None:
+                        reference_frame = color_match_source
+                    elif len(self.color_reference_buffer) > 0:
+                        reference_frame = self.color_reference_buffer[0].unsqueeze(0)
+                    elif i > 0:
+                        reference_frame = processed_frames[0].unsqueeze(0)
+                
+                # If no reference available, use current frame as reference (no change)
+                if reference_frame is None:
+                    print(f"Frame {i}: No reference frame available, using current frame as reference, so no change")
+                    reference_frame = current_frame_batch.clone()
             
-            # If no reference available, use current frame as reference (no change)
-            if reference_frame is None:
-                print(f"Frame {i}: No reference frame available, using current frame as reference, so no change")
-                reference_frame = current_frame_batch.clone()
+            adaptive_strength = color_match_strength
                 
             # Set initial color_match_source if not set yet and this is the first frame
             if i == 0 and color_match_source is None:
@@ -1963,7 +2075,11 @@ class WanVideoLoopingDiffusionForcingSampler:
                 # Use threshold to determine if scene change is significant enough to reduce color matching
                 if scene_change_score > color_match_scene_threshold:
                     # Calculate how much the scene change exceeds the threshold (0.0 to 1.0 range)
-                    excess_change = min((scene_change_score - color_match_scene_threshold) / (1.0 - color_match_scene_threshold), 1.0)
+                    # Handle edge case where threshold is 1.0 (divisor would be 0)
+                    if color_match_scene_threshold >= 1.0:
+                        excess_change = 1.0  # Maximum reduction when threshold is at maximum
+                    else:
+                        excess_change = min((scene_change_score - color_match_scene_threshold) / (1.0 - color_match_scene_threshold), 1.0)
                     
                     # Gradually reduce strength from full strength to minimum (e.g., 20% of original)
                     min_strength_ratio = 0.2  # Don't go below 20% of original strength
@@ -2082,18 +2198,19 @@ class WanVideoLoopingDiffusionForcingSampler:
             
             processed_frames.append(processed_frame)
             
-            # Update rolling buffer with CORRECTED frame for color matching
+            # Update rolling buffer with CORRECTED frame for color matching (skip for firstFramesHistogram)
             if self.color_reference_method == "rolling_average":
                 if len(self.color_reference_buffer) >= self.buffer_size:
                     self.color_reference_buffer.pop(0)
                 self.color_reference_buffer.append(processed_frame.clone())
             
-            # Also maintain original frame buffer for scene change detection
-            if not hasattr(self, 'original_reference_buffer'):
-                self.original_reference_buffer = []
-            if len(self.original_reference_buffer) >= self.buffer_size:
-                self.original_reference_buffer.pop(0)
-            self.original_reference_buffer.append(current_frame.clone())
+            # Also maintain original frame buffer for scene change detection (skip for firstFramesHistogram)
+            if self.color_reference_method != "firstFramesHistogram":
+                if not hasattr(self, 'original_reference_buffer'):
+                    self.original_reference_buffer = []
+                if len(self.original_reference_buffer) >= self.buffer_size:
+                    self.original_reference_buffer.pop(0)
+                self.original_reference_buffer.append(current_frame.clone())
         
         return torch.stack(processed_frames, dim=0)
 
