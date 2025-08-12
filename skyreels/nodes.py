@@ -1686,8 +1686,13 @@ class WanVideoLoopingDiffusionForcingSampler:
                 
                 # Use threshold to determine if scene change is significant enough to reduce color matching
                 if scene_change_score > color_match_scene_threshold:
-                    # Reduce color matching strength for significant scene changes
-                    adaptive_strength = color_match_strength * (1.0 - scene_change_score * 0.8)
+                    # Calculate how much the scene change exceeds the threshold (0.0 to 1.0 range)
+                    excess_change = min((scene_change_score - color_match_scene_threshold) / (1.0 - color_match_scene_threshold), 1.0)
+                    
+                    # Gradually reduce strength from full strength to minimum (e.g., 20% of original)
+                    min_strength_ratio = 0.2  # Don't go below 20% of original strength
+                    reduction_factor = 1.0 - (excess_change * (1.0 - min_strength_ratio))
+                    adaptive_strength = color_match_strength * reduction_factor
                 else:
                     # Keep original strength for minor changes
                     adaptive_strength = color_match_strength
@@ -1843,14 +1848,24 @@ class WanVideoLoopingDiffusionForcingSampler:
         # Check for changes in dark and bright regions
         dark_region_change = torch.abs(ref_hist_norm[:10] - curr_hist_norm[:10]).sum()
         bright_region_change = torch.abs(ref_hist_norm[22:] - curr_hist_norm[22:]).sum()
-        
+        contrast = curr_lum.std()
+
+        color_cast_check = torch.abs(current_frame.mean(dim=[0,1]) - reference_frame.mean(dim=[0,1])).max()
+
+        luminance_variance = torch.abs(ref_lum.std() - curr_lum.std())
+        print(f"Dark region change: {dark_region_change:.3f}, Bright region change: {bright_region_change:.3f}, Luminance Variance: {luminance_variance:.3f}, contrast: {contrast:.3f}, color_cast_check: {color_cast_check:.3f}")
+
         return {
-            'has_high_contrast': (curr_lum.std() > 0.2),
-            'luminance_variance_high': (torch.abs(ref_lum.std() - curr_lum.std()) > 0.15),
-            'color_cast_detected': (torch.abs(current_frame.mean(dim=[0,1]) - reference_frame.mean(dim=[0,1])).max() > 0.1),
+            # 'has_high_contrast': (contrast > 0.2),
+            'has_high_contrast': (contrast > 0.18),
+            # 'luminance_variance_high': (luminance_variance > 0.15),
+            'luminance_variance_high': (luminance_variance > 0.015),
+            # 'color_cast_detected': (color_cast_check > 0.1),
+            'color_cast_detected': (color_cast_check > 0.01),
             'dark_region_change': dark_region_change.item(),
             'bright_region_change': bright_region_change.item(),
-            'mixed_lighting': (dark_region_change > 0.3 and bright_region_change > 0.3)
+            # 'mixed_lighting': (dark_region_change > 0.3 and bright_region_change > 0.3)
+            'mixed_lighting': (dark_region_change > 0.03 and bright_region_change > 0.03)
         }
 
     def process_batch_with_advanced_color_correction(self, decoded_frames, color_match_strength, color_match_method, 
@@ -1919,8 +1934,13 @@ class WanVideoLoopingDiffusionForcingSampler:
                 
                 # Use threshold to determine if scene change is significant enough to reduce color matching
                 if scene_change_score > color_match_scene_threshold:
-                    # Reduce color matching strength for significant scene changes
-                    adaptive_strength = color_match_strength * (1.0 - scene_change_score * 0.8)
+                    # Calculate how much the scene change exceeds the threshold (0.0 to 1.0 range)
+                    excess_change = min((scene_change_score - color_match_scene_threshold) / (1.0 - color_match_scene_threshold), 1.0)
+                    
+                    # Gradually reduce strength from full strength to minimum (e.g., 20% of original)
+                    min_strength_ratio = 0.2  # Don't go below 20% of original strength
+                    reduction_factor = 1.0 - (excess_change * (1.0 - min_strength_ratio))
+                    adaptive_strength = color_match_strength * reduction_factor
                 else:
                     # Keep original strength for minor changes
                     adaptive_strength = color_match_strength
@@ -1934,18 +1954,24 @@ class WanVideoLoopingDiffusionForcingSampler:
                 # Choose correction method based on scene characteristics
                 if luminance_info['mixed_lighting'] and luminance_info['has_high_contrast']:
                     # Scene with mixed lighting - use zone-based correction
+                    # Zone-based: Perfect for complex scenes with multiple lighting zones
+                    # Example: Indoor scene with bright window and dark corners
                     print(f"Frame {i}: Using zone-based histogram matching (mixed lighting detected)")
                     processed_frame = self.apply_zone_based_histogram_matching(
                         reference_frame[0], current_frame, adaptive_strength * 0.7
                     )
                 elif luminance_info['color_cast_detected'] and not luminance_info['has_high_contrast']:
                     # Color cast issue - use white balance correction
+                    # White balance: Perfect for uniform color cast issues
+                    # Example: Entire scene has warm/cool tint but consistent lighting
                     print(f"Frame {i}: Using white balance correction (color cast detected)")
                     processed_frame = self.apply_white_balance_correction(
                         reference_frame[0], current_frame, adaptive_strength
                     )
                 elif luminance_info['has_high_contrast']:
                     # High contrast scene - use luminance-preserving correction
+                    # Luminance-preserving: Great for high contrast without mixed lighting
+                    # Example: Portrait with strong directional lighting
                     print(f"Frame {i}: Using luminance-preserving correction (high contrast)")
                     processed_frame = self.apply_luminance_preserving_correction(
                         reference_frame[0], current_frame, adaptive_strength
