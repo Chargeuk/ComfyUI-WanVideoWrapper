@@ -1663,7 +1663,17 @@ class WanVideoLoopingDiffusionForcingSampler:
                         current_frame[..., c].unsqueeze(0).unsqueeze(0), 
                         kernel_size=5, stride=1, padding=2
                     ).squeeze()
-                    detail_preserve = (current_frame[..., c] - local_mean) * 0.8 * highlight_mask
+                    
+                    # Make detail preservation proportional to compression
+                    # Get average compression factor for highlight areas
+                    avg_compress_factor = compress_factor[highlight_areas].mean().item()
+                    
+                    # Scale detail preservation inversely to compression
+                    # When compress_factor = 1.0 (no compression) → detail_strength = 0.8
+                    # When compress_factor = 0.7 (max compression) → detail_strength ≈ 0.56
+                    detail_strength = 0.8 * avg_compress_factor
+                    
+                    detail_preserve = (current_frame[..., c] - local_mean) * detail_strength * highlight_mask
                     result[..., c] = result[..., c] + highlight_correction + detail_preserve
                 else:
                     result[..., c] = result[..., c] + highlight_correction
@@ -1788,6 +1798,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 processed_frames.append(processed_frame)
         
         return torch.stack(processed_frames, dim=0)
+
 
     def scale(self, image, width, height, upscale_method, crop):
         # Get the dimensions of the image
