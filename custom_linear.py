@@ -19,7 +19,7 @@ def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, s
                 scale_key = f"{module_prefix}scale_weight"
 
             with init_empty_weights():
-                model._modules[name] = Fp8Linear(
+                model._modules[name] = CustomLinear(
                     in_features,
                     out_features,
                     module.bias is not None,
@@ -34,11 +34,11 @@ def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, s
     return model
 
 def set_lora_params(module, patches, module_prefix=""):
-    # Recursively set lora_diffs and lora_strengths for all Fp8Linear layers
+    # Recursively set lora_diffs and lora_strengths for all CustomLinear layers
     for name, child in module.named_children():
         child_prefix = (f"{module_prefix}{name}.")
         set_lora_params(child, patches, child_prefix)
-    if isinstance(module, Fp8Linear):
+    if isinstance(module, CustomLinear):
         key = f"diffusion_model.{module_prefix}weight"
         patch = patches.get(key, [])
         #print(f"Processing LoRA patches for {key}: {len(patch)} patches found")
@@ -59,7 +59,7 @@ def set_lora_params(module, patches, module_prefix=""):
             module.step = 0  # Initialize step for LoRA scheduling
 
 
-class Fp8Linear(nn.Linear):
+class CustomLinear(nn.Linear):
     def __init__(
         self,
         in_features,

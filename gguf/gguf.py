@@ -38,18 +38,18 @@ def _replace_with_gguf_linear(model, compute_dtype, state_dict, prefix="", modul
                     module.bias is not None,
                     compute_dtype=compute_dtype
                 )
-            #set_lora_params(model._modules[name], patches, module_prefix)
+            
             model._modules[name].source_cls = type(module)
             # Force requires_grad to False to avoid unexpected errors
             model._modules[name].requires_grad_(False)
 
     return model
 
-def set_lora_params(module, patches, module_prefix=""):
+def set_lora_params_gguf(module, patches, module_prefix=""):
     # Recursively set lora_diffs and lora_strengths for all GGUFLinear layers
     for name, child in module.named_children():
         child_prefix = (f"{module_prefix}{name}.")
-        set_lora_params(child, patches, child_prefix)
+        set_lora_params_gguf(child, patches, child_prefix)
     if isinstance(module, GGUFLinear):
         key = f"diffusion_model.{module_prefix}weight"
         patch = patches.get(key, [])
