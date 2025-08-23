@@ -316,7 +316,7 @@ class WanVideoDiffusionForcingSampler:
 
     def process(self, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
         force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, scheduler_denoise_strength=1.0, denoising_skew=0.0, slg_args=None, rope_function="default", cache_args=None, teacache_args=None, 
-        experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, denoising_multiplier=1.0, denoising_multiplier_end=None):
+        experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoise_latent_reduction_factor=1.0):
         #assert not (context_options and teacache_args), "Context options cannot currently be used together with teacache."
         if denoising_multiplier_end is None:
             denoising_multiplier_end = denoising_multiplier
@@ -830,7 +830,7 @@ class WanVideoDiffusionForcingSampler:
                 x0 = latents.unsqueeze(0)
 
                 # Always generate denoised_latent for denoised samples - keep same dimension order as x0
-                denoised_latent = (latent_model_input - noise_pred.to(timestep.device) * timestep.unsqueeze(-1).unsqueeze(-1) / 1000).detach()
+                denoised_latent = (latent_model_input - noise_pred.to(timestep.device) * timestep.unsqueeze(-1).unsqueeze(-1) / 1000 * denoise_latent_reduction_factor).detach()
                 
                 # Execute callback if it exists
                 if callback is not None:
@@ -947,6 +947,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
                 "denoising_multiplier_end": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive at the end of the video"}),
                 "denoising_skew": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.001, "tooltip": "How quickly do we transition from denoising_multiplier to denoising_multiplier_end. 0.0=linear."}),
+                "denoise_latent_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "How much the latent noise is reduced when removing the noise from the final samples."}),
+
                 "prefix_denoise_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "How much the provided prefix_samples are processed prior to use."}),
                 "prefix_denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
                 "prefix_denoising_multiplier_end": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive at the end of the video"}),
@@ -983,7 +985,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
                 prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None,
                 numberOfFirstFrames=20, contrast_stabilization=False, shadow_threshold=0.3, highlight_threshold=0.7,
-                shadow_strength=0.8, highlight_strength=0.8, shadow_anti_banding=0.3, highlight_anti_banding=0.2):
+                shadow_strength=0.8, highlight_strength=0.8, shadow_anti_banding=0.3, highlight_anti_banding=0.2,
+                denoise_latent_reduction_factor=1.0):
         vae_stride = (4, 8, 8)
         
         # Initialize brightness lookup
@@ -1429,6 +1432,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 denoising_multiplier=denoising_multiplier,
                 denoising_multiplier_end=denoising_multiplier_end,
                 denoising_skew=denoising_skew,
+                denoise_latent_reduction_factor=denoise_latent_reduction_factor
             )
 
             noise_reduction_factor = noise_reduction_factor + reduction_factor_change
