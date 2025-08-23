@@ -829,12 +829,14 @@ class WanVideoDiffusionForcingSampler:
                 
                 x0 = latents.unsqueeze(0)
 
-                # Always generate denoised_latent for denoised samples
-                denoised_latent = (latent_model_input - noise_pred.to(timestep.device) * timestep.unsqueeze(-1).unsqueeze(-1) / 1000).detach().permute(1, 0, 2, 3)
+                # Always generate denoised_latent for denoised samples - keep same dimension order as x0
+                denoised_latent = (latent_model_input - noise_pred.to(timestep.device) * timestep.unsqueeze(-1).unsqueeze(-1) / 1000).detach()
                 
                 # Execute callback if it exists
                 if callback is not None:
-                    callback(i, denoised_latent, None, steps)
+                    # For callback, we need to permute to match expected format
+                    callback_latent_permuted = denoised_latent.permute(1, 0, 2, 3)
+                    callback(i, callback_latent_permuted, None, steps)
                 else:
                     pbar.update(1)
             except Exception as e:
