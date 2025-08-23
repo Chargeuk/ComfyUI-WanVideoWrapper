@@ -18,6 +18,7 @@ from spandrel import ModelLoader, ImageModelDescriptor
 from spandrel.__helpers.size_req import pad_tensor
 from comfy import model_management
 
+from ..wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps, scheduler_list
 from ..wanvideo.modules.model import rope_params
 from ..wanvideo.schedulers.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
@@ -68,6 +69,44 @@ except Exception as e:
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
+# Error during sampling[2]: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument mat1 in method wrapper_CUDA_addmm)
+# Error during sampling[3] part 2: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument mat1 in method wrapper_CUDA_addmm)
+# Call stack:
+# Traceback (most recent call last):
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-WanVideoWrapper\skyreels\nodes.py", line 737, in process
+#     noise_pred, self.teacache_state = predict_with_cfg(
+#                                       ^^^^^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-WanVideoWrapper\skyreels\nodes.py", line 632, in predict_with_cfg
+#     noise_pred_cond, teacache_state_cond = transformer(
+#                                            ^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
+#     return self._call_impl(*args, **kwargs)
+#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
+#     return forward_call(*args, **kwargs)
+#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-WanVideoWrapper\wanvideo\modules\model.py", line 1757, in forward
+#     e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t.flatten()).to(x.dtype))  # b, dim
+#         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
+#     return self._call_impl(*args, **kwargs)
+#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
+#     return forward_call(*args, **kwargs)
+#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\container.py", line 245, in forward
+#     input = module(input)
+#             ^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
+#     return self._call_impl(*args, **kwargs)
+#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
+#     return forward_call(*args, **kwargs)
+#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\linear.py", line 125, in forward
+#     return F.linear(input, self.weight, self.bias)
+#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+# RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument mat1 in method wrapper_CUDA_addmm)
 
 
 def colormatch(image_ref, image_target, method, strength=1.0, editInPlace=False, gc_interval=50):
@@ -157,6 +196,7 @@ def generate_timestep_matrix(
         casual_block_size=1,
         shrink_interval_with_mask=False,
         denoise_strength=1.0,
+        device=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple]]:
         step_matrix, step_index = [], []
         update_mask, valid_interval = [], []
@@ -228,6 +268,12 @@ def generate_timestep_matrix(
             step_matrix = step_matrix.unsqueeze(-1).repeat(1, 1, casual_block_size).flatten(1).contiguous()
             valid_interval = [(s * casual_block_size, e * casual_block_size) for s, e in valid_interval]
 
+        # Move tensors to target device if specified
+        if device is not None:
+            step_matrix = step_matrix.to(device)
+            step_index = step_index.to(device)
+            step_update_mask = step_update_mask.to(device)
+
         # print(f"generate_timestep_matrix = step_matrix: {step_matrix.shape}, step_index: {step_index.shape}, step_update_mask: {step_update_mask.shape}, valid_interval: {valid_interval}")
         return step_matrix, step_index, step_update_mask, valid_interval
 
@@ -247,15 +293,13 @@ class WanVideoDiffusionForcingSampler:
                 "shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Moves the model to the offload device after sampling"}),
-                "scheduler": (["unipc", "unipc/beta", "euler", "euler/beta", "lcm", "lcm/beta"],
-                    {
-                        "default": 'unipc'
-                    }),
+                "scheduler": (scheduler_list, {"default": scheduler_list[0],}),
             },
             "optional": {
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "prefix_samples": ("LATENT", {"tooltip": "prefix latents"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "scheduler_denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "denoising_skew" : ("FLOAT", {"default": 0.0, "min": -100.0, "max": 10.0, "step": 0.001}),
                 "cache_args": ("CACHEARGS", ),
                 "slg_args": ("SLGARGS", ),
@@ -271,7 +315,7 @@ class WanVideoDiffusionForcingSampler:
     CATEGORY = "WanVideoWrapper"
 
     def process(self, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
-        force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, denoising_skew=0.0, slg_args=None, rope_function="default", cache_args=None, teacache_args=None, 
+        force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, scheduler_denoise_strength=1.0, denoising_skew=0.0, slg_args=None, rope_function="default", cache_args=None, teacache_args=None, 
         experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, denoising_multiplier=1.0, denoising_multiplier_end=None):
         #assert not (context_options and teacache_args), "Context options cannot currently be used together with teacache."
         if denoising_multiplier_end is None:
@@ -309,17 +353,22 @@ class WanVideoDiffusionForcingSampler:
         timestep_steps = int(steps/denoise_strength)
 
         timesteps = None
-        if 'unipc' in scheduler:
-            sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
-            sample_scheduler.set_timesteps(timestep_steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
-        elif 'euler' in scheduler:
-            sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift, use_beta_sigmas=(scheduler == 'euler/beta'))
-            sample_scheduler.set_timesteps(timestep_steps, device=device)
-        elif 'lcm' in scheduler:
-            sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
-            sample_scheduler.set_timesteps(timestep_steps, device=device) 
+        flowedit_args = None
+        # scheduler_denoise_strength = 1.0 # denoise_strength
+        # if 'unipc' in scheduler:
+        #     sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
+        #     sample_scheduler.set_timesteps(timestep_steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
+        # elif 'euler' in scheduler:
+        #     sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift, use_beta_sigmas=(scheduler == 'euler/beta'))
+        #     sample_scheduler.set_timesteps(timestep_steps, device=device)
+        # elif 'lcm' in scheduler:
+        #     sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
+        #     sample_scheduler.set_timesteps(timestep_steps, device=device) 
+        sample_scheduler, init_timesteps = get_scheduler(
+            scheduler, timestep_steps, shift, device, transformer.dim, flowedit_args,
+            scheduler_denoise_strength)
         
-        init_timesteps = sample_scheduler.timesteps
+        # init_timesteps = sample_scheduler.timesteps
         timesteps = init_timesteps[:]
         if denoise_strength < 1.0:
             # steps = int(steps * denoise_strength)
@@ -422,20 +471,25 @@ class WanVideoDiffusionForcingSampler:
         causal_block_size = 1
         step_matrix, _, step_update_mask, valid_interval = generate_timestep_matrix(
                 latent_video_length, init_timesteps, base_num_frames, ar_step, prefix_video_latent_length, causal_block_size,
-                shrink_interval_with_mask=False, denoise_strength=denoise_strength
+                shrink_interval_with_mask=False, denoise_strength=denoise_strength,
+                device=device
             )
         
         sample_schedulers = []
         for _ in range(latent_video_length):
-            if 'unipc' in scheduler:
-                sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
-                sample_scheduler.set_timesteps(timestep_steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
-            elif 'euler' in scheduler:
-                sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift)
-                sample_scheduler.set_timesteps(timestep_steps, device=device)
-            elif 'lcm' in scheduler:
-                sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
-                sample_scheduler.set_timesteps(timestep_steps, device=device) 
+            sample_scheduler, tmp_timesteps = get_scheduler(
+                scheduler, timestep_steps, shift, device, transformer.dim,
+                flowedit_args, scheduler_denoise_strength)
+
+            # if 'unipc' in scheduler:
+            #     sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
+            #     sample_scheduler.set_timesteps(timestep_steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
+            # elif 'euler' in scheduler:
+            #     sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift)
+            #     sample_scheduler.set_timesteps(timestep_steps, device=device)
+            # elif 'lcm' in scheduler:
+            #     sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
+            #     sample_scheduler.set_timesteps(timestep_steps, device=device) 
             
             sample_schedulers.append(sample_scheduler)
         sample_schedulers_counter = [0] * latent_video_length
@@ -605,6 +659,14 @@ class WanVideoDiffusionForcingSampler:
                 control_lora_enabled = False
                 
                 image_cond_input = image_cond
+
+                # Ensure all inputs are on the correct device
+                z = z.to(device)
+                timestep = timestep.to(device)
+                if image_cond_input is not None:
+                    image_cond_input = image_cond_input.to(device)
+                if clip_fea is not None:
+                    clip_fea = clip_fea.to(device)
     
                 base_params = {
                     'seq_len': seq_len,
@@ -824,10 +886,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Moves the model to the offload device after sampling"}),
-                "scheduler": (["unipc", "unipc/beta", "euler", "euler/beta", "lcm", "lcm/beta"],
-                    {
-                        "default": 'unipc'
-                    }),
+                "scheduler": (scheduler_list, {"default": scheduler_list[0],}),
             },
             "optional": {
                 "vae": ("WANVAE",),
@@ -840,6 +899,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "prefix_samples": ("LATENT", {"tooltip": "prefix latents"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "scheduler_denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "cache_args": ("CACHEARGS", {"tooltip": "cache for 1st loop"} ),
                 "cache_args2": ("CACHEARGS", {"tooltip": "cache for after 1st loop loop"} ),
                 "slg_args": ("SLGARGS", ),
@@ -900,7 +960,7 @@ class WanVideoLoopingDiffusionForcingSampler:
     # Prefix video of length: 2
 
     def process(self, batch_length, overlap_length, seed_adjust, seed_batch_control, samples_control, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
-                force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
+                force_offload=True, vae=None, prefix_samples_control="Ignore", samples=None, prefix_samples=None, denoise_strength=1.0, scheduler_denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, cache_args2=None,
                 experimental_args=None, unianimate_poses=None, noise_reduction_factor=1.0, reduction_factor_change=0.0, denoising_multiplier=1.0, denoising_multiplier_end=None, denoising_skew=0.0, reencode_samples="Ignore", restore_face=None, use_restore_face=True,
                 encode_latent_Args=None, decode_latent_Args=None, model_upscale_Args=None, use_model_upscale=True, simple_scale_Args=None, prefix_denoise_strength=0.0, prefix_denoising_multiplier=1.0, prefix_denoising_multiplier_end=None, prefix_steps=None,
                 prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None,
@@ -1061,11 +1121,12 @@ class WanVideoLoopingDiffusionForcingSampler:
                     samples=prefix_samples,
                     prefix_samples=None,
                     denoise_strength=prefix_denoise_strength,
+                    scheduler_denoise_strength=scheduler_denoise_strength,
                     slg_args=slg_args,
                     rope_function=rope_function,
                     cache_args=cache_args,
                     experimental_args=experimental_args,
-                    unianimate_poses=unianimate_poses,
+                    unianimate_poses=None,
                     noise_reduction_factor=prefix_noise_reduction_factor,
                     denoising_multiplier=prefix_denoising_multiplier,
                     denoising_multiplier_end=prefix_denoising_multiplier_end,
@@ -1321,6 +1382,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 samples=batch_samples,
                 prefix_samples=prefix_samples,
                 denoise_strength=denoise_strength,
+                scheduler_denoise_strength=scheduler_denoise_strength,
                 slg_args=slg_args,
                 rope_function=rope_function,
                 cache_args=batch_cache_args,
