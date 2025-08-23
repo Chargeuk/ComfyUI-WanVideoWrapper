@@ -1311,6 +1311,24 @@ class WanVideoLoopingDiffusionForcingSampler:
                     "start_percent": image_embeds["control_embeds"].get("start_percent", 0.0),
                     "end_percent": image_embeds["control_embeds"].get("end_percent", 1.0),
                 }
+                
+            unianimate_poses_batch = None
+            if unianimate_poses is not None:
+                # note the pose images are in the format (1, channels, batch, height, width)
+                # and are images, not latents
+                start_pose_index = max(start_idx - prefix_sample_num_frames, 0)
+                end_pose_index = min(end_idx, total_frames)
+                batch_pose_images = unianimate_poses["poses"][:, :, start_pose_index:end_pose_index]
+                number_of_batch_pose_images = batch_pose_images.shape[2]
+                unianimate_poses_batch = {
+                    "pose": batch_pose_images,
+                    "ref": unianimate_poses.get("ref", None),
+                    "strength": unianimate_poses.get("strength", 1.0),
+                    "start_percent": unianimate_poses.get("start_percent", 0.0),
+                    "end_percent": unianimate_poses.get("end_percent", 1.0)
+                }
+                print(f"Processing batch [{loop_count + 1}/{number_of_batches}]. start_pose_index: {start_pose_index}, end_pose_index: {end_pose_index}, number_of_batch_pose_images: {number_of_batch_pose_images}, batch_pose_images: {batch_pose_images.shape}, target_shape: {target_shape}")
+
 
             batch_latent_frames = batch_image_embeds["target_shape"][1]
             batch_num_frames = batch_image_embeds["num_frames"]
@@ -1387,7 +1405,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 rope_function=rope_function,
                 cache_args=batch_cache_args,
                 experimental_args=experimental_args,
-                unianimate_poses=unianimate_poses,
+                unianimate_poses=unianimate_poses_batch,
                 noise_reduction_factor=noise_reduction_factor,
                 denoising_multiplier=denoising_multiplier,
                 denoising_multiplier_end=denoising_multiplier_end,
