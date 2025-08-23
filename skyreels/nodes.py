@@ -868,7 +868,7 @@ class WanVideoDiffusionForcingSampler:
         if denoised_latent is None:
             denoised_latent = x0.cpu()
         else:
-            denoised_latent = callback_latent.unsqueeze(0).cpu()
+            denoised_latent = denoised_latent.unsqueeze(0).cpu()
 
         log.info(f"Return shapes - x0: {x0.shape}, denoised_latent: {denoised_latent.shape}")
         
