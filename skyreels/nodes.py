@@ -948,6 +948,9 @@ class WanVideoLoopingDiffusionForcingSampler:
                 "denoising_multiplier_end": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive at the end of the video"}),
                 "denoising_skew": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.001, "tooltip": "How quickly do we transition from denoising_multiplier to denoising_multiplier_end. 0.0=linear."}),
                 "denoise_latent_reduction_factor": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "How much the latent noise is reduced when removing the noise from the final samples."}),
+                "samples_to_use": (["Standard", "Denoised"],
+                    {"default": "Denoised", "tooltip": "Which samples to return - the raw or denoised versions."}
+                ),
 
                 "prefix_denoise_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "How much the provided prefix_samples are processed prior to use."}),
                 "prefix_denoising_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "step": 0.001, "tooltip": "Make the denoising process more or less aggressive"}),
@@ -986,7 +989,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                 prefix_shift=None, prefix_frame_count=1, prefix_noise_reduction_factor=None, color_match_args=None,
                 numberOfFirstFrames=20, contrast_stabilization=False, shadow_threshold=0.3, highlight_threshold=0.7,
                 shadow_strength=0.8, highlight_strength=0.8, shadow_anti_banding=0.3, highlight_anti_banding=0.2,
-                denoise_latent_reduction_factor=1.0):
+                denoise_latent_reduction_factor=1.0, samples_to_use="Denoised"):
         vae_stride = (4, 8, 8)
         
         # Initialize brightness lookup
@@ -1152,7 +1155,9 @@ class WanVideoLoopingDiffusionForcingSampler:
                     denoising_multiplier=prefix_denoising_multiplier,
                     denoising_multiplier_end=prefix_denoising_multiplier_end,
                 )
-                prefix_samples = result[1]
+                prefix_samples = result[0]
+                if samples_to_use == "Denoised":
+                    prefix_samples = result[1]
                 generated_prefix_samples = prefix_samples
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
                 prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
@@ -1443,7 +1448,9 @@ class WanVideoLoopingDiffusionForcingSampler:
             else:
                 seed = (seed + seed_adjust) % 0xffffffffffffffff
 
-            batch_result_samples = batch_result[1]
+            batch_result_samples = batch_result[0]
+            if samples_to_use == "Denoised":
+                batch_result_samples = batch_result[1]
             # Decode the samples if wanVideoDecode is available
             print(f"WanVideoLoopingDiffusionForcingSampler deciding if it should decode")
             if (wanVideoDecode is not None and vae is not None):
