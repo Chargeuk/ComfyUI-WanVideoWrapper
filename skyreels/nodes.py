@@ -309,8 +309,8 @@ class WanVideoDiffusionForcingSampler:
             }
         }
 
-    RETURN_TYPES = ("LATENT", )
-    RETURN_NAMES = ("samples",)
+    RETURN_TYPES = ("LATENT", "LATENT",)
+    RETURN_NAMES = ("samples", "denoised_samples",)
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
 
@@ -756,6 +756,8 @@ class WanVideoDiffusionForcingSampler:
 
         #region main loop start
         # print(f"denoising_multiplier: {denoising_multiplier}, denoising_multiplier_end:{denoising_multiplier_end}, denoising_skew: {denoising_skew}")
+        callback_latent = None  # Initialize callback_latent variable
+        
         for i, timestep_i in enumerate(tqdm(step_matrix)):
             # Adjust usedDenoising based on denoising_skew
             progress = i / (len(step_matrix) - 1)  # Normalized progress through the loop (0 to 1)
@@ -826,9 +828,21 @@ class WanVideoDiffusionForcingSampler:
                     raise
                 
                 x0 = latents.unsqueeze(0)
+                
+                # Calculate denoised latent prediction for the final step
+                # This matches the pattern from WanVideoSampler
+                if i == len(step_matrix) - 1:  # Final iteration
+                    # Create callback_latent similar to WanVideoSampler
+                    # Use the timestep values for calculation
+                    final_timestep = timestep_i[valid_interval_start:valid_interval_end]
+                    callback_latent = (latent_model_input - noise_pred.to(final_timestep.device) * final_timestep.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) / 1000).detach()
+                    # Permute to match expected format: [frames, channels, height, width]
+                    callback_latent = callback_latent.permute(1, 0, 2, 3)
+                
                 if callback is not None:
-                    callback_latent = (latent_model_input - noise_pred.to(timestep_i[idx].device) * timestep_i[idx] / 1000).detach().permute(1,0,2,3)
-                    callback(i, callback_latent, None, steps)
+                    # For regular callback during sampling
+                    temp_callback_latent = (latent_model_input - noise_pred.to(timestep_i[idx].device) * timestep_i[idx] / 1000).detach().permute(1,0,2,3)
+                    callback(i, temp_callback_latent, None, steps)
                 else:
                     pbar.update(1)
             except Exception as e:
@@ -860,7 +874,9 @@ class WanVideoDiffusionForcingSampler:
 
         return ({
             "samples": x0.cpu(),
-            }, )
+            }, {
+            "samples": callback_latent.unsqueeze(0).cpu() if callback_latent is not None else None,
+            })
     
 class WanVideoLoopingDiffusionForcingSampler:
     @classmethod
@@ -1131,7 +1147,7 @@ class WanVideoLoopingDiffusionForcingSampler:
                     denoising_multiplier=prefix_denoising_multiplier,
                     denoising_multiplier_end=prefix_denoising_multiplier_end,
                 )
-                prefix_samples = result[0]
+                prefix_samples = result[1]
                 generated_prefix_samples = prefix_samples
                 prefix_sample_num_latents = prefix_samples["samples"].shape[2] # the actual number of sample latents, not image frames
                 prefix_sample_num_frames = ((prefix_sample_num_latents - 1) * vae_stride[0]) + 1
@@ -1421,7 +1437,7 @@ class WanVideoLoopingDiffusionForcingSampler:
             else:
                 seed = (seed + seed_adjust) % 0xffffffffffffffff
 
-            batch_result_samples = batch_result[0]
+            batch_result_samples = batch_result[1]
             # Decode the samples if wanVideoDecode is available
             print(f"WanVideoLoopingDiffusionForcingSampler deciding if it should decode")
             if (wanVideoDecode is not None and vae is not None):
