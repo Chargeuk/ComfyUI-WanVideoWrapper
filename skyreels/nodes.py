@@ -833,9 +833,27 @@ class WanVideoDiffusionForcingSampler:
                 # This matches the pattern from WanVideoSampler
                 if i == len(step_matrix) - 1:  # Final iteration
                     # Create callback_latent similar to WanVideoSampler
-                    # Use the timestep values for calculation
-                    final_timestep = timestep_i[valid_interval_start:valid_interval_end]
-                    callback_latent = (latent_model_input - noise_pred.to(final_timestep.device) * final_timestep.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) / 1000).detach()
+                    # Use the full latents tensor, not just the valid_interval portion
+                    full_timestep = timestep_i.unsqueeze(0)  # Shape: [1, full_sequence_length]
+                    full_latent_input = latents.clone()  # Shape: [batch, full_sequence_length, height, width]
+                    
+                    # We need to reconstruct the full noise prediction for all frames
+                    # For frames outside the valid interval, we'll use the last known noise prediction
+                    full_noise_pred = torch.zeros_like(full_latent_input)
+                    
+                    # Fill in the valid interval with actual predictions
+                    full_noise_pred[:, valid_interval_start:valid_interval_end] = noise_pred
+                    
+                    # For frames outside valid interval, use edge values or interpolation
+                    if valid_interval_start > 0:
+                        # Extend the first prediction backward
+                        full_noise_pred[:, :valid_interval_start] = noise_pred[:, :1].expand(-1, valid_interval_start, -1, -1)
+                    if valid_interval_end < latents.shape[1]:
+                        # Extend the last prediction forward
+                        full_noise_pred[:, valid_interval_end:] = noise_pred[:, -1:].expand(-1, latents.shape[1] - valid_interval_end, -1, -1)
+                    
+                    # Calculate callback_latent for the full sequence
+                    callback_latent = (full_latent_input - full_noise_pred.to(full_timestep.device) * full_timestep.unsqueeze(-1).unsqueeze(-1) / 1000).detach()
                     # Permute to match expected format: [frames, channels, height, width]
                     callback_latent = callback_latent.permute(1, 0, 2, 3)
                 
