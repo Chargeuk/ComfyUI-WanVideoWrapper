@@ -1318,7 +1318,8 @@ class WanVideoLoopingDiffusionForcingSampler:
                 # and are images, not latents
                 start_pose_index = max(start_idx - prefix_sample_num_frames, 0)
                 end_pose_index = min(end_idx, total_frames)
-                batch_pose_images = unianimate_poses["pose"][:, :, start_pose_index:end_pose_index]
+                # slicing is NOT inclusive for the end index
+                batch_pose_images = unianimate_poses["pose"][:, :, start_pose_index:end_pose_index+1]
                 number_of_batch_pose_images = batch_pose_images.shape[2]
                 unianimate_poses_batch = {
                     "pose": batch_pose_images,
