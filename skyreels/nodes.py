@@ -1437,8 +1437,16 @@ class WanVideoLoopingDiffusionForcingSampler:
                     faceRestoreModel = restore_face["model"]
                     faceRestoreVisibility = restore_face["visibility"]
                     faceRestoreCodeformerWeight = restore_face["codeformer_weight"]
+                    
+                    # Store the original device
+                    original_device = used_decoded_sample_images.device
+                    
                     print(f"WanVideoLoopingDiffusionForcingSampler restoring faces in used_decoded_sample_images with faceRestoreModel: {faceRestoreModel}, faceRestoreVisibility: {faceRestoreVisibility}, faceRestoreCodeformerWeight: {faceRestoreCodeformerWeight}, faceDetectionModel: {faceDetectionModel}")
                     used_decoded_sample_images = reactor.restore_face(self, used_decoded_sample_images, faceRestoreModel, faceRestoreVisibility, faceRestoreCodeformerWeight, faceDetectionModel)
+                    
+                    # Ensure the result is on the original device
+                    used_decoded_sample_images = used_decoded_sample_images.to(original_device)
+                    
                     reactor.unload_face_restore_model(self)
                     end_time = time.time()  # End timing
                     elapsed_time = end_time - start_time
