@@ -354,6 +354,8 @@ class WanVideoDiffusionForcingSampler:
 
         timesteps = None
         flowedit_args = None
+        start_step = 0
+        end_step = -1
         # scheduler_denoise_strength = 1.0 # denoise_strength
         # if 'unipc' in scheduler:
         #     sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
@@ -365,7 +367,7 @@ class WanVideoDiffusionForcingSampler:
         #     sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
         #     sample_scheduler.set_timesteps(timestep_steps, device=device) 
         sample_scheduler, init_timesteps = get_scheduler(
-            scheduler, timestep_steps, shift, device, transformer.dim, flowedit_args,
+            scheduler, timestep_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args,
             scheduler_denoise_strength)
         
         # init_timesteps = sample_scheduler.timesteps
@@ -478,7 +480,7 @@ class WanVideoDiffusionForcingSampler:
         sample_schedulers = []
         for _ in range(latent_video_length):
             sample_scheduler, tmp_timesteps = get_scheduler(
-                scheduler, timestep_steps, shift, device, transformer.dim,
+                scheduler, timestep_steps, start_step, end_step, shift, device, transformer.dim,
                 flowedit_args, scheduler_denoise_strength)
 
             # if 'unipc' in scheduler:
