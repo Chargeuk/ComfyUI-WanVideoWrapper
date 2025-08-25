@@ -106,7 +106,9 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     if denoise_strength < 1.0:
         if start_step != 0:
             raise ValueError("start_step must be 0 when denoise_strength is used")
+        original_startStep = start_step
         start_step = steps - int(steps * denoise_strength) - 1
+        log.info(f"get_scheduler: original_startStep={original_startStep}, start_step={start_step}, end_step={end_step}")
 
     # Determine start and end indices for slicing
     start_idx = 0
@@ -128,12 +130,12 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
         if end_step != -1:
             end_idx = end_step - 1
 
+
     # Slice timesteps and sigmas once, based on indices
     timesteps = timesteps[start_idx:end_idx+1]
     sample_scheduler.sigmas = sample_scheduler.sigmas[start_idx:start_idx+len(timesteps)+1]  # always one longer
-    
-
-    log.info(f"timesteps: {timesteps}")
+    log.info(f"get_scheduler: start_step={start_step}, end_step={end_step}, num_timesteps={len(timesteps)}")
+    log.info(f"get_scheduler: timesteps: {timesteps}")
     
     if hasattr(sample_scheduler, 'timesteps'):
         sample_scheduler.timesteps = timesteps

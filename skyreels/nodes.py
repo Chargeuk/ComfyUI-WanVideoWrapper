@@ -208,8 +208,8 @@ def generate_timestep_matrix(
             gen_block = base_num_frames_block
             min_ar_step = infer_step_num / gen_block
             assert ar_step >= min_ar_step, f"ar_step should be at least {math.ceil(min_ar_step)} in your setting"
-        # print(num_frames, step_template, base_num_frames, ar_step, num_pre_ready, casual_block_size, num_frames_block, base_num_frames_block)
-        # print(f"generate_timestep_matrix: num_frames:{num_frames}, num_iterations:{num_iterations}, step_template:{step_template.shape}, base_num_frames:{base_num_frames}, ar_step:{ar_step}, num_pre_ready:{num_pre_ready}, casual_block_size:{casual_block_size}, num_frames_block:{num_frames_block}, base_num_frames_block:{base_num_frames_block}")
+        print(num_frames, step_template, base_num_frames, ar_step, num_pre_ready, casual_block_size, num_frames_block, base_num_frames_block)
+        print(f"generate_timestep_matrix: num_frames:{num_frames}, num_iterations:{num_iterations}, step_template:{step_template.shape}, base_num_frames:{base_num_frames}, ar_step:{ar_step}, num_pre_ready:{num_pre_ready}, casual_block_size:{casual_block_size}, num_frames_block:{num_frames_block}, base_num_frames_block:{base_num_frames_block}")
         step_template = torch.cat(
             [
                 torch.tensor([999], dtype=torch.int64, device=step_template.device),
@@ -235,7 +235,7 @@ def generate_timestep_matrix(
                 else:
                     new_row[i] = new_row[i - 1] - ar_step
             new_row = new_row.clamp(0, num_iterations)
-            # print(f"generate_timestep_matrix new_row[{row_count}]: {new_row}")
+            print(f"generate_timestep_matrix new_row[{row_count}]: {new_row}")
             update_mask.append(
                 (new_row != pre_row) & (new_row != num_iterations)
             )  # False: no need to update， True: need to update
@@ -274,7 +274,7 @@ def generate_timestep_matrix(
             step_index = step_index.to(device)
             step_update_mask = step_update_mask.to(device)
 
-        # print(f"generate_timestep_matrix = step_matrix: {step_matrix.shape}, step_index: {step_index.shape}, step_update_mask: {step_update_mask.shape}, valid_interval: {valid_interval}")
+        print(f"generate_timestep_matrix = step_matrix: {step_matrix.shape}, step_index: {step_index.shape}, step_update_mask: {step_update_mask.shape}, valid_interval: {valid_interval}")
         return step_matrix, step_index, step_update_mask, valid_interval
 
 #region Sampler
