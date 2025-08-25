@@ -498,13 +498,18 @@ class WanVideoDiffusionForcingSampler:
 
         unianim_data = None
         if unianimate_poses is not None:
-            transformer.dwpose_embedding.to(device)
-            transformer.randomref_embedding_pose.to(device)
-            dwpose_data = unianimate_poses["pose"]
-            dwpose_data = transformer.dwpose_embedding(
-                (torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
-                    ).to(device)).to(model["dtype"])
+            transformer.dwpose_embedding.to(device, model["dtype"])
+            dwpose_data = unianimate_poses["pose"].to(device, model["dtype"])
+            dwpose_data = torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
+            dwpose_data = transformer.dwpose_embedding(dwpose_data)
             log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
+            # transformer.dwpose_embedding.to(device)
+            # transformer.randomref_embedding_pose.to(device)
+            # dwpose_data = unianimate_poses["pose"]
+            # dwpose_data = transformer.dwpose_embedding(
+            #     (torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
+            #         ).to(device)).to(model["dtype"])
+            # log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
             if dwpose_data.shape[2] > latent_video_length:
                 log.warning(f"UniAnimate pose embed length {dwpose_data.shape[2]} is longer than the video length {latent_video_length}, truncating")
                 dwpose_data = dwpose_data[:,:, :latent_video_length]
