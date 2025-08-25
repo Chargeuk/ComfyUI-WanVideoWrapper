@@ -503,13 +503,6 @@ class WanVideoDiffusionForcingSampler:
             dwpose_data = torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
             dwpose_data = transformer.dwpose_embedding(dwpose_data)
             log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
-            # transformer.dwpose_embedding.to(device)
-            # transformer.randomref_embedding_pose.to(device)
-            # dwpose_data = unianimate_poses["pose"]
-            # dwpose_data = transformer.dwpose_embedding(
-            #     (torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
-            #         ).to(device)).to(model["dtype"])
-            # log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
             if dwpose_data.shape[2] > latent_video_length:
                 log.warning(f"UniAnimate pose embed length {dwpose_data.shape[2]} is longer than the video length {latent_video_length}, truncating")
                 dwpose_data = dwpose_data[:,:, :latent_video_length]
@@ -522,6 +515,7 @@ class WanVideoDiffusionForcingSampler:
             
             random_ref_dwpose_data = None
             if image_cond is not None:
+                transformer.randomref_embedding_pose.to(device)
                 random_ref_dwpose = unianimate_poses.get("ref", None)
                 if random_ref_dwpose is not None:
                     random_ref_dwpose_data = transformer.randomref_embedding_pose(
@@ -535,6 +529,38 @@ class WanVideoDiffusionForcingSampler:
                 "start_percent": unianimate_poses["start_percent"],
                 "end_percent": unianimate_poses["end_percent"]
             }
+            # transformer.dwpose_embedding.to(device)
+            # transformer.randomref_embedding_pose.to(device)
+            # dwpose_data = unianimate_poses["pose"]
+            # dwpose_data = transformer.dwpose_embedding(
+            #     (torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
+            #         ).to(device)).to(model["dtype"])
+            # log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
+            # if dwpose_data.shape[2] > latent_video_length:
+            #     log.warning(f"UniAnimate pose embed length {dwpose_data.shape[2]} is longer than the video length {latent_video_length}, truncating")
+            #     dwpose_data = dwpose_data[:,:, :latent_video_length]
+            # elif dwpose_data.shape[2] < latent_video_length:
+            #     log.warning(f"UniAnimate pose embed length {dwpose_data.shape[2]} is shorter than the video length {latent_video_length}, padding with last pose")
+            #     pad_len = latent_video_length - dwpose_data.shape[2]
+            #     pad = dwpose_data[:,:,:1].repeat(1,1,pad_len,1,1)
+            #     dwpose_data = torch.cat([dwpose_data, pad], dim=2)
+            # dwpose_data_flat = rearrange(dwpose_data, 'b c f h w -> b (f h w) c').contiguous()
+            
+            # random_ref_dwpose_data = None
+            # if image_cond is not None:
+            #     random_ref_dwpose = unianimate_poses.get("ref", None)
+            #     if random_ref_dwpose is not None:
+            #         random_ref_dwpose_data = transformer.randomref_embedding_pose(
+            #             random_ref_dwpose.to(device)
+            #             ).unsqueeze(2).to(model["dtype"]) # [1, 20, 104, 60]
+                
+            # unianim_data = {
+            #     "dwpose": dwpose_data_flat,
+            #     "random_ref": random_ref_dwpose_data.squeeze(0) if random_ref_dwpose_data is not None else None,
+            #     "strength": unianimate_poses["strength"],
+            #     "start_percent": unianimate_poses["start_percent"],
+            #     "end_percent": unianimate_poses["end_percent"]
+            # }
         
         disable_enhance() #not sure if this can work, disabling for now to avoid errors if it's enabled by another sampler
 
@@ -764,7 +790,9 @@ class WanVideoDiffusionForcingSampler:
         #region main loop start
         # print(f"denoising_multiplier: {denoising_multiplier}, denoising_multiplier_end:{denoising_multiplier_end}, denoising_skew: {denoising_skew}")
         callback_latent = None  # Initialize callback_latent variable
-        
+
+        print(f"-------- len(step_matrix) = {len(step_matrix)}")
+
         for i, timestep_i in enumerate(tqdm(step_matrix)):
             # Adjust usedDenoising based on denoising_skew
             progress = i / (len(step_matrix) - 1)  # Normalized progress through the loop (0 to 1)
