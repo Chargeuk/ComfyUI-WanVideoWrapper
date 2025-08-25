@@ -153,7 +153,7 @@ def sinusoidal_embedding_1d(dim, position):
     # preprocess
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    position = position.type(torch.float32)
 
     # calculation
     sinusoid = torch.outer(
@@ -1947,28 +1947,34 @@ class WanModel(torch.nn.Module):
                 previous_raw_output = state.get('previous_raw_output')
                 cache = state.get('cache')
                 accumulated_error = state.get('accumulated_error')
+                k = state.get('k', 1)
 
                 if previous_raw_input is not None and previous_raw_output is not None:
                     raw_input = x.clone()
                     # Calculate input change
                     raw_input_change = (raw_input - previous_raw_input.to(raw_input.device)).abs().mean()
 
-                    accumulated_error += raw_input_change
+                    output_norm = (previous_raw_output.to(x.device)).abs().mean()
+
+                    combined_pred_change = (raw_input_change / output_norm) * k
+
+                    accumulated_error += combined_pred_change
 
                     # Predict output change
                     if accumulated_error < self.easycache_thresh:
                         should_calc = False
                         x = raw_input + cache.to(x.device)
-                        self.easycache_state.get(pred_id)['skipped_steps'].append(current_step)
+                        state['skipped_steps'].append(current_step)
                     else:
                         should_calc = True
-                        accumulated_error = 0.0
                 else:
                     should_calc = True
 
+        if self.enable_easycache:
+            original_x = x.clone().to(self.cache_device)
         if should_calc:
-            if self.enable_teacache or self.enable_magcache or self.enable_easycache:
-                original_x = x.to(self.cache_device).clone()
+            if self.enable_teacache or self.enable_magcache:
+                original_x = x.clone().to(self.cache_device)
 
             if hasattr(self, "dwpose_embedding") and unianim_data is not None:
                 if unianim_data['start_percent'] <= current_step_percentage <= unianim_data['end_percent']:
@@ -2106,13 +2112,23 @@ class WanModel(torch.nn.Module):
                     residual_cache=(x.to(original_x.device) - original_x)
                 )
             elif self.enable_easycache and (self.easycache_start_step <= current_step <= self.easycache_end_step) and pred_id is not None:
+                x_out = x.clone().to(original_x.device)
+                output_change = (x_out - original_x).abs().mean()
+                input_change = (original_x - x_out).abs().mean()
                 self.easycache_state.update(
                     pred_id,
                     previous_raw_input=original_x,
-                    previous_raw_output=x.clone(),
+                    previous_raw_output=x_out,
                     cache=x.to(original_x.device) - original_x,
-                    accumulated_error=0.0
+                    k = output_change / input_change,
+                    accumulated_error = 0.0
                 )
+
+        if self.enable_easycache and (self.easycache_start_step <= current_step <= self.easycache_end_step) and pred_id is not None:
+            self.easycache_state.update(
+                pred_id,
+                previous_raw_output=x.clone(),
+            )
                 
         if self.ref_conv is not None and fun_ref is not None:
             full_ref_length = fun_ref.size(1)

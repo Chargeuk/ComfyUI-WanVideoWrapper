@@ -156,7 +156,7 @@ def det_landmarks(face_aligner, frame_list, comfy_pbar):
     face_aligner.reset_track()
 
     with tqdm(total=len(frame_list)) as pbar:
-        for frame in frame_list:
+        for i, frame in enumerate(frame_list):
             faces = face_aligner.forward(frame)
             if len(faces) > 0:
                 face = sorted(
@@ -167,36 +167,42 @@ def det_landmarks(face_aligner, frame_list, comfy_pbar):
                 rect_list.append(face["face_rect"])
                 new_frame_list.append(frame)
             else:
-                log.warning(f"No face detected in the frame {frame}, skipping.")
+                log.warning(f"No face detected in the frame {i}, inserting empty frame.")
+                rect_list.append(None)  # Add placeholder
+                new_frame_list.append(None)  # Add placeholder
             pbar.set_description("DET stage1")
             pbar.update()
     comfy_pbar.update(1)
 
-    assert len(new_frame_list) > 0
     face_aligner.reset_track()
     save_frame_list = []
     save_landmark_list = []
     with tqdm(total=len(new_frame_list)) as pbar:
-        for frame, rect in zip(new_frame_list, rect_list):
-            faces = face_aligner.forward(frame, pre_rect=rect)
-            if len(faces) > 0:
-                face = sorted(
-                    faces,
-                    key=lambda x: (x["face_rect"][2] - x["face_rect"][0])
-                    * (x["face_rect"][3] - x["face_rect"][1]),
-                )[-1]
-                landmarks = face["pre_kpt_222"]
-                save_frame_list.append(frame)
-                save_landmark_list.append(landmarks)
+        for i, (frame, rect) in enumerate(zip(new_frame_list, rect_list)):
+            if frame is None or rect is None:
+                save_frame_list.append(None)
+                save_landmark_list.append(None)
+                log.warning(f"No face detected in the frame {i}, inserting empty landmark.")
             else:
-                log.warning(f"No face detected in the frame {frame}, skipping.")
+                faces = face_aligner.forward(frame, pre_rect=rect)
+                if len(faces) > 0:
+                    face = sorted(
+                        faces,
+                        key=lambda x: (x["face_rect"][2] - x["face_rect"][0])
+                        * (x["face_rect"][3] - x["face_rect"][1]),
+                    )[-1]
+                    landmarks = face["pre_kpt_222"]
+                    save_frame_list.append(frame)
+                    save_landmark_list.append(landmarks)
+                else:
+                    save_frame_list.append(None)
+                    save_landmark_list.append(None)
+                    log.warning(f"No face detected in the frame {i}, inserting empty landmark.")
             pbar.set_description("DET stage2")
             pbar.update()
 
     comfy_pbar.update(1)
 
-    assert len(save_frame_list) > 0
-    save_landmark_list = np.stack(save_landmark_list, axis=0)
     face_aligner.reset_track()
     return save_frame_list, save_landmark_list, rect_list
 

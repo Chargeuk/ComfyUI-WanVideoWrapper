@@ -2,7 +2,6 @@ import folder_paths
 from comfy import model_management as mm
 from comfy.utils import load_torch_file, common_upscale
 from accelerate import init_empty_weights
-from accelerate.utils import set_module_tensor_to_device
 import torch
 from ..utils import log
 

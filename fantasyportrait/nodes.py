@@ -43,7 +43,38 @@ def get_emo_feature(frame_list, face_aligner, pd_fpg_motion, device):
     
 
     comfy_pbar = ProgressBar(3)
-    _, landmark_list, rect_list = det_landmarks(face_aligner, frame_list, comfy_pbar) 
+    _, landmark_list, rect_list = det_landmarks(face_aligner, frame_list, comfy_pbar)
+
+    
+    # Fill missing landmarks and rects with previous valid one
+    last_valid_landmark = None
+    last_valid_rect = None
+    for i in range(len(landmark_list)):
+        if landmark_list[i] is None:
+            landmark_list[i] = last_valid_landmark
+        else:
+            last_valid_landmark = landmark_list[i]
+        if rect_list[i] is None:
+            rect_list[i] = last_valid_rect
+        else:
+            last_valid_rect = rect_list[i]
+
+    # Forward fill for leading None values
+    if landmark_list[0] is None:
+        first_valid = next((l for l in landmark_list if l is not None), None)
+        for i in range(len(landmark_list)):
+            if landmark_list[i] is None:
+                landmark_list[i] = first_valid
+            else:
+                break
+    if rect_list[0] is None:
+        first_valid = next((r for r in rect_list if r is not None), None)
+        for i in range(len(rect_list)):
+            if rect_list[i] is None:
+                rect_list[i] = first_valid
+            else:
+                break
+
     emo_list = get_drive_expression_pd_fgc(pd_fpg_motion, frame_list, landmark_list, device)
     comfy_pbar.update(1)
 
