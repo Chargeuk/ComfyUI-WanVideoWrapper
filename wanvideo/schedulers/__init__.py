@@ -138,6 +138,7 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     if hasattr(sample_scheduler, 'timesteps'):
         sample_scheduler.timesteps = timesteps
 
+    scheduler_step_args = None
     if seed_g is not None:
         scheduler_step_args = {"generator": seed_g}
         step_sig = inspect.signature(sample_scheduler.step)

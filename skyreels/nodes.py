@@ -366,7 +366,7 @@ class WanVideoDiffusionForcingSampler:
         # elif 'lcm' in scheduler:
         #     sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
         #     sample_scheduler.set_timesteps(timestep_steps, device=device) 
-        sample_scheduler, init_timesteps = get_scheduler(
+        sample_scheduler, init_timesteps, scheduler_step_args = get_scheduler(
             scheduler, timestep_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args,
             scheduler_denoise_strength)
         
@@ -479,7 +479,7 @@ class WanVideoDiffusionForcingSampler:
         
         sample_schedulers = []
         for _ in range(latent_video_length):
-            sample_scheduler, tmp_timesteps = get_scheduler(
+            sample_scheduler, tmp_timesteps, scheduler_step_args = get_scheduler(
                 scheduler, timestep_steps, start_step, end_step, shift, device, transformer.dim,
                 flowedit_args, scheduler_denoise_strength)
 
