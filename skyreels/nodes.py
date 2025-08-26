@@ -69,46 +69,6 @@ except Exception as e:
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
-# Error during sampling[2]: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument mat1 in method wrapper_CUDA_addmm)
-# Error during sampling[3] part 2: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument mat1 in method wrapper_CUDA_addmm)
-# Call stack:
-# Traceback (most recent call last):
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-WanVideoWrapper\skyreels\nodes.py", line 737, in process
-#     noise_pred, self.teacache_state = predict_with_cfg(
-#                                       ^^^^^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-WanVideoWrapper\skyreels\nodes.py", line 632, in predict_with_cfg
-#     noise_pred_cond, teacache_state_cond = transformer(
-#                                            ^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-#     return self._call_impl(*args, **kwargs)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-#     return forward_call(*args, **kwargs)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-WanVideoWrapper\wanvideo\modules\model.py", line 1757, in forward
-#     e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t.flatten()).to(x.dtype))  # b, dim
-#         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-#     return self._call_impl(*args, **kwargs)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-#     return forward_call(*args, **kwargs)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\container.py", line 245, in forward
-#     input = module(input)
-#             ^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-#     return self._call_impl(*args, **kwargs)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-#     return forward_call(*args, **kwargs)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "H:\code\ai\comfyUi\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\linear.py", line 125, in forward
-#     return F.linear(input, self.weight, self.bias)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-# RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument mat1 in method wrapper_CUDA_addmm)
-
-
 def colormatch(image_ref, image_target, method, strength=1.0, editInPlace=False, gc_interval=50):
     try:
         from color_matcher import ColorMatcher
@@ -368,7 +328,7 @@ class WanVideoDiffusionForcingSampler:
         #     sample_scheduler.set_timesteps(timestep_steps, device=device) 
         sample_scheduler, init_timesteps, scheduler_step_args = get_scheduler(
             scheduler, timestep_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args,
-            scheduler_denoise_strength)
+            scheduler_denoise_strength, crop_output=False)
         
         # init_timesteps = sample_scheduler.timesteps
         timesteps = init_timesteps[:]
@@ -481,7 +441,7 @@ class WanVideoDiffusionForcingSampler:
         for _ in range(latent_video_length):
             sample_scheduler, tmp_timesteps, scheduler_step_args = get_scheduler(
                 scheduler, timestep_steps, start_step, end_step, shift, device, transformer.dim,
-                flowedit_args, scheduler_denoise_strength)
+                flowedit_args, scheduler_denoise_strength, crop_output=False)
 
             # if 'unipc' in scheduler:
             #     sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)

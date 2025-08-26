@@ -23,7 +23,7 @@ scheduler_list = [
     "multitalk"
 ]
 
-def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim, flowedit_args, denoise_strength, sigmas=None, seed_g=None):
+def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim, flowedit_args, denoise_strength, sigmas=None, seed_g=None, crop_output=True):
     timesteps = None
     if 'unipc' in scheduler:
         sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
@@ -108,7 +108,7 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
             raise ValueError("start_step must be 0 when denoise_strength is used")
         original_startStep = start_step
         start_step = steps - int(steps * denoise_strength) - 1
-        log.info(f"get_scheduler: original_startStep={original_startStep}, start_step={start_step}, end_step={end_step}")
+        log.info(f"get_scheduler: original_startStep={original_startStep}, start_step={start_step}, end_step={end_step}, denoise_strength={denoise_strength}")
 
     # Determine start and end indices for slicing
     start_idx = 0
@@ -117,7 +117,13 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     log.info(f"get_scheduler pre slice: start_step={start_step}, end_step={end_step}, num_timesteps={len(timesteps)}")
     log.info(f"get_scheduler pre slice: timesteps: {timesteps}")
 
+    scheduler_step_args = None
+    if not crop_output:
+        log.info(f"get_scheduler not cropping output as crop_output={crop_output}")
+        return sample_scheduler, timesteps, scheduler_step_args
 
+    log.info(f"get_scheduler is cropping output as crop_output={crop_output}")
+    
     if isinstance(start_step, float):
         idxs = (sample_scheduler.sigmas <= start_step).nonzero(as_tuple=True)[0]
         if len(idxs) > 0:
