@@ -458,8 +458,8 @@ class WanVideoDiffusionForcingSampler:
 
         unianim_data = None
         if unianimate_poses is not None:
-            transformer.dwpose_embedding.to(device, model["dtype"])
-            dwpose_data = unianimate_poses["pose"].to(device, model["dtype"])
+            transformer.dwpose_embedding.to(device, dtype)
+            dwpose_data = unianimate_poses["pose"].to(device, dtype)
             dwpose_data = torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
             dwpose_data = transformer.dwpose_embedding(dwpose_data)
             log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
@@ -471,24 +471,58 @@ class WanVideoDiffusionForcingSampler:
                 pad_len = latent_video_length - dwpose_data.shape[2]
                 pad = dwpose_data[:,:,:1].repeat(1,1,pad_len,1,1)
                 dwpose_data = torch.cat([dwpose_data, pad], dim=2)
-            dwpose_data_flat = rearrange(dwpose_data, 'b c f h w -> b (f h w) c').contiguous()
             
             random_ref_dwpose_data = None
             if image_cond is not None:
-                transformer.randomref_embedding_pose.to(device)
+                transformer.randomref_embedding_pose.to(device, dtype)
                 random_ref_dwpose = unianimate_poses.get("ref", None)
                 if random_ref_dwpose is not None:
                     random_ref_dwpose_data = transformer.randomref_embedding_pose(
-                        random_ref_dwpose.to(device)
+                        random_ref_dwpose.to(device, dtype)
                         ).unsqueeze(2).to(model["dtype"]) # [1, 20, 104, 60]
+                del random_ref_dwpose
                 
             unianim_data = {
-                "dwpose": dwpose_data_flat,
+                "dwpose": dwpose_data,
                 "random_ref": random_ref_dwpose_data.squeeze(0) if random_ref_dwpose_data is not None else None,
                 "strength": unianimate_poses["strength"],
                 "start_percent": unianimate_poses["start_percent"],
                 "end_percent": unianimate_poses["end_percent"]
             }
+            # Old 2
+            # transformer.dwpose_embedding.to(device, model["dtype"])
+            # dwpose_data = unianimate_poses["pose"].to(device, model["dtype"])
+            # dwpose_data = torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
+            # dwpose_data = transformer.dwpose_embedding(dwpose_data)
+            # log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
+            # if dwpose_data.shape[2] > latent_video_length:
+            #     log.warning(f"UniAnimate pose embed length {dwpose_data.shape[2]} is longer than the video length {latent_video_length}, truncating")
+            #     dwpose_data = dwpose_data[:,:, :latent_video_length]
+            # elif dwpose_data.shape[2] < latent_video_length:
+            #     log.warning(f"UniAnimate pose embed length {dwpose_data.shape[2]} is shorter than the video length {latent_video_length}, padding with last pose")
+            #     pad_len = latent_video_length - dwpose_data.shape[2]
+            #     pad = dwpose_data[:,:,:1].repeat(1,1,pad_len,1,1)
+            #     dwpose_data = torch.cat([dwpose_data, pad], dim=2)
+            # dwpose_data_flat = rearrange(dwpose_data, 'b c f h w -> b (f h w) c').contiguous()
+            
+            # random_ref_dwpose_data = None
+            # if image_cond is not None:
+            #     transformer.randomref_embedding_pose.to(device)
+            #     random_ref_dwpose = unianimate_poses.get("ref", None)
+            #     if random_ref_dwpose is not None:
+            #         random_ref_dwpose_data = transformer.randomref_embedding_pose(
+            #             random_ref_dwpose.to(device)
+            #             ).unsqueeze(2).to(model["dtype"]) # [1, 20, 104, 60]
+                
+            # unianim_data = {
+            #     "dwpose": dwpose_data_flat,
+            #     "random_ref": random_ref_dwpose_data.squeeze(0) if random_ref_dwpose_data is not None else None,
+            #     "strength": unianimate_poses["strength"],
+            #     "start_percent": unianimate_poses["start_percent"],
+            #     "end_percent": unianimate_poses["end_percent"]
+            # }
+
+            # OLD 1
             # transformer.dwpose_embedding.to(device)
             # transformer.randomref_embedding_pose.to(device)
             # dwpose_data = unianimate_poses["pose"]
