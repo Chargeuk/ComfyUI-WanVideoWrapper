@@ -1603,7 +1603,7 @@ class WanModel(torch.nn.Module):
                 if unianim_data['start_percent'] <= current_step_percentage <= unianim_data['end_percent']:
                     random_ref_emb = unianim_data["random_ref"]
                     if random_ref_emb is not None:
-                        y[0] = y[0] + random_ref_emb * unianim_data["strength"]
+                        y[0].add_(random_ref_emb, alpha=unianim_data["strength"])
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
         
         #uni3c controlnet
@@ -1978,8 +1978,8 @@ class WanModel(torch.nn.Module):
 
             if hasattr(self, "dwpose_embedding") and unianim_data is not None:
                 if unianim_data['start_percent'] <= current_step_percentage <= unianim_data['end_percent']:
-                    dwpose_emb = unianim_data['dwpose']
-                    x += dwpose_emb * unianim_data['strength']
+                    dwpose_emb = rearrange(unianim_data['dwpose'], 'b c f h w -> b (f h w) c').contiguous()
+                    x.add_(dwpose_emb, alpha=unianim_data['strength'])
             # arguments
             kwargs = dict(
                 e=e0,
@@ -2077,7 +2077,7 @@ class WanModel(torch.nn.Module):
                     if b in self.slg_blocks and is_uncond:
                         if self.slg_start_percent <= current_step_percentage <= self.slg_end_percent:
                             continue
-                x, x_ip = block(x, x_ip=x_ip, **kwargs)
+                x, x_ip = block(x, x_ip=x_ip, **kwargs) #run block
                 if self.block_swap_debug:
                     compute_end = time.perf_counter()
                     compute_time = compute_end - compute_start

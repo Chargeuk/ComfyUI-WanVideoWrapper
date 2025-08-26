@@ -1,8 +1,8 @@
 {
   "id": "8b7a9a57-2303-4ef5-9fc2-bf41713bd1fc",
   "revision": 0,
-  "last_node_id": 299,
-  "last_link_id": 540,
+  "last_node_id": 304,
+  "last_link_id": 545,
   "nodes": [
     {
       "id": 120,
@@ -121,7 +121,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 24,
+      "order": 28,
       "mode": 0,
       "inputs": [
         {
@@ -161,7 +161,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 34,
+      "order": 36,
       "mode": 0,
       "inputs": [
         {
@@ -236,7 +236,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 25,
+      "order": 29,
       "mode": 0,
       "inputs": [
         {
@@ -276,7 +276,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 28,
+      "order": 31,
       "mode": 0,
       "inputs": [
         {
@@ -316,7 +316,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 29,
+      "order": 32,
       "mode": 0,
       "inputs": [
         {
@@ -343,183 +343,11 @@
       "bgcolor": "#29699c"
     },
     {
-      "id": 159,
-      "type": "AudioCrop",
-      "pos": [
-        676.1865234375,
-        -1132.495361328125
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 26,
-      "mode": 4,
-      "inputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 257
-        }
-      ],
-      "outputs": [
-        {
-          "name": "AUDIO",
-          "type": "AUDIO",
-          "links": [
-            301,
-            448
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "audio-separation-nodes-comfyui",
-        "ver": "31a4567726e035097cc2d1f767767908a6fda2ea",
-        "Node name for S&R": "AudioCrop"
-      },
-      "widgets_values": [
-        "0:02",
-        "2:00"
-      ]
-    },
-    {
-      "id": 170,
-      "type": "AudioSeparation",
-      "pos": [
-        1064.037353515625,
-        -1347.1170654296875
-      ],
-      "size": [
-        270,
-        166
-      ],
-      "flags": {},
-      "order": 32,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 301
-        }
-      ],
-      "outputs": [
-        {
-          "name": "Bass",
-          "type": "AUDIO",
-          "links": null
-        },
-        {
-          "name": "Drums",
-          "type": "AUDIO",
-          "links": null
-        },
-        {
-          "name": "Other",
-          "type": "AUDIO",
-          "links": null
-        },
-        {
-          "name": "Vocals",
-          "type": "AUDIO",
-          "links": [
-            335
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "audio-separation-nodes-comfyui",
-        "ver": "31a4567726e035097cc2d1f767767908a6fda2ea",
-        "Node name for S&R": "AudioSeparation"
-      },
-      "widgets_values": [
-        "linear",
-        10,
-        0.1
-      ]
-    },
-    {
-      "id": 137,
-      "type": "DownloadAndLoadWav2VecModel",
-      "pos": [
-        1400.8470458984375,
-        -1411.5140380859375
-      ],
-      "size": [
-        330.96728515625,
-        106
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "wav2vec_model",
-          "type": "WAV2VECMODEL",
-          "links": [
-            334
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "058286fc0f3b0651a2f6b68309df3f06e8332cc0",
-        "Node name for S&R": "DownloadAndLoadWav2VecModel"
-      },
-      "widgets_values": [
-        "TencentGameMate/chinese-wav2vec2-base",
-        "fp16",
-        "main_device"
-      ]
-    },
-    {
-      "id": 253,
-      "type": "SetNode",
-      "pos": [
-        1002.430908203125,
-        -1102.810302734375
-      ],
-      "size": [
-        210,
-        60
-      ],
-      "flags": {
-        "collapsed": true
-      },
-      "order": 33,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "AUDIO",
-          "type": "AUDIO",
-          "link": 448
-        }
-      ],
-      "outputs": [
-        {
-          "name": "*",
-          "type": "*",
-          "links": null
-        }
-      ],
-      "title": "Set_input_audio",
-      "properties": {
-        "previousName": "input_audio"
-      },
-      "widgets_values": [
-        "input_audio"
-      ],
-      "color": "#323",
-      "bgcolor": "#535"
-    },
-    {
       "id": 282,
       "type": "GetNode",
       "pos": [
-        1040.8619384765625,
-        -1797.7919921875
+        1036.8980712890625,
+        -1798.782958984375
       ],
       "size": [
         210,
@@ -528,7 +356,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 5,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -562,7 +390,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -594,7 +422,7 @@
         150
       ],
       "flags": {},
-      "order": 7,
+      "order": 6,
       "mode": 0,
       "inputs": [
         {
@@ -634,41 +462,6 @@
       "bgcolor": "#335"
     },
     {
-      "id": 125,
-      "type": "LoadAudio",
-      "pos": [
-        536.47412109375,
-        -1357.4945068359375
-      ],
-      "size": [
-        404.9698791503906,
-        136
-      ],
-      "flags": {},
-      "order": 8,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "AUDIO",
-          "type": "AUDIO",
-          "links": [
-            257
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.41",
-        "Node name for S&R": "LoadAudio"
-      },
-      "widgets_values": [
-        "hush.mp3",
-        null,
-        null
-      ]
-    },
-    {
       "id": 134,
       "type": "WanVideoBlockSwap",
       "pos": [
@@ -680,7 +473,7 @@
         202
       ],
       "flags": {},
-      "order": 9,
+      "order": 7,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -721,7 +514,7 @@
         58
       ],
       "flags": {},
-      "order": 10,
+      "order": 8,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -757,7 +550,7 @@
         58
       ],
       "flags": {},
-      "order": 11,
+      "order": 9,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -793,7 +586,7 @@
         262
       ],
       "flags": {},
-      "order": 37,
+      "order": 39,
       "mode": 0,
       "inputs": [
         {
@@ -859,7 +652,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 12,
+      "order": 10,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -893,7 +686,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 13,
+      "order": 11,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -925,7 +718,7 @@
         58
       ],
       "flags": {},
-      "order": 14,
+      "order": 12,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -953,8 +746,8 @@
       "id": 294,
       "type": "SetNode",
       "pos": [
-        1751.949462890625,
-        -1184.374267578125
+        1676.046630859375,
+        -1182.43310546875
       ],
       "size": [
         210,
@@ -963,7 +756,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 38,
+      "order": 42,
       "mode": 0,
       "inputs": [
         {
@@ -995,15 +788,15 @@
       "id": 293,
       "type": "PreviewAny",
       "pos": [
-        1772.05078125,
-        -1110.6668701171875
+        1696.14794921875,
+        -1108.7257080078125
       ],
       "size": [
         210,
         88
       ],
       "flags": {},
-      "order": 40,
+      "order": 44,
       "mode": 0,
       "inputs": [
         {
@@ -1034,7 +827,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 30,
+      "order": 33,
       "mode": 0,
       "inputs": [
         {
@@ -1064,15 +857,15 @@
       "id": 194,
       "type": "MultiTalkWav2VecEmbeds",
       "pos": [
-        1400.6778564453125,
-        -1237.9234619140625
+        1324.7750244140625,
+        -1235.9822998046875
       ],
       "size": [
         291.08203125,
         278
       ],
       "flags": {},
-      "order": 36,
+      "order": 40,
       "mode": 0,
       "inputs": [
         {
@@ -1083,7 +876,7 @@
         {
           "name": "audio_1",
           "type": "AUDIO",
-          "link": 335
+          "link": 544
         },
         {
           "name": "audio_2",
@@ -1159,15 +952,15 @@
       "id": 263,
       "type": "Note",
       "pos": [
-        1719.4892578125,
-        -965.56591796875
+        1643.58642578125,
+        -963.624755859375
       ],
       "size": [
         344.82928466796875,
         143.7332305908203
       ],
       "flags": {},
-      "order": 15,
+      "order": 13,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -1190,7 +983,7 @@
         314
       ],
       "flags": {},
-      "order": 27,
+      "order": 30,
       "mode": 0,
       "inputs": [
         {
@@ -1284,7 +1077,7 @@
         202
       ],
       "flags": {},
-      "order": 16,
+      "order": 14,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1315,8 +1108,8 @@
       "id": 272,
       "type": "GetNode",
       "pos": [
-        1174.7862548828125,
-        -1059.2822265625
+        1098.8834228515625,
+        -1057.341064453125
       ],
       "size": [
         210,
@@ -1325,7 +1118,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 17,
+      "order": 15,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1357,7 +1150,7 @@
         198
       ],
       "flags": {},
-      "order": 42,
+      "order": 45,
       "mode": 0,
       "inputs": [
         {
@@ -1406,10 +1199,10 @@
       ],
       "size": [
         991.5499877929688,
-        334
+        1319.550048828125
       ],
       "flags": {},
-      "order": 43,
+      "order": 46,
       "mode": 0,
       "inputs": [
         {
@@ -1488,7 +1281,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 18,
+      "order": 16,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1522,7 +1315,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 35,
+      "order": 37,
       "mode": 0,
       "inputs": [
         {
@@ -1582,7 +1375,7 @@
         386.354248046875
       ],
       "flags": {},
-      "order": 19,
+      "order": 17,
       "mode": 0,
       "inputs": [
         {
@@ -1640,7 +1433,7 @@
         266
       ],
       "flags": {},
-      "order": 39,
+      "order": 41,
       "mode": 0,
       "inputs": [
         {
@@ -1718,7 +1511,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 20,
+      "order": 18,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1739,6 +1532,457 @@
       "bgcolor": "#533"
     },
     {
+      "id": 283,
+      "type": "GetNode",
+      "pos": [
+        1039.0777587890625,
+        -1849.6192626953125
+      ],
+      "size": [
+        210,
+        34
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 19,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            494
+          ]
+        }
+      ],
+      "title": "Get_width",
+      "properties": {},
+      "widgets_values": [
+        "width"
+      ],
+      "color": "#1b4669",
+      "bgcolor": "#29699c"
+    },
+    {
+      "id": 284,
+      "type": "LoadImage",
+      "pos": [
+        634.8666381835938,
+        -1939.31591796875
+      ],
+      "size": [
+        274.080078125,
+        314
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            496
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.50",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "woman.png",
+        "image"
+      ]
+    },
+    {
+      "id": 281,
+      "type": "ImageResizeKJv2",
+      "pos": [
+        1207.9007568359375,
+        -1937.6312255859375
+      ],
+      "size": [
+        270,
+        336
+      ],
+      "flags": {},
+      "order": 34,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 496
+        },
+        {
+          "name": "mask",
+          "shape": 7,
+          "type": "MASK",
+          "link": null
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": 494
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": 495
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            538
+          ]
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "f7eb33abc80a2aded1b46dff0dd14d07856a7d50",
+        "Node name for S&R": "ImageResizeKJv2"
+      },
+      "widgets_values": [
+        832,
+        480,
+        "lanczos",
+        "crop",
+        "0, 0, 0",
+        "center",
+        16,
+        "cpu"
+      ]
+    },
+    {
+      "id": 299,
+      "type": "Note",
+      "pos": [
+        1424.5263671875,
+        -2250.27001953125
+      ],
+      "size": [
+        290.9361267089844,
+        88
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "Clip vision is not strictly necessary\n\nAny I2V model should work, MAGREF can be interesting to play with as well."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 253,
+      "type": "SetNode",
+      "pos": [
+        909.3299560546875,
+        -1326.90576171875
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 35,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "link": 542
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            545
+          ]
+        }
+      ],
+      "title": "Set_input_audio",
+      "properties": {
+        "previousName": "input_audio"
+      },
+      "widgets_values": [
+        "input_audio"
+      ],
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 125,
+      "type": "LoadAudio",
+      "pos": [
+        453.9859313964844,
+        -1425.9039306640625
+      ],
+      "size": [
+        404.9698791503906,
+        136
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            542
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.41",
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "hush.mp3",
+        null,
+        null
+      ]
+    },
+    {
+      "id": 137,
+      "type": "DownloadAndLoadWav2VecModel",
+      "pos": [
+        453.353515625,
+        -1010.69482421875
+      ],
+      "size": [
+        330.96728515625,
+        106
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "wav2vec_model",
+          "type": "WAV2VECMODEL",
+          "links": [
+            334
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "058286fc0f3b0651a2f6b68309df3f06e8332cc0",
+        "Node name for S&R": "DownloadAndLoadWav2VecModel"
+      },
+      "widgets_values": [
+        "TencentGameMate/chinese-wav2vec2-base",
+        "fp16",
+        "main_device"
+      ]
+    },
+    {
+      "id": 300,
+      "type": "Wav2VecModelLoader",
+      "pos": [
+        438.4236145019531,
+        -846.713623046875
+      ],
+      "size": [
+        346.9834289550781,
+        106
+      ],
+      "flags": {},
+      "order": 24,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "wav2vec_model",
+          "type": "WAV2VECMODEL",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "6fce0e2d3bb976b0006bc6d8e37e1f23460938ee",
+        "Node name for S&R": "Wav2VecModelLoader"
+      },
+      "widgets_values": [
+        "wav2vec2-chinese-base_fp16.safetensors",
+        "fp16",
+        "main_device"
+      ]
+    },
+    {
+      "id": 302,
+      "type": "MelBandRoFormerSampler",
+      "pos": [
+        1110.198486328125,
+        -1350.2908935546875
+      ],
+      "size": [
+        222.73397827148438,
+        46
+      ],
+      "flags": {},
+      "order": 38,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MELROFORMERMODEL",
+          "link": 543
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 545
+        }
+      ],
+      "outputs": [
+        {
+          "name": "vocals",
+          "type": "AUDIO",
+          "links": [
+            544
+          ]
+        },
+        {
+          "name": "instruments",
+          "type": "AUDIO",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-MelBandRoFormer",
+        "ver": "b68d9077815387b64d596f8c39607052b95b6eba",
+        "Node name for S&R": "MelBandRoFormerSampler"
+      }
+    },
+    {
+      "id": 303,
+      "type": "MarkdownNote",
+      "pos": [
+        875.717529296875,
+        -854.7509155273438
+      ],
+      "size": [
+        355.3899841308594,
+        125.51774597167969
+      ],
+      "flags": {},
+      "order": 25,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Wav2vec2 safetensors",
+      "properties": {},
+      "widgets_values": [
+        "Alternative to the download node is to use single .safetensors file from:\n\n[https://huggingface.co/Kijai/wav2vec2_safetensors/tree/main](https://huggingface.co/Kijai/wav2vec2_safetensors/tree/main)\n\nThe model goes to `ComfyUI/models/wav2vec2`"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 304,
+      "type": "MarkdownNote",
+      "pos": [
+        461.80609130859375,
+        -1254.9613037109375
+      ],
+      "size": [
+        345.2374267578125,
+        91.6759033203125
+      ],
+      "flags": {},
+      "order": 26,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Wav2vec2 safetensors",
+      "properties": {},
+      "widgets_values": [
+        "Vocal separator model\n\n[https://huggingface.co/Kijai/MelBandRoFormer_comfy/tree/main](https://huggingface.co/Kijai/MelBandRoFormer_comfy/tree/main)\n\nThe model goes to `ComfyUI/models/diffusion_models`"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 301,
+      "type": "MelBandRoFormerModelLoader",
+      "pos": [
+        454.7294006347656,
+        -1117.843994140625
+      ],
+      "size": [
+        400.5706481933594,
+        58
+      ],
+      "flags": {},
+      "order": 27,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MELROFORMERMODEL",
+          "links": [
+            543
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-MelBandRoFormer",
+        "ver": "b68d9077815387b64d596f8c39607052b95b6eba",
+        "Node name for S&R": "MelBandRoFormerModelLoader"
+      },
+      "widgets_values": [
+        "MelBandRoFormer\\MelBandRoformer_fp16.safetensors"
+      ]
+    },
+    {
       "id": 128,
       "type": "WanVideoSampler",
       "pos": [
@@ -1750,7 +1994,7 @@
         999
       ],
       "flags": {},
-      "order": 41,
+      "order": 43,
       "mode": 0,
       "inputs": [
         {
@@ -1875,7 +2119,7 @@
         "Node name for S&R": "WanVideoSampler"
       },
       "widgets_values": [
-        7,
+        6,
         1.0000000000000002,
         11.000000000000002,
         2,
@@ -1890,205 +2134,9 @@
         -1,
         true
       ]
-    },
-    {
-      "id": 283,
-      "type": "GetNode",
-      "pos": [
-        1043.0416259765625,
-        -1848.6282958984375
-      ],
-      "size": [
-        210,
-        34
-      ],
-      "flags": {
-        "collapsed": true
-      },
-      "order": 21,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            494
-          ]
-        }
-      ],
-      "title": "Get_width",
-      "properties": {},
-      "widgets_values": [
-        "width"
-      ],
-      "color": "#1b4669",
-      "bgcolor": "#29699c"
-    },
-    {
-      "id": 284,
-      "type": "LoadImage",
-      "pos": [
-        638.8305053710938,
-        -1938.324951171875
-      ],
-      "size": [
-        274.080078125,
-        314
-      ],
-      "flags": {},
-      "order": 22,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            496
-          ]
-        },
-        {
-          "name": "MASK",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.50",
-        "Node name for S&R": "LoadImage"
-      },
-      "widgets_values": [
-        "woman.png",
-        "image"
-      ]
-    },
-    {
-      "id": 281,
-      "type": "ImageResizeKJv2",
-      "pos": [
-        1211.8646240234375,
-        -1936.6402587890625
-      ],
-      "size": [
-        270,
-        336
-      ],
-      "flags": {},
-      "order": 31,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 496
-        },
-        {
-          "name": "mask",
-          "shape": 7,
-          "type": "MASK",
-          "link": null
-        },
-        {
-          "name": "width",
-          "type": "INT",
-          "widget": {
-            "name": "width"
-          },
-          "link": 494
-        },
-        {
-          "name": "height",
-          "type": "INT",
-          "widget": {
-            "name": "height"
-          },
-          "link": 495
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            538
-          ]
-        },
-        {
-          "name": "width",
-          "type": "INT",
-          "links": []
-        },
-        {
-          "name": "height",
-          "type": "INT",
-          "links": []
-        },
-        {
-          "name": "mask",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-kjnodes",
-        "ver": "f7eb33abc80a2aded1b46dff0dd14d07856a7d50",
-        "Node name for S&R": "ImageResizeKJv2"
-      },
-      "widgets_values": [
-        832,
-        480,
-        "lanczos",
-        "crop",
-        "0, 0, 0",
-        "center",
-        16,
-        "cpu",
-        "<tr><td>Output: </td><td><b>1</b> x <b>640</b> x <b>640 | 4.69MB</b></td></tr>"
-      ]
-    },
-    {
-      "id": 299,
-      "type": "Note",
-      "pos": [
-        1424.5263671875,
-        -2250.27001953125
-      ],
-      "size": [
-        290.9361267089844,
-        88
-      ],
-      "flags": {},
-      "order": 23,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": [
-        "Clip vision is not strictly necessary\n\nAny I2V model should work, MAGREF can be interesting to play with as well."
-      ],
-      "color": "#432",
-      "bgcolor": "#653"
     }
   ],
   "links": [
-    [
-      257,
-      125,
-      0,
-      159,
-      0,
-      "AUDIO"
-    ],
-    [
-      301,
-      159,
-      0,
-      170,
-      0,
-      "AUDIO"
-    ],
     [
       334,
       137,
@@ -2096,14 +2144,6 @@
       194,
       0,
       "WAV2VECMODEL"
-    ],
-    [
-      335,
-      170,
-      3,
-      194,
-      1,
-      "AUDIO"
     ],
     [
       349,
@@ -2198,14 +2238,6 @@
       246,
       0,
       248,
-      0,
-      "*"
-    ],
-    [
-      448,
-      159,
-      0,
-      253,
       0,
       "*"
     ],
@@ -2360,6 +2392,38 @@
       192,
       1,
       "IMAGE"
+    ],
+    [
+      542,
+      125,
+      0,
+      253,
+      0,
+      "AUDIO"
+    ],
+    [
+      543,
+      301,
+      0,
+      302,
+      0,
+      "MELROFORMERMODEL"
+    ],
+    [
+      544,
+      302,
+      0,
+      194,
+      1,
+      "AUDIO"
+    ],
+    [
+      545,
+      253,
+      0,
+      302,
+      1,
+      "AUDIO"
     ]
   ],
   "groups": [
@@ -2380,10 +2444,10 @@
       "id": 4,
       "title": "Audio",
       "bounding": [
-        462.57562255859375,
-        -1529.8046875,
-        1656.1551513671875,
-        753.9797973632812
+        386.6732482910156,
+        -1527.863525390625,
+        1782.2769775390625,
+        833.420166015625
       ],
       "color": "#a1309b",
       "font_size": 24,
@@ -2393,8 +2457,8 @@
       "id": 5,
       "title": "Input image",
       "bounding": [
-        466.7610778808594,
-        -2043.424560546875,
+        462.7972412109375,
+        -2044.41552734375,
         1652.696533203125,
         495.40948486328125
       ],
@@ -2406,13 +2470,13 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.45949729863576383,
+      "scale": 0.6115909044842021,
       "offset": [
-        34.34672984465828,
-        2847.63895576458
+        -305.72724541367705,
+        2418.5059970103503
       ]
     },
-    "frontendVersion": "1.26.3",
+    "frontendVersion": "1.26.6",
     "node_versions": {
       "ComfyUI-WanVideoWrapper": "0a11c67a0c0062b534178920a0d6dcaa75e7b5fe",
       "comfy-core": "0.3.43",

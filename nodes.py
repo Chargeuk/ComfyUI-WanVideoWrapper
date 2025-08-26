@@ -1117,7 +1117,7 @@ class WanVideoImageToVideoEncode:
 
         base_frames = num_frames + (1 if two_ref_images and not fun_or_fl2v_model else 0)
         if temporal_mask is None:
-            mask = torch.zeros(1, base_frames, lat_h, lat_w, device=device)
+            mask = torch.zeros(1, base_frames, lat_h, lat_w, device=device, dtype=vae.dtype)
             if start_image is not None:
                 mask[:, 0:start_image.shape[0]] = 1  # First frame
             if end_image is not None:
@@ -1128,7 +1128,7 @@ class WanVideoImageToVideoEncode:
                 mask = mask[:base_frames]
             elif mask.shape[0] < base_frames:
                 mask = torch.cat([mask, torch.zeros(base_frames - mask.shape[0], lat_h, lat_w, device=device)])
-            mask = mask.unsqueeze(0).to(device)
+            mask = mask.unsqueeze(0).to(device, vae.dtype)
 
         # Repeat first frame and optionally end frame
         start_mask_repeated = torch.repeat_interleave(mask[:, 0:1], repeats=4, dim=1) # T, C, H, W
@@ -1144,6 +1144,7 @@ class WanVideoImageToVideoEncode:
 
         # Resize and rearrange the input image dimensions
         if start_image is not None:
+            start_image = start_image[..., :3]
             if start_image.shape[1] != H or start_image.shape[2] != W:
                 resized_start_image = common_upscale(start_image.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
             else:
@@ -1153,6 +1154,7 @@ class WanVideoImageToVideoEncode:
                 resized_start_image = add_noise_to_reference_video(resized_start_image, ratio=noise_aug_strength)
         
         if end_image is not None:
+            end_image = end_image[..., :3]
             if end_image.shape[1] != H or end_image.shape[2] != W:
                 resized_end_image = common_upscale(end_image.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
             else:
@@ -1182,7 +1184,7 @@ class WanVideoImageToVideoEncode:
                 del resized_start_image, zero_frames
         else:
             temporal_mask = common_upscale(temporal_mask.unsqueeze(1), W, H, "nearest", "disabled").squeeze(1)
-            concatenated = resized_start_image[:,:num_frames] * temporal_mask[:num_frames].unsqueeze(0)
+            concatenated = resized_start_image[:,:num_frames].to(vae.dtype) * temporal_mask[:num_frames].unsqueeze(0).to(vae.dtype)
             del resized_start_image, temporal_mask
 
         mm.soft_empty_cache()
@@ -2244,8 +2246,8 @@ class WanVideoSampler:
         
         # UniAnimate
         if unianimate_poses is not None:
-            transformer.dwpose_embedding.to(device, model["dtype"])
-            dwpose_data = unianimate_poses["pose"].to(device, model["dtype"])
+            transformer.dwpose_embedding.to(device, dtype)
+            dwpose_data = unianimate_poses["pose"].to(device, dtype)
             dwpose_data = torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
             dwpose_data = transformer.dwpose_embedding(dwpose_data)
             log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
@@ -2258,19 +2260,19 @@ class WanVideoSampler:
                     pad_len = latent_video_length - dwpose_data.shape[2]
                     pad = dwpose_data[:,:,:1].repeat(1,1,pad_len,1,1)
                     dwpose_data = torch.cat([dwpose_data, pad], dim=2)
-            dwpose_data_flat = rearrange(dwpose_data, 'b c f h w -> b (f h w) c').contiguous()
             
             random_ref_dwpose_data = None
             if image_cond is not None:
-                transformer.randomref_embedding_pose.to(device)
+                transformer.randomref_embedding_pose.to(device, dtype)
                 random_ref_dwpose = unianimate_poses.get("ref", None)
                 if random_ref_dwpose is not None:
                     random_ref_dwpose_data = transformer.randomref_embedding_pose(
-                        random_ref_dwpose.to(device)
+                        random_ref_dwpose.to(device, dtype)
                         ).unsqueeze(2).to(model["dtype"]) # [1, 20, 104, 60]
+                del random_ref_dwpose
                 
             unianim_data = {
-                "dwpose": dwpose_data_flat,
+                "dwpose": dwpose_data,
                 "random_ref": random_ref_dwpose_data.squeeze(0) if random_ref_dwpose_data is not None else None,
                 "strength": unianimate_poses["strength"],
                 "start_percent": unianimate_poses["start_percent"],
@@ -2329,9 +2331,6 @@ class WanVideoSampler:
             log.info(f"minimax_mask_latents: {minimax_mask_latents.shape}")
             minimax_latents = minimax_latents.to(device, dtype)
             minimax_mask_latents = minimax_mask_latents.to(device, dtype)
-
-        # Stand-In
-        standin_input = image_embeds.get("standin_input", None)
 
         # Context windows
         is_looped = False
@@ -2627,7 +2626,12 @@ class WanVideoSampler:
         if isinstance(rope_function, dict):
             ntk_alphas = rope_function["ntk_scale_f"], rope_function["ntk_scale_h"], rope_function["ntk_scale_w"]
             rope_function = rope_function["rope_function"]
-            
+
+        # Stand-In
+        standin_input = image_embeds.get("standin_input", None)
+        if standin_input is not None:
+            rope_function = "comfy" # only works with this currently
+
         freqs = None
         transformer.rope_embedder.k = None
         transformer.rope_embedder.num_frames = None
@@ -3318,9 +3322,8 @@ class WanVideoSampler:
                             partial_unianim_data = None
                             if unianim_data is not None:
                                 partial_dwpose = dwpose_data[:, :, c]
-                                partial_dwpose_flat=rearrange(partial_dwpose, 'b c f h w -> b (f h w) c')
                                 partial_unianim_data = {
-                                    "dwpose": partial_dwpose_flat,
+                                    "dwpose": partial_dwpose,
                                     "random_ref": unianim_data["random_ref"],
                                     "strength": unianimate_poses["strength"],
                                     "start_percent": unianimate_poses["start_percent"],
@@ -3618,9 +3621,8 @@ class WanVideoSampler:
                             partial_unianim_data = None
                             if unianim_data is not None:
                                 partial_dwpose = dwpose_data[:, :, latent_start_idx:latent_end_idx]
-                                partial_dwpose_flat=rearrange(partial_dwpose, 'b c f h w -> b (f h w) c')
                                 partial_unianim_data = {
-                                    "dwpose": partial_dwpose_flat,
+                                    "dwpose": partial_dwpose,
                                     "random_ref": unianim_data["random_ref"],
                                     "strength": unianimate_poses["strength"],
                                     "start_percent": unianimate_poses["start_percent"],
@@ -4621,7 +4623,7 @@ class WanVideoDecode:
             images = images.permute(1, 2, 3, 0).cpu().float()
             return (images,)
         else:
-            if end_image:
+            if end_image is not None:
                 enable_vae_tiling = False
             images = vae.decode(latents, device=device, end_=(end_image is not None), tiled=enable_vae_tiling, tile_size=(tile_x//8, tile_y//8), tile_stride=(tile_stride_x//8, tile_stride_y//8))[0]
             vae.model.clear_cache()

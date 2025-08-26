@@ -1036,19 +1036,19 @@ class WanVideoModelLoader:
             # init audio module
             from .multitalk.multitalk import SingleStreamMultiAttention
             from .wanvideo.modules.model import WanLayerNorm
-            norm_input_visual = True #dunno what this is
-               
-            for block in transformer.blocks:
-                block.audio_cross_attn = SingleStreamMultiAttention(
-                        dim=dim,
-                        encoder_hidden_states_dim=768,
-                        num_heads=num_heads,
-                        qkv_bias=True,
-                        class_range=24,
-                        class_interval=4,
-                        attention_mode=attention_mode,
-                    )
-                block.norm_x = WanLayerNorm(dim, transformer.eps, elementwise_affine=True) if norm_input_visual else nn.Identity()
+
+            with init_empty_weights():
+                for block in transformer.blocks:
+                    block.audio_cross_attn = SingleStreamMultiAttention(
+                            dim=dim,
+                            encoder_hidden_states_dim=768,
+                            num_heads=num_heads,
+                            qkv_bias=True,
+                            class_range=24,
+                            class_interval=4,
+                            attention_mode=attention_mode,
+                        )
+                    block.norm_x = WanLayerNorm(dim, transformer.eps, elementwise_affine=True)
             log.info(f"{multitalk_model_type} detected, patching model...")
             transformer.audio_proj = multitalk_model["proj_model"]
             transformer.multitalk_model_type = multitalk_model_type
