@@ -2246,12 +2246,13 @@ class WanVideoSampler:
         
         # UniAnimate
         if unianimate_poses is not None:
-            transformer.dwpose_embedding.to(device, dtype)
-            dwpose_data = unianimate_poses["pose"].to(device, dtype)
-            dwpose_data = torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
-            dwpose_data = transformer.dwpose_embedding(dwpose_data)
-            log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
             if not multitalk_sampling:
+                # Process poses normally for non-multitalk sampling
+                transformer.dwpose_embedding.to(device, dtype)
+                dwpose_data = unianimate_poses["pose"].to(device, dtype)
+                dwpose_data = torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
+                dwpose_data = transformer.dwpose_embedding(dwpose_data)
+                log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
                 if dwpose_data.shape[2] > latent_video_length:
                     log.warning(f"UniAnimate pose embed length {dwpose_data.shape[2]} is longer than the video length {latent_video_length}, truncating")
                     dwpose_data = dwpose_data[:,:, :latent_video_length]
@@ -2260,24 +2261,30 @@ class WanVideoSampler:
                     pad_len = latent_video_length - dwpose_data.shape[2]
                     pad = dwpose_data[:,:,:1].repeat(1,1,pad_len,1,1)
                     dwpose_data = torch.cat([dwpose_data, pad], dim=2)
-            
-            random_ref_dwpose_data = None
-            if image_cond is not None:
-                transformer.randomref_embedding_pose.to(device, dtype)
-                random_ref_dwpose = unianimate_poses.get("ref", None)
-                if random_ref_dwpose is not None:
-                    random_ref_dwpose_data = transformer.randomref_embedding_pose(
-                        random_ref_dwpose.to(device, dtype)
-                        ).unsqueeze(2).to(model["dtype"]) # [1, 20, 104, 60]
-                del random_ref_dwpose
                 
-            unianim_data = {
-                "dwpose": dwpose_data,
-                "random_ref": random_ref_dwpose_data.squeeze(0) if random_ref_dwpose_data is not None else None,
-                "strength": unianimate_poses["strength"],
-                "start_percent": unianimate_poses["start_percent"],
-                "end_percent": unianimate_poses["end_percent"]
-            }
+                random_ref_dwpose_data = None
+                if image_cond is not None:
+                    transformer.randomref_embedding_pose.to(device, dtype)
+                    random_ref_dwpose = unianimate_poses.get("ref", None)
+                    if random_ref_dwpose is not None:
+                        random_ref_dwpose_data = transformer.randomref_embedding_pose(
+                            random_ref_dwpose.to(device, dtype)
+                            ).unsqueeze(2).to(model["dtype"]) # [1, 20, 104, 60]
+                    del random_ref_dwpose
+                    
+                unianim_data = {
+                    "dwpose": dwpose_data,
+                    "random_ref": random_ref_dwpose_data.squeeze(0) if random_ref_dwpose_data is not None else None,
+                    "strength": unianimate_poses["strength"],
+                    "start_percent": unianimate_poses["start_percent"],
+                    "end_percent": unianimate_poses["end_percent"]
+                }
+            else:
+                # For multitalk sampling, we'll process poses per chunk in the loop
+                unianim_data = None
+                log.info(f"UniAnimate poses will be processed per chunk for multitalk sampling")
+                print(f"[UniAnimate Debug] Original pose tensor shape: {unianimate_poses['pose'].shape}")
+                print(f"[UniAnimate Debug] Using multitalk sampling - poses will be processed dynamically")
 
         # FantasyTalking
         audio_proj = multitalk_audio_embedding = None
@@ -3617,18 +3624,82 @@ class WanVideoSampler:
                                 vae.to(offload_device)
                                 pcd_data['render_latent'] = render_latent
 
-                            # unianimate slices
+                            # unianimate poses - process from original images per chunk
                             partial_unianim_data = None
-                            if unianim_data is not None:
-                                print(f"Slicing unianim data for frames {latent_start_idx} to {latent_end_idx}, total dwpose shape: {dwpose_data.shape}")
-                                partial_dwpose = dwpose_data[:, :, latent_start_idx:latent_end_idx]
+                            if unianimate_poses is not None:
+                                print(f"[UniAnimate Debug] Processing UniAnimate poses for audio indices {audio_start_idx} to {audio_end_idx}")
+                                
+                                # Get the original pose images for this audio window
+                                original_pose_images = unianimate_poses["pose"]  # Original tensor
+                                total_pose_frames = original_pose_images.shape[2]
+                                
+                                # Calculate pose frame indices based on audio indices
+                                # Poses align 1:1 with audio frames (both at video frame rate)
+                                pose_start_idx = audio_start_idx
+                                pose_end_idx = min(audio_end_idx, total_pose_frames)
+                                
+                                print(f"[UniAnimate Debug] Extracting pose frames {pose_start_idx} to {pose_end_idx} from total {total_pose_frames}")
+                                print(f"[UniAnimate Debug] Expected frame count for this batch: {frame_num}")
+                                
+                                # Handle bounds checking
+                                if pose_start_idx >= total_pose_frames:
+                                    # Use the last pose frame and repeat it
+                                    pose_chunk = original_pose_images[:, :, -1:].repeat(1, 1, frame_num, 1, 1)
+                                    print(f"[UniAnimate Debug] WARNING: Pose start index {pose_start_idx} exceeds available frames {total_pose_frames}, using last frame")
+                                else:
+                                    # Extract the relevant pose frames
+                                    pose_chunk = original_pose_images[:, :, pose_start_idx:pose_end_idx]
+                                    
+                                    # Pad if needed
+                                    required_frames = frame_num
+                                    actual_frames = pose_chunk.shape[2]
+                                    
+                                    if actual_frames < required_frames:
+                                        # Pad with the last available frame
+                                        pad_frames = required_frames - actual_frames
+                                        if actual_frames > 0:
+                                            last_frame = pose_chunk[:, :, -1:].repeat(1, 1, pad_frames, 1, 1)
+                                            pose_chunk = torch.cat([pose_chunk, last_frame], dim=2)
+                                        else:
+                                            # No frames available, use zeros or skip
+                                            pose_chunk = torch.zeros(1, 1, required_frames, original_pose_images.shape[3], original_pose_images.shape[4])
+                                        print(f"[UniAnimate Debug] Padded pose chunk from {actual_frames} to {required_frames} frames")
+                                    elif actual_frames > required_frames:
+                                        # Truncate to required frames
+                                        pose_chunk = pose_chunk[:, :, :required_frames]
+                                        print(f"[UniAnimate Debug] Truncated pose chunk from {actual_frames} to {required_frames} frames")
+                                
+                                # Now process this chunk the same way as in the highlighted code
+                                transformer.dwpose_embedding.to(device, dtype)
+                                dwpose_data_chunk = pose_chunk.to(device, dtype)
+                                dwpose_data_chunk = torch.cat([dwpose_data_chunk[:,:,:1].repeat(1,1,3,1,1), dwpose_data_chunk], dim=2)
+                                dwpose_data_chunk = transformer.dwpose_embedding(dwpose_data_chunk)
+                                
+                                print(f"[UniAnimate Debug] Processed dwpose chunk shape: {dwpose_data_chunk.shape}")
+                                
+                                # Handle reference pose if needed
+                                random_ref_dwpose_data = None
+                                if image_cond is not None:
+                                    transformer.randomref_embedding_pose.to(device, dtype)
+                                    random_ref_dwpose = unianimate_poses.get("ref", None)
+                                    if random_ref_dwpose is not None:
+                                        random_ref_dwpose_data = transformer.randomref_embedding_pose(
+                                            random_ref_dwpose.to(device, dtype)
+                                            ).unsqueeze(2).to(model["dtype"])
+                                    del random_ref_dwpose
+                                
                                 partial_unianim_data = {
-                                    "dwpose": partial_dwpose,
-                                    "random_ref": unianim_data["random_ref"],
+                                    "dwpose": dwpose_data_chunk,
+                                    "random_ref": random_ref_dwpose_data.squeeze(0) if random_ref_dwpose_data is not None else None,
                                     "strength": unianimate_poses["strength"],
                                     "start_percent": unianimate_poses["start_percent"],
                                     "end_percent": unianimate_poses["end_percent"]
                                 }
+                                
+                                print(f"[UniAnimate Debug] Successfully created partial_unianim_data with dwpose shape: {dwpose_data_chunk.shape}")
+                                
+                                # Clean up
+                                del pose_chunk, dwpose_data_chunk
 
                             # fantasy portrait slices
                             partial_fantasy_portrait_input = None
