@@ -3620,6 +3620,7 @@ class WanVideoSampler:
                             # unianimate slices
                             partial_unianim_data = None
                             if unianim_data is not None:
+                                print(f"Slicing unianim data for frames {latent_start_idx} to {latent_end_idx}, total dwpose shape: {dwpose_data.shape}")
                                 partial_dwpose = dwpose_data[:, :, latent_start_idx:latent_end_idx]
                                 partial_unianim_data = {
                                     "dwpose": partial_dwpose,
