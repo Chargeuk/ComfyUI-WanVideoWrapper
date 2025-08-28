@@ -23,8 +23,13 @@ scheduler_list = [
 ]
 
 def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim=5120, flowedit_args=None, denoise_strength=1.0, sigmas=None,
-					crop_output=True):
-    print(f"****** get_scheduler: called with start_step={start_step}, end_step={end_step}, denoise_strength={denoise_strength}")
+					crop_output=True, keep_number_of_steps=False):
+    print(f"****** get_scheduler: called with start_step={start_step}, end_step={end_step}, denoise_strength={denoise_strength}, keep_number_of_steps={keep_number_of_steps}")
+    original_number_of_steps = steps
+    if (keep_number_of_steps and denoise_strength < 1.0):
+        # increase steps now since they will be reduced later
+        steps = round(steps/denoise_strength)
+    
     timesteps = None
     if 'unipc' in scheduler:
         sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
@@ -110,6 +115,13 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
             raise ValueError("start_step must be 0 when denoise_strength is used")
         original_startStep = start_step
         start_step = steps - int(steps * denoise_strength) - 1
+        if keep_number_of_steps:
+            # ensure that the number of steps (start_step to the end) is equal to original_number_of_steps
+            # by adjusting the start step if necessary
+            current_number_of_steps = len(timesteps) - start_step
+            step_difference = current_number_of_steps - original_number_of_steps
+            start_step += step_difference
+
         log.info(f"get_scheduler: original_startStep={original_startStep}, start_step={start_step}, end_step={end_step}, denoise_strength={denoise_strength}")
 
     # Determine start and end indices for slicing

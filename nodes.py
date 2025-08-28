@@ -2138,7 +2138,7 @@ class WanVideoSampler:
             sample_scheduler = scheduler["sample_scheduler"]
             timesteps = scheduler["timesteps"]
         elif scheduler != "multitalk":
-            sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+            sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas, keep_number_of_steps=True)
             log.info(f"sigmas: {sample_scheduler.sigmas}")
         else:
             timesteps = torch.tensor([1000, 750, 500, 250], device=device)
@@ -3192,7 +3192,7 @@ class WanVideoSampler:
             # FreeInit noise reinitialization (after first iteration)
             if freeinit_args is not None and iter_idx > 0:
                 # restart scheduler for each iteration
-                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas, keep_number_of_steps=True)
 
                 # Re-apply start_step and end_step logic to timesteps and sigmas
                 if end_step != -1:
@@ -3709,7 +3709,7 @@ class WanVideoSampler:
                                 timesteps = [torch.tensor([t], device=device) for t in timesteps]
                                 timesteps = [timestep_transform(t, shift=shift, num_timesteps=1000) for t in timesteps]
                             else:
-                                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+                                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas, keep_number_of_steps=True)
                                 timesteps = [torch.tensor([float(t)], device=device) for t in timesteps] + [torch.tensor([0.], device=device)]
                             
                             # sample videos
