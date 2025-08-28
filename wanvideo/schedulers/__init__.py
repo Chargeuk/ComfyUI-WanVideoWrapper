@@ -6,7 +6,6 @@ from .flowmatch_pusa import FlowMatchSchedulerPusa
 from .flowmatch_res_multistep import FlowMatchSchedulerResMultistep
 from .scheduling_flow_match_lcm import FlowMatchLCMScheduler
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler, DEISMultistepScheduler
-import inspect
 from ...utils import log
 
 scheduler_list = [
@@ -23,7 +22,8 @@ scheduler_list = [
     "multitalk"
 ]
 
-def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim, flowedit_args, denoise_strength, sigmas=None, seed_g=None, crop_output=True):
+def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim=5120, flowedit_args=None, denoise_strength=1.0, sigmas=None,
+					crop_output=True):
     timesteps = None
     if 'unipc' in scheduler:
         sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
@@ -114,6 +114,8 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     start_idx = 0
     end_idx = len(timesteps) - 1
 
+    log.info(f"Total timesteps: {timesteps}")
+
     log.info(f"get_scheduler pre slice: start_step={start_step}, end_step={end_step}, num_timesteps={len(timesteps)}")
     log.info(f"get_scheduler pre slice: timesteps: {timesteps}")
 
@@ -143,22 +145,16 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
 
     # Slice timesteps and sigmas once, based on indices
     timesteps = timesteps[start_idx:end_idx+1]
+    sample_scheduler.full_sigmas = sample_scheduler.sigmas.clone()
     sample_scheduler.sigmas = sample_scheduler.sigmas[start_idx:start_idx+len(timesteps)+1]  # always one longer
     log.info(f"get_scheduler post slice: start_step={start_step}, end_step={end_step}, num_timesteps={len(timesteps)}")
     log.info(f"get_scheduler post slice: timesteps: {timesteps}")
+    log.info(f"Using timesteps: {timesteps}")
 
     if hasattr(sample_scheduler, 'timesteps'):
         sample_scheduler.timesteps = timesteps
 
-    scheduler_step_args = None
-    if seed_g is not None:
-        scheduler_step_args = {"generator": seed_g}
-        step_sig = inspect.signature(sample_scheduler.step)
-        for arg in list(scheduler_step_args.keys()):
-            if arg not in step_sig.parameters:
-                scheduler_step_args.pop(arg)
-
-    return sample_scheduler, timesteps, scheduler_step_args
+    return sample_scheduler, timesteps, start_idx, end_idx
 
 
 def get_scheduler_simple(scheduler, steps, shift, device, transformer_dim, flowedit_args, denoise_strength, sigmas=None):

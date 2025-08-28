@@ -173,7 +173,7 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                 to_load.append((n, m, params))
 
         to_load.sort(reverse=True)
-        pbar = ProgressBar(len(to_load))
+        #pbar = ProgressBar(len(to_load))
         for x in tqdm(to_load, desc="Loading model and applying LoRA weights:", leave=True):
             name = x[0]
             m = x[1]
@@ -207,7 +207,7 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                     except:
                         continue
             m.comfy_patched_weights = True
-            pbar.update(1)
+            #pbar.update(1)
         
         # After LoRA patching, scale weights that have scale_weight but are NOT LoRA patched
         if len(scale_weights) > 0 and not getattr(model, "scale_weights_applied", False):

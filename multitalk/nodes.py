@@ -94,14 +94,8 @@ class MultiTalkModelLoader:
 
     def loadmodel(self, model, base_precision=None):
         from .multitalk import AudioProjModel
-        offload_device = mm.unet_offload_device()
         
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
-        if model_path.endswith(".gguf"):
-            from diffusers.models.model_loading_utils import load_gguf_checkpoint
-            sd = load_gguf_checkpoint(model_path)
-        else:
-            sd = load_torch_file(model_path, device=offload_device, safe_load=True)
 
         audio_window=5
         intermediate_dim=512
@@ -122,8 +116,7 @@ class MultiTalkModelLoader:
 
         multitalk = {
             "proj_model": multitalk_proj_model,
-            "sd": sd,
-            "is_gguf": model_path.endswith(".gguf"),
+            "model_path": model_path,
             "model_type": "InfiniteTalk" if "infinite" in model.lower() else "MultiTalk",
         }
 

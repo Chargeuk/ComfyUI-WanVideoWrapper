@@ -315,13 +315,13 @@ class SingleStreamMultiAttention(SingleStreamAttention):
             return super().forward(x, encoder_hidden_states, shape)
 
         N_t, N_h, N_w = shape
-        x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
-
+        
         x_extra = None
-        if x.shape[0] != encoder_hidden_states.shape[0]:
+        if x.shape[0] * N_t != encoder_hidden_states.shape[0]:
             x_extra = x[:, -N_h * N_w:, :]
             x = x[:, :-N_h * N_w, :]
             N_t = N_t - 1
+        x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
 
         # Query projection
         B, N, C = x.shape

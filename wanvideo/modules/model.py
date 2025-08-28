@@ -28,6 +28,9 @@ from ...cache_methods.cache_methods import TeaCacheState, MagCacheState, EasyCac
 from ...multitalk.multitalk import get_attn_map_with_target
 from ...echoshot.echoshot import rope_apply_z, rope_apply_c, rope_apply_echoshot
 
+from ...MTV.mtv import apply_rotary_emb
+
+
 __all__ = ['WanModel']
 
 from comfy import model_management as mm
@@ -668,6 +671,31 @@ class WanI2VCrossAttention(WanSelfAttention):
 
         return self.o(x)
 
+class MTVCrafterMotionAttention(WanSelfAttention):
+
+    def forward(self, x, mo, pe, grid_sizes, freqs):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L1, C]
+            mo: Motion tokens
+            pe: 4D RoPE
+        """
+        b, n, d = x.size(0), self.num_heads, self.head_dim
+
+        # compute query, key, value
+        q = self.norm_q(self.q(x)).view(b, -1, n, d)
+        k = self.norm_k(self.k(mo)).view(b, n, -1, d)
+        v = self.v(mo).view(b, -1, n, d)
+
+        # compute attention
+        x = attention(
+            q=rope_apply(q, grid_sizes, freqs),
+            k=apply_rotary_emb(k, pe).transpose(1, 2),
+            v=v
+        )
+
+        return self.o(x.flatten(2))
+    
 
 WAN_CROSSATTENTION_CLASSES = {
     't2v_cross_attn': WanT2VCrossAttention,
@@ -689,6 +717,7 @@ class WanAttentionBlock(nn.Module):
                  eps=1e-6,
                  attention_mode='sdpa',
                  rope_func="comfy",
+                 use_motion_attn=False
                  ):
         super().__init__()
         self.dim = out_features
@@ -705,15 +734,19 @@ class WanAttentionBlock(nn.Module):
         self.dense_attention_mode = "sageattn"
 
         self.kv_cache = None
+        self.use_motion_attn = use_motion_attn
 
         # layers
         self.norm1 = WanLayerNorm(out_features, eps)
-        self.self_attn = WanSelfAttention(in_features, out_features, num_heads, qk_norm,
-                                          eps, self.attention_mode)
+        self.self_attn = WanSelfAttention(in_features, out_features, num_heads, qk_norm, eps, self.attention_mode)
+
+        # MTV Crafter motion attn
+        if self.use_motion_attn:
+            self.norm4 = WanLayerNorm(out_features, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
+            self.motion_attn = MTVCrafterMotionAttention(in_features, out_features, num_heads, qk_norm, eps, self.attention_mode)
+
         if cross_attn_type != "no_cross_attn":
-            self.norm3 = WanLayerNorm(
-                out_features, eps,
-                elementwise_affine=True) if cross_attn_norm else nn.Identity()
+            self.norm3 = WanLayerNorm(out_features, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
             self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](in_features,
                                                                           out_features,
                                                                           num_heads,
@@ -790,7 +823,11 @@ class WanAttentionBlock(nn.Module):
         freqs_ip=None,
         adapter_proj=None,
         ip_scale=1.0,
-        reverse_time=False
+        reverse_time=False,
+        mtv_motion_tokens=None,
+        mtv_motion_rotary_emb=None,
+        mtv_strength=1.0,
+        mtv_freqs=None
     ):
         r"""
         Args:
@@ -932,7 +969,8 @@ class WanAttentionBlock(nn.Module):
                 x = self.cross_attn_ffn(x, context, grid_sizes, shift_mlp, scale_mlp, gate_mlp, clip_embed, 
                                         audio_proj, audio_scale, num_latent_frames, nag_params, nag_context, is_uncond, 
                                         multitalk_audio_embedding, x_ref_attn_map, human_num, inner_t, inner_c, cross_freqs,
-                                        adapter_proj=adapter_proj, ip_scale=ip_scale)
+                                        adapter_proj=adapter_proj, ip_scale=ip_scale, 
+                                        mtv_freqs=mtv_freqs, mtv_motion_tokens=mtv_motion_tokens, mtv_motion_rotary_emb=mtv_motion_rotary_emb, mtv_strength=mtv_strength)
         else:
             if self.rope_func == "comfy_chunked":
                 y = self.ffn_chunked(x, shift_mlp, scale_mlp)
@@ -951,18 +989,23 @@ class WanAttentionBlock(nn.Module):
     def cross_attn_ffn(self, x, context, grid_sizes, shift_mlp, scale_mlp, gate_mlp, clip_embed, 
                        audio_proj, audio_scale, num_latent_frames, nag_params, 
                        nag_context, is_uncond, multitalk_audio_embedding, x_ref_attn_map, human_num, 
-                       inner_t, inner_c, cross_freqs, adapter_proj, ip_scale):
-            
-            x = x + self.cross_attn(self.norm3(x), context, grid_sizes, clip_embed=clip_embed, 
-                                    audio_proj=audio_proj, audio_scale=audio_scale, 
-                                    num_latent_frames=num_latent_frames, nag_params=nag_params, nag_context=nag_context, is_uncond=is_uncond, 
+                       inner_t, inner_c, cross_freqs, adapter_proj, ip_scale, mtv_freqs, mtv_motion_tokens, mtv_motion_rotary_emb, mtv_strength):
+
+            x = x + self.cross_attn(self.norm3(x), context, grid_sizes, clip_embed=clip_embed,
+                                    audio_proj=audio_proj, audio_scale=audio_scale,
+                                    num_latent_frames=num_latent_frames, nag_params=nag_params, nag_context=nag_context, is_uncond=is_uncond,
                                     rope_func=self.rope_func, inner_t=inner_t, inner_c=inner_c, cross_freqs=cross_freqs,
                                     adapter_proj=adapter_proj, ip_scale=ip_scale)
-            #multitalk
+            # MultiTalk
             if multitalk_audio_embedding is not None and not isinstance(self, VaceWanAttentionBlock):
                 x_audio = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=multitalk_audio_embedding,
                                             shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
                 x = x + x_audio * audio_scale
+
+            # MTV-Crafter Motion Attention
+            if self.use_motion_attn and mtv_motion_tokens is not None and mtv_motion_rotary_emb is not None:                
+                x_motion = self.motion_attn(self.norm4(x), mtv_motion_tokens, mtv_motion_rotary_emb, grid_sizes, mtv_freqs)
+                x = x + x_motion * mtv_strength
 
             if self.rope_func == "comfy_chunked":
                 y = self.ffn_chunked(x, shift_mlp, scale_mlp)
@@ -1165,6 +1208,7 @@ class WanModel(torch.nn.Module):
                  in_dim_ref_conv=16,
                  add_control_adapter=False,
                  in_dim_control_adapter=24,
+                 use_motion_attn=False
                  ):
         r"""
         Initialize the diffusion model backbone.
@@ -1226,6 +1270,7 @@ class WanModel(torch.nn.Module):
         self.offload_device = offload_device
         self.vace_layers = vace_layers
         self.device = main_device
+        self.patched_linear = False
 
         self.blocks_to_swap = -1
         self.offload_txt_emb = False
@@ -1325,9 +1370,12 @@ class WanModel(torch.nn.Module):
             self.blocks = nn.ModuleList([
                 WanAttentionBlock(cross_attn_type, self.in_features, self.out_features, ffn_dim, ffn2_dim, num_heads,
                                 qk_norm, cross_attn_norm, eps,
-                                attention_mode=self.attention_mode, rope_func=self.rope_func)
-                for _ in range(num_layers)
+                                attention_mode=self.attention_mode, rope_func=self.rope_func, use_motion_attn=(i % 4 == 0 and use_motion_attn))
+                for i in range(num_layers)
             ])
+        #MTV Crafter
+        if use_motion_attn:
+            self.pad_motion_tokens = torch.zeros(1, 1, 2048)
 
         # head
         self.head = Head(dim, out_dim, patch_size, eps)
@@ -1410,7 +1458,10 @@ class WanModel(torch.nn.Module):
         return block_mask
 
     def block_swap(self, blocks_to_swap, offload_txt_emb=False, offload_img_emb=False, vace_blocks_to_swap=None, prefetch_blocks=0, block_swap_debug=False):
-        log.info(f"Swapping {blocks_to_swap + 1} transformer blocks")
+        # Clamp blocks_to_swap to valid range
+        blocks_to_swap = max(0, min(blocks_to_swap, len(self.blocks)))
+        
+        log.info(f"Swapping {blocks_to_swap} transformer blocks")
         self.blocks_to_swap = blocks_to_swap
         self.prefetch_blocks = prefetch_blocks
         self.block_swap_debug = block_swap_debug
@@ -1420,11 +1471,14 @@ class WanModel(torch.nn.Module):
 
         total_offload_memory = 0
         total_main_memory = 0
+        
+        # Calculate the index where swapping starts
+        swap_start_idx = len(self.blocks) - blocks_to_swap
        
         for b, block in tqdm(enumerate(self.blocks), total=len(self.blocks), desc="Initializing block swap"):
             block_memory = get_module_memory_mb(block)
             
-            if b > self.blocks_to_swap:
+            if b < swap_start_idx:
                 block.to(self.main_device)
                 total_main_memory += block_memory
             else:
@@ -1435,12 +1489,17 @@ class WanModel(torch.nn.Module):
             vace_blocks_to_swap = 1
 
         if vace_blocks_to_swap > 0 and self.vace_layers is not None:
+            # Clamp vace_blocks_to_swap to valid range
+            vace_blocks_to_swap = max(0, min(vace_blocks_to_swap, len(self.vace_blocks)))
             self.vace_blocks_to_swap = vace_blocks_to_swap
+            
+            # Calculate the index where VACE swapping starts
+            vace_swap_start_idx = len(self.vace_blocks) - vace_blocks_to_swap
 
             for b, block in tqdm(enumerate(self.vace_blocks), total=len(self.vace_blocks), desc="Initializing vace block swap"):
                 block_memory = get_module_memory_mb(block)
                 
-                if b > self.vace_blocks_to_swap:
+                if b < vace_swap_start_idx:
                     block.to(self.main_device)
                     total_main_memory += block_memory
                 else:
@@ -1480,9 +1539,10 @@ class WanModel(torch.nn.Module):
         
         hints = []
         current_c = c
+        vace_swap_start_idx = len(self.vace_blocks) - self.vace_blocks_to_swap if self.vace_blocks_to_swap > 0 else len(self.vace_blocks)
         
         for b, block in enumerate(self.vace_blocks):
-            if b <= self.vace_blocks_to_swap and self.vace_blocks_to_swap >= 0:
+            if b >= vace_swap_start_idx and self.vace_blocks_to_swap > 0:
                 block.to(self.main_device)
                 
             if b == 0:
@@ -1495,13 +1555,13 @@ class WanModel(torch.nn.Module):
             # Store skip connection
             c_skip = block.after_proj(c_processed)
             hints.append(c_skip.to(
-                self.offload_device if self.vace_blocks_to_swap != -1 else self.main_device, 
+                self.offload_device if self.vace_blocks_to_swap > 0 else self.main_device, 
                 non_blocking=self.use_non_blocking
             ))
             
             current_c = c_processed
             
-            if b <= self.vace_blocks_to_swap and self.vace_blocks_to_swap >= 0:
+            if b >= vace_swap_start_idx and self.vace_blocks_to_swap > 0:
                 block.to(self.offload_device, non_blocking=self.use_non_blocking)
 
         return hints
@@ -1543,8 +1603,14 @@ class WanModel(torch.nn.Module):
         inner_t=None,
         standin_input=None,
         fantasy_portrait_input=None,
+        phantom_ref=None,
         reverse_time=False,
-        ntk_alphas = [1.0, 1.0, 1.0]
+        ntk_alphas = [1.0, 1.0, 1.0],
+        mtv_motion_tokens=None,
+        mtv_motion_rotary_emb=None,
+        mtv_freqs=None,
+        mtv_strength=1.0,
+        
     ):
         r"""
         Forward pass through the diffusion model
@@ -1570,6 +1636,11 @@ class WanModel(torch.nn.Module):
         # Stand-In only used on first positive pass, then cached in kv_cache
         if is_uncond or current_step > 0: 
             standin_input = None
+        
+        # MTV Crafter motion projection
+        if mtv_motion_tokens is not None:
+            bs, motion_seq_len =  mtv_motion_tokens.shape[0], mtv_motion_tokens.shape[1]
+            mtv_motion_tokens = torch.cat([mtv_motion_tokens, self.pad_motion_tokens.to(mtv_motion_tokens).expand(bs, motion_seq_len, -1)], dim=-1)
 
         # Fantasy Portrait
         adapter_proj = ip_scale = None
@@ -1656,6 +1727,15 @@ class WanModel(torch.nn.Module):
             seq_len += fun_ref.size(1)
             F += 1
             x = [torch.concat([_fun_ref.unsqueeze(0), u], dim=1) for _fun_ref, u in zip(fun_ref, x)]
+
+        if phantom_ref is not None:
+            phantom_ref_frames = phantom_ref.size(1)
+            phantom_ref = self.original_patch_embedding(phantom_ref.unsqueeze(0).to(torch.float32)).flatten(2).transpose(1, 2).to(x[0].dtype)
+            grid_sizes = torch.stack([torch.tensor([u[0] + phantom_ref_frames, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
+            phantom_ref_seq_len = phantom_ref.size(1)
+            seq_len += phantom_ref_seq_len
+            F += phantom_ref_frames
+            x = [torch.concat([u, phantom_ref.unsqueeze(0)], dim=1) for phantom_ref, u in zip(phantom_ref, x)]
 
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len
@@ -2010,7 +2090,11 @@ class WanModel(torch.nn.Module):
                 e_ip=e0_ip if x_ip is not None else None,
                 adapter_proj=adapter_proj,
                 ip_scale=ip_scale,
-                reverse_time=reverse_time
+                reverse_time=reverse_time,
+                mtv_motion_tokens=mtv_motion_tokens,
+                mtv_motion_rotary_emb=mtv_motion_rotary_emb,
+                mtv_strength=mtv_strength,
+                mtv_freqs=mtv_freqs
             )
             
             if vace_data is not None:
@@ -2050,20 +2134,21 @@ class WanModel(torch.nn.Module):
             # Asynchronous block offloading with CUDA streams and events
             cuda_stream = mm.get_offload_stream(device)
             events = [torch.cuda.Event() for _ in self.blocks]
+            swap_start_idx = len(self.blocks) - self.blocks_to_swap if self.blocks_to_swap > 0 else len(self.blocks)
 
             for b, block in enumerate(self.blocks):
                 # Prefetch blocks if enabled
                 if self.prefetch_blocks > 0:
                     for prefetch_offset in range(1, self.prefetch_blocks + 1):
                         prefetch_idx = b + prefetch_offset
-                        if prefetch_idx < len(self.blocks) and self.blocks_to_swap >= 0 and prefetch_idx <= self.blocks_to_swap:
+                        if prefetch_idx < len(self.blocks) and self.blocks_to_swap > 0 and prefetch_idx >= swap_start_idx:
                             with torch.cuda.stream(cuda_stream):
                                 self.blocks[prefetch_idx].to(self.main_device, non_blocking=self.use_non_blocking)
                                 events[prefetch_idx].record(cuda_stream)
                 if self.block_swap_debug:
                     transfer_start = time.perf_counter()
                 # Wait for block to be ready
-                if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
+                if b >= swap_start_idx and self.blocks_to_swap > 0:
                     if self.prefetch_blocks > 0:
                         if not events[b].query():
                             events[b].synchronize()
@@ -2082,7 +2167,7 @@ class WanModel(torch.nn.Module):
                     compute_end = time.perf_counter()
                     compute_time = compute_end - compute_start
                     to_cpu_transfer_start = time.perf_counter()
-                if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
+                if b >= swap_start_idx and self.blocks_to_swap > 0:
                     block.to(self.offload_device, non_blocking=self.use_non_blocking)
                 if self.block_swap_debug:
                     to_cpu_transfer_end = time.perf_counter()
@@ -2095,9 +2180,6 @@ class WanModel(torch.nn.Module):
                 #controlnet
                 if (controlnet is not None) and (b % controlnet["controlnet_stride"] == 0) and (b // controlnet["controlnet_stride"] < len(controlnet["controlnet_states"])):
                     x[:, :x_len] += controlnet["controlnet_states"][b // controlnet["controlnet_stride"]].to(x) * controlnet["controlnet_weight"]
-
-                if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
-                    block.to(self.offload_device, non_blocking=self.use_non_blocking)
 
             if self.enable_teacache and (self.teacache_start_step <= current_step <= self.teacache_end_step) and pred_id is not None:
                 self.teacache_state.update(
@@ -2131,9 +2213,14 @@ class WanModel(torch.nn.Module):
             )
                 
         if self.ref_conv is not None and fun_ref is not None:
-            full_ref_length = fun_ref.size(1)
-            x = x[:, full_ref_length:]
+            fun_ref_length = fun_ref.size(1)
+            x = x[:, fun_ref_length:]
             grid_sizes = torch.stack([torch.tensor([u[0] - 1, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
+        
+        if phantom_ref is not None:
+            phantom_ref_length = phantom_ref.size(1)
+            x = x[:, :-phantom_ref_length]
+            grid_sizes = torch.stack([torch.tensor([u[0] - phantom_ref_frames, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
 
         if attn_cond is not None:
             x = x[:, :x_len]
