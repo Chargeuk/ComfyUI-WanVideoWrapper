@@ -24,6 +24,7 @@ scheduler_list = [
 
 def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim=5120, flowedit_args=None, denoise_strength=1.0, sigmas=None,
 					crop_output=True):
+    print(f"****** get_scheduler: called with start_step={start_step}, end_step={end_step}, denoise_strength={denoise_strength}")
     timesteps = None
     if 'unipc' in scheduler:
         sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
@@ -104,6 +105,7 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     if end_step != -1 and start_step >= end_step:
         raise ValueError("start_step must be less than end_step")
     if denoise_strength < 1.0:
+        log.info(f"get_scheduler: start_step={start_step}, end_step={end_step}, denoise_strength={denoise_strength} - check if allowed")
         if start_step != 0:
             raise ValueError("start_step must be 0 when denoise_strength is used")
         original_startStep = start_step

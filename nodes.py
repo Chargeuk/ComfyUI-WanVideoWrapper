@@ -2148,12 +2148,6 @@ class WanVideoSampler:
         if end_step != -1 and start_step >= end_step:
             raise ValueError("start_step must be less than end_step")
 
-        if denoise_strength < 1.0:
-            if start_step != 0:
-                raise ValueError("start_step must be 0 when denoise_strength is used")
-            start_step = steps - int(steps * denoise_strength) - 1
-            add_noise_to_samples = True #for now to not break old workflows
-
         scheduler_step_args = {"generator": seed_g}
         step_sig = inspect.signature(sample_scheduler.step)
         for arg in list(scheduler_step_args.keys()):
