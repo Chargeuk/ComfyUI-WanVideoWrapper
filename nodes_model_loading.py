@@ -965,6 +965,7 @@ class WanVideoModelLoader:
                 "fantasytalking_model": ("FANTASYTALKINGMODEL", {"default": None, "tooltip": "FantasyTalking model https://github.com/Fantasy-AMAP"}),
                 "multitalk_model": ("MULTITALKMODEL", {"default": None, "tooltip": "Multitalk model"}),
                 "fantasyportrait_model": ("FANTASYPORTRAITMODEL", {"default": None, "tooltip": "FantasyPortrait model"}),
+                "passthrough": ("BOOLEAN", {"default": False, "tooltip": "The node will do nothing and return a None value"}),
             }
         }
 
@@ -975,7 +976,11 @@ class WanVideoModelLoader:
 
     def loadmodel(self, model, base_precision, load_device,  quantization,
                   compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, vram_management_args=None, extra_model=None, vace_model=None,
-                  fantasytalking_model=None, multitalk_model=None, fantasyportrait_model=None):
+                  fantasytalking_model=None, multitalk_model=None, fantasyportrait_model=None,
+                  passthrough=False):
+        if passthrough:
+            return (None,)
+
         assert not (vram_management_args is not None and block_swap_args is not None), "Can't use both block_swap_args and vram_management_args at the same time"
         if vace_model is not None:
             extra_model = vace_model
