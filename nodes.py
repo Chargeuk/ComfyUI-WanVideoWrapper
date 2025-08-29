@@ -4046,6 +4046,12 @@ class WanVideoSampler:
                                     original_images = torch.cat([original_images, last_frame.repeat(1, 1, miss_length, 1, 1)], dim=2)
 
                         gen_video_samples = torch.cat(gen_video_list, dim=1)
+                        
+                        # Ensure we have exactly the target number of frames
+                        if gen_video_samples.shape[1] > total_frames:
+                            original_frame_count = gen_video_samples.shape[1]
+                            gen_video_samples = gen_video_samples[:, :total_frames]
+                            log.info(f"Truncated generated video from {original_frame_count} frames to {total_frames} frames to match audio length")
 
                         if force_offload:
                             if not model["auto_cpu_offload"]:
