@@ -316,6 +316,18 @@ offload_device = mm.unet_offload_device()
 VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
 
+try:
+    from .gguf.gguf import GGUFParameter
+except:
+    pass
+
+class MetaParameter(torch.nn.Parameter):
+    def __new__(cls, dtype, quant_type=None):
+        data = torch.empty(0, dtype=dtype)
+        self = torch.nn.Parameter(data, requires_grad=False)
+        self.quant_type = quant_type
+        return self
+
 def offload_transformer(transformer):
     for block in transformer.blocks:
         block.kv_cache = None
@@ -335,6 +347,9 @@ def offload_transformer(transformer):
             if param.data.is_floating_point():
                 meta_param = torch.nn.Parameter(torch.empty_like(param.data, device='meta'), requires_grad=False)
                 setattr(module, attr_name, meta_param)
+            elif isinstance(param.data, GGUFParameter):
+                quant_type = getattr(param, 'quant_type', None)
+                setattr(module, attr_name, MetaParameter(param.data.dtype, quant_type))
             else:
                 pass
     else:
@@ -3699,9 +3714,9 @@ class WanVideoSampler:
                                 vae.model.clear_cache()
                                 vae.to(offload_device)
 
-                                motion_frame_index = cur_motion_frames_num if mode == "multitalk" else 1
+                                #motion_frame_index = cur_motion_frames_latent_num if mode == "infinitetalk" else 1
                                 msk = torch.zeros(4, latent_frame_num, lat_h, lat_w, device=device, dtype=dtype)
-                                msk[:, :motion_frame_index] = 1
+                                msk[:, :1] = 1
                                 y = torch.cat([msk, y]) # 4+C T H W
                                 mm.soft_empty_cache()
                             else:

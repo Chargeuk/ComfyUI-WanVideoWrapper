@@ -795,7 +795,7 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
             weights = torch.from_numpy(tensor.data.copy()).to(load_device)
             sd[tensor.name] = GGUFParameter(weights, quant_type=tensor.tensor_type) if is_gguf_quant else weights
         sd.update(unianimate_sd)
-        del unianimate_sd
+        del all_tensors, unianimate_sd
 
         if not getattr(transformer, "gguf_patched", False):
             transformer = _replace_with_gguf_linear(
@@ -896,6 +896,7 @@ def patch_stand_in_lora(transformer, lora_sd, transformer_load_device, base_dtyp
 
 def add_lora_weights(patcher, lora, base_dtype, merge_loras=False):
     unianimate_sd = None
+    control_lora=False
     #spacepxl's control LoRA patch
     for l in lora:
         log.info(f"Loading LoRA: {l['name']} with strength: {l['strength']}")
@@ -922,7 +923,7 @@ def add_lora_weights(patcher, lora, base_dtype, merge_loras=False):
         # Filter out any LoRA keys containing 'img' if the base model state_dict has no 'img' keys
         #if not any('img' in k for k in sd.keys()):
         #    lora_sd = {k: v for k, v in lora_sd.items() if 'img' not in k}
-        control_lora=False
+        
         if "diffusion_model.patch_embedding.lora_A.weight" in lora_sd:
             control_lora = True
         #stand-in LoRA patch
