@@ -2053,6 +2053,7 @@ class WanVideoSampler:
                 "end_step": ("INT", {"default": -1, "min": -1, "max": 10000, "step": 1, "tooltip": "End step for the sampling, -1 means full sampling, otherwise samples only until this step"}),
                 "add_noise_to_samples": ("BOOLEAN", {"default": False, "tooltip": "Add noise to the samples before sampling, needed for video2video sampling when starting from clean video"}),
                 "passthrough": ("BOOLEAN", {"default": False, "tooltip": "Pass the samples through without modification"}),
+                "denoise_latents": ("BOOLEAN", {"default": False, "tooltip": "Denoise the latents before VAE decoding in multitalk mode for improved quality"}),
             }
         }
 
@@ -2065,7 +2066,7 @@ class WanVideoSampler:
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None, 
         cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None, 
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False,
-        passthrough=False):
+        passthrough=False, denoise_latents=False):
 
         if passthrough:
             return (samples, samples,)
@@ -3942,9 +3943,41 @@ class WanVideoSampler:
                                 else:
                                     latent[:, :cur_motion_frames_latent_num] = latent_motion_frames
 
-                            del noise, latent_motion_frames
+                            del noise
                             if offload:
                                 offload_transformer(transformer)
+                            
+                            # Optional denoising step before VAE decoding
+                            if denoise_latents:
+                                with torch.no_grad():
+                                    # Calculate denoised latents using the final timestep
+                                    final_timestep = timesteps[-1] if len(timesteps) > 0 else torch.tensor([0.], device=device)
+                                    latent_model_input = latent.to(device)
+                                    
+                                    # Apply motion frame injection for denoising step
+                                    if mode == "infinitetalk":
+                                        # Save motion frames before deletion
+                                        saved_motion_frames = latent_motion_frames.to(latent.dtype).to(device)
+                                        latent_model_input[:, :cur_motion_frames_latent_num] = saved_motion_frames
+                                    
+                                    # Run final prediction to get denoised result
+                                    final_cfg = cfg[-1] if isinstance(cfg, list) else cfg
+                                    final_noise_pred, _ = predict_with_cfg(
+                                        latent_model_input, final_cfg, positive, text_embeds["negative_prompt_embeds"], 
+                                        final_timestep, len(timesteps)-1, y, clip_embeds, control_latents, window_vace_data, 
+                                        partial_unianim_data, audio_proj, control_camera_latents, add_cond,
+                                        cache_state=self.cache_state, multitalk_audio_embeds=audio_embs, 
+                                        fantasy_portrait_input=partial_fantasy_portrait_input)
+                                    
+                                    # Calculate denoised latents using the same formula as normal inference
+                                    denoised_latents = (latent_model_input.to(device) - final_noise_pred.to(device) * final_timestep.to(device) / 1000).detach()
+                                    latent = denoised_latents
+                                    
+                                    del final_noise_pred, latent_model_input, denoised_latents
+                                    if mode == "infinitetalk":
+                                        del saved_motion_frames
+                            
+                            del latent_motion_frames
                             vae.to(device)
                             videos = vae.decode(latent.unsqueeze(0).to(device, vae.dtype), device=device, tiled=tiled_vae, pbar=False)[0].cpu()
                             vae.model.clear_cache()
