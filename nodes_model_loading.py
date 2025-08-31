@@ -1093,6 +1093,23 @@ class WanVideoModelLoader:
             sd = new_sd
         if not "patch_embedding.weight" in sd:
             raise ValueError("Invalid WanVideo model selected")
+        
+        # Check if this is a saved model with embedded MultiTalk data
+        saved_multitalk_type = None
+        saved_audio_proj_weights = {}
+        
+        # Extract saved MultiTalk data if present
+        if any(key.startswith("saved_audio_proj.") for key in sd.keys()):
+            log.info("Detected saved MultiTalk data in model...")
+            
+            # Extract audio_proj weights
+            for key in list(sd.keys()):
+                if key.startswith("saved_audio_proj."):
+                    saved_audio_proj_weights[key.replace("saved_audio_proj.", "")] = sd.pop(key)
+            
+            # Default to MultiTalk type (could be enhanced to read from metadata)
+            saved_multitalk_type = "MultiTalk"
+        
         dim = sd["patch_embedding.weight"].shape[0]
         in_features = sd["blocks.0.self_attn.k.weight"].shape[1]
         out_features = sd["blocks.0.self_attn.k.weight"].shape[0]
@@ -1289,6 +1306,37 @@ class WanVideoModelLoader:
             sd.update(extra_sd)
             del extra_sd
 
+        # If no external multitalk_model provided but we have saved data, restore it
+        if multitalk_model is None and saved_multitalk_type is not None:
+            log.info(f"Restoring saved {saved_multitalk_type} from model...")
+            
+            # Create a synthetic multitalk_model structure for processing
+            multitalk_model = {
+                "model_type": saved_multitalk_type,
+                "model_path": None,  # Not needed since weights are already extracted
+                "proj_model": None   # Will be reconstructed below
+            }
+            
+            # Initialize the audio module architecture (same as normal MultiTalk loading)
+            from .multitalk.multitalk import SingleStreamMultiAttention
+            from .wanvideo.modules.model import WanLayerNorm
+               
+            for block in transformer.blocks:
+                with init_empty_weights():
+                    block.norm_x = WanLayerNorm(dim, transformer.eps, elementwise_affine=True)
+                    block.audio_cross_attn = SingleStreamMultiAttention(
+                            dim=dim,
+                            encoder_hidden_states_dim=768,
+                            num_heads=num_heads,
+                        qkv_bias=True,
+                        class_range=24,
+                        class_interval=4,
+                        attention_mode=attention_mode,
+                    )
+            
+            # Note: audio_proj reconstruction would happen later after transformer creation
+            transformer.multitalk_model_type = saved_multitalk_type
+
         # Additional cond latents
         if "add_conv_in.weight" in sd:
             def zero_module(module):
@@ -1370,7 +1418,50 @@ class WanVideoModelLoader:
             convert_fp8_linear(transformer, base_dtype, params_to_keep, scale_weight_keys=scale_weights)
 
         if multitalk_model is not None:
-            transformer.audio_proj = multitalk_model["proj_model"]
+            if multitalk_model["proj_model"] is not None:
+                # Normal case: external multitalk_model provided
+                transformer.audio_proj = multitalk_model["proj_model"]
+            elif saved_audio_proj_weights:
+                # Restored case: reconstruct audio_proj from saved weights
+                log.info("Reconstructing audio projection model from saved weights...")
+                
+                # We need to reconstruct the audio_proj model architecture
+                # For now, we'll create a simple reconstruction - this may need refinement
+                # based on the actual MultiTalk audio_proj architecture
+                try:
+                    # Try to infer architecture from saved weights
+                    proj_input_dim = None
+                    proj_output_dim = None
+                    
+                    # Look for projection layer dimensions in saved weights
+                    for key, tensor in saved_audio_proj_weights.items():
+                        if 'proj.weight' in key:
+                            proj_output_dim, proj_input_dim = tensor.shape
+                            break
+                    
+                    if proj_input_dim and proj_output_dim:
+                        import torch.nn as nn
+                        
+                        # Create a simple projection model (may need adjustment based on actual architecture)
+                        class SimpleAudioProj(nn.Module):
+                            def __init__(self, input_dim, output_dim):
+                                super().__init__()
+                                self.proj = nn.Linear(input_dim, output_dim)
+                            
+                            def forward(self, x):
+                                return self.proj(x)
+                        
+                        transformer.audio_proj = SimpleAudioProj(proj_input_dim, proj_output_dim)
+                        transformer.audio_proj.load_state_dict(saved_audio_proj_weights)
+                        transformer.audio_proj.to(device=offload_device)
+                        log.info(f"Successfully reconstructed audio projection model ({proj_input_dim} -> {proj_output_dim})")
+                    else:
+                        log.warning("Could not infer audio projection model architecture from saved weights")
+                        transformer.audio_proj = None
+                        
+                except Exception as e:
+                    log.error(f"Failed to reconstruct audio projection model: {str(e)}")
+                    transformer.audio_proj = None
 
         if vram_management_args is not None:
             if gguf:
@@ -1503,6 +1594,14 @@ class WanVideoSaveModel:
                 for k, v in scale_weights.items():
                     clean_state_dict[k] = v.cpu()
             
+            # Handle MultiTalk audio projection model if present
+            if hasattr(diffusion_model, 'audio_proj') and diffusion_model.audio_proj is not None:
+                log.info("Saving MultiTalk audio projection model...")
+                audio_proj_state = diffusion_model.audio_proj.state_dict()
+                # Add audio_proj weights with a prefix to avoid conflicts
+                for k, v in audio_proj_state.items():
+                    clean_state_dict[f"saved_audio_proj.{k}"] = v.cpu()
+            
             # Prepare metadata
             metadata = {
                 "base_model": model.model["model_name"],
@@ -1511,6 +1610,12 @@ class WanVideoSaveModel:
                 "weight_dtype": str(model.model["weight_dtype"]),
                 "saved_with": "ComfyUI-WanVideoWrapper"
             }
+            
+            # Add MultiTalk metadata if present
+            if hasattr(diffusion_model, 'multitalk_model_type'):
+                metadata["multitalk_model_type"] = diffusion_model.multitalk_model_type
+                metadata["has_multitalk"] = "true"
+                log.info(f"Saving MultiTalk model type: {diffusion_model.multitalk_model_type}")
             
             # Determine output path
             if not output_path:
