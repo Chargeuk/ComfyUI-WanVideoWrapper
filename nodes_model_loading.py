@@ -1216,6 +1216,18 @@ class WanVideoModelLoader:
             transformer = WanModel(**TRANSFORMER_CONFIG)
         transformer.eval()
 
+        # Check for UniAnimate weights in saved model and patch architecture if needed
+        if any("dwpose_embedding" in key for key in sd.keys()):
+            log.info("UniAnimate weights detected in saved model, applying architecture patches...")
+            from .unianimate.nodes import update_transformer
+            
+            # Create a copy of sd for update_transformer to avoid modifying the original
+            sd_copy = {k: v for k, v in sd.items() if "dwpose_embedding" in k or "randomref_embedding_pose" in k}
+            transformer, unianimate_sd = update_transformer(transformer, sd_copy)
+            
+            # The original sd still contains the UniAnimate weights for normal loading
+            # No need to update sd since the weights are already there
+
         #ReCamMaster
         if "blocks.0.cam_encoder.weight" in sd:
             log.info("ReCamMaster model detected, patching model...")

@@ -44,12 +44,19 @@ def update_transformer(transformer, state_dict):
                 )
     unianimate_sd = {}
     state_dict_new = {}
+    found_dwpose = False
     for key in list(state_dict.keys()):
         if "dwpose_embedding" in key:
+            print(f"Found dwpose_embedding in state_dict: {key}")
             state_dict_new[key] = state_dict.pop(key)
+            found_dwpose = True
+    if not found_dwpose:
+        print("dwpose_embedding not found in state_dict")
+        
     unianimate_sd.update(state_dict_new)
     for key in list(state_dict.keys()):
         if "randomref_embedding_pose" in key:
+            print(f"Found randomref_embedding_pose in state_dict: {key}")
             state_dict_new[key] = state_dict.pop(key)
     unianimate_sd.update(state_dict_new)
     del state_dict_new
