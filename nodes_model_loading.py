@@ -1643,17 +1643,17 @@ class WanVideoSaveModel:
             state_dict = diffusion_model.state_dict()
             
             # Handle fp8 quantization and scale weights if present
-            if hasattr(model.model, 'scale_weights') and model.model["scale_weights"]:
-                scale_weights = model.model["scale_weights"]
+            if hasattr(model, 'get') and model.get("scale_weights"):
+                scale_weights = model["scale_weights"]
                 for k, v in scale_weights.items():
                     state_dict[k] = v.cpu()
             
             # Prepare metadata
             metadata = {
-                "base_model": model.model.get("model_name", "unknown"),
-                "quantization": model.model.get("quantization", "disabled"),
-                "base_dtype": str(model.model.get("base_dtype", "unknown")),
-                "weight_dtype": str(model.model.get("weight_dtype", "unknown")),
+                "base_model": model.get("model_name", "unknown"),
+                "quantization": model.get("quantization", "disabled"),
+                "base_dtype": str(model.get("base_dtype", "unknown")),
+                "weight_dtype": str(model.get("weight_dtype", "unknown")),
                 "saved_with": "ComfyUI-WanVideoWrapper"
             }
             
