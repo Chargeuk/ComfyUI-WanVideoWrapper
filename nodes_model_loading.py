@@ -1468,8 +1468,11 @@ class WanVideoLoraMerger:
         
         from safetensors.torch import save_file
         import os
+        import torch
         
-        merged_sd = {}
+        # First pass: collect all LoRAs and detect ranks
+        all_loras = []
+        ranks = set()
         
         for l in lora:
             if l["strength"] == 0:
@@ -1478,13 +1481,51 @@ class WanVideoLoraMerger:
             lora_sd = load_torch_file(l["path"], safe_load=True)
             lora_sd = standardize_lora_key_format(lora_sd)
             
-            strength = l["strength"]
-            
+            # Detect rank from the first down weight
+            rank = None
             for key, value in lora_sd.items():
-                if key in merged_sd:
-                    merged_sd[key] = merged_sd[key] + (value * strength)
+                if any(pattern in key.lower() for pattern in ["lora_down", ".down.", "_down"]):
+                    rank = value.shape[0]
+                    break
+            
+            if rank is not None:
+                ranks.add(rank)
+                all_loras.append((l, lora_sd, rank))
+        
+        if len(ranks) <= 1:
+            # All same rank, proceed normally
+            log.info(f"All LoRAs have the same rank: {sorted(ranks)}. Proceeding without scaling.")
+            merged_sd = {}
+            for l, lora_sd, rank in all_loras:
+                strength = l["strength"]
+                for key, value in lora_sd.items():
+                    if key in merged_sd:
+                        merged_sd[key] = merged_sd[key] + (value * strength)
+                    else:
+                        merged_sd[key] = value * strength
+        else:
+            # Multiple ranks detected - scale all to highest rank
+            target_rank = max(ranks)
+            log.info(f"Multiple ranks detected: {sorted(ranks)}. Scaling all to highest rank {target_rank}")
+            
+            merged_sd = {}
+            for l, lora_sd, current_rank in all_loras:
+                strength = l["strength"]
+                log.info(f"Processing LoRA '{l.get('name', 'unknown')}' with strength {strength} and rank {current_rank} to {target_rank}")
+                if current_rank == target_rank:
+                    # No conversion needed
+                    converted_sd = lora_sd
+                    log.info(f"No need to scale LoRA '{l.get('name', 'unknown')}' from rank {current_rank} to {target_rank}, already converted.")
                 else:
-                    merged_sd[key] = value * strength
+                    # Scale up to target rank
+                    converted_sd = self.scale_lora_to_rank(lora_sd, current_rank, target_rank)
+                    log.info(f"Scaled LoRA '{l.get('name', 'unknown')}' from rank {current_rank} to {target_rank}")
+                
+                for key, value in converted_sd.items():
+                    if key in merged_sd:
+                        merged_sd[key] = merged_sd[key] + (value * strength)
+                    else:
+                        merged_sd[key] = value * strength
         
         # Save to loras folder
         output_path = os.path.join(
@@ -1494,6 +1535,38 @@ class WanVideoLoraMerger:
         log.info(f"Merged LoRA saved to: {output_path}")
         
         return {}
+    
+    def scale_lora_to_rank(self, lora_sd, current_rank, target_rank):
+        """Scale LoRA weights from current_rank to target_rank by padding with zeros"""
+        import torch
+        converted_sd = {}
+        
+        for key, value in lora_sd.items():
+            if any(pattern in key.lower() for pattern in ["lora_down", ".down.", "_down"]):
+                # Down weights: pad rank dimension (first dimension)
+                if current_rank < target_rank:
+                    padding_size = target_rank - current_rank
+                    padding = torch.zeros(padding_size, *value.shape[1:], 
+                                        dtype=value.dtype, device=value.device)
+                    converted_sd[key] = torch.cat([value, padding], dim=0)
+                else:
+                    converted_sd[key] = value
+                    
+            elif any(pattern in key.lower() for pattern in ["lora_up", ".up.", "_up"]):
+                # Up weights: pad rank dimension (last dimension)
+                if current_rank < target_rank:
+                    padding_size = target_rank - current_rank
+                    padding = torch.zeros(*value.shape[:-1], padding_size,
+                                        dtype=value.dtype, device=value.device)
+                    converted_sd[key] = torch.cat([value, padding], dim=-1)
+                else:
+                    converted_sd[key] = value
+                    
+            else:
+                # Other weights (alpha, bias, etc.) remain unchanged
+                converted_sd[key] = value
+        
+        return converted_sd
 
 class WanVideoSaveModel:
     @classmethod
