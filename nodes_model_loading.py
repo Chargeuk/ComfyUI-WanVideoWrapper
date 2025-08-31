@@ -1228,6 +1228,42 @@ class WanVideoModelLoader:
             # The original sd still contains the UniAnimate weights for normal loading
             # No need to update sd since the weights are already there
 
+        # Check for MultiTalk weights in saved model and patch architecture if needed
+        if any("audio_proj." in key for key in sd.keys()):
+            log.info("MultiTalk weights detected in saved model, applying architecture patches...")
+            from .multitalk.multitalk import SingleStreamMultiAttention, AudioProjModel
+            from .wanvideo.modules.model import WanLayerNorm
+            
+            # Add audio_cross_attn and norm_x to each block
+            for block in transformer.blocks:
+                with init_empty_weights():
+                    block.norm_x = WanLayerNorm(dim, transformer.eps, elementwise_affine=True)
+                    block.audio_cross_attn = SingleStreamMultiAttention(
+                        dim=dim,
+                        encoder_hidden_states_dim=768,
+                        num_heads=num_heads,
+                        qkv_bias=True,
+                        class_range=24,
+                        class_interval=4,
+                        attention_mode=attention_mode,
+                    )
+            
+            # Add audio_proj to transformer
+            with init_empty_weights():
+                transformer.audio_proj = AudioProjModel(
+                    seq_len=5,
+                    seq_len_vf=12,
+                    blocks=12,
+                    channels=768,
+                    intermediate_dim=512,
+                    output_dim=768,
+                    context_tokens=32,
+                    norm_output_audio=True,
+                )
+            
+            # Determine model type from weights (could be enhanced with better detection)
+            transformer.multitalk_model_type = "InfiniteTalk"  # Default, could be "MultiTalk"
+
         #ReCamMaster
         if "blocks.0.cam_encoder.weight" in sd:
             log.info("ReCamMaster model detected, patching model...")
