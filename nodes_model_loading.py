@@ -1475,7 +1475,14 @@ class WanVideoLoraMerger:
         ranks = set()
         
         for l in lora:
+            # Exclude LoRAs with strength 0
             if l["strength"] == 0:
+                continue
+
+            # Exclude LoRAs whose lowercase name starts with "unianimate"
+            lora_name = l.get("name", "").lower()
+            if lora_name.startswith("unianimate"):
+                log.info(f"Excluding LoRA '{l.get('name', 'unknown')}' as it starts with 'unianimate'")
                 continue
                 
             lora_sd = load_torch_file(l["path"], safe_load=True)
