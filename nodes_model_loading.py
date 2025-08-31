@@ -1481,11 +1481,27 @@ class WanVideoSaveModel:
             # Get state dict
             state_dict = diffusion_model.state_dict()
             
+            # Create a clean state dict to avoid shared memory issues
+            clean_state_dict = {}
+            seen_tensors = {}
+            
+            for key, tensor in state_dict.items():
+                # Check if this tensor's data pointer has been seen before
+                data_ptr = tensor.data_ptr()
+                if data_ptr in seen_tensors:
+                    # Create a clone to avoid shared memory
+                    clean_state_dict[key] = tensor.clone()
+                    log.info(f"Cloned shared tensor: {key} (shares memory with {seen_tensors[data_ptr]})")
+                else:
+                    # First time seeing this tensor, use as-is
+                    clean_state_dict[key] = tensor
+                    seen_tensors[data_ptr] = key
+            
             # Handle fp8 quantization and scale weights if present
             if model.model["scale_weights"]:
                 scale_weights = model.model["scale_weights"]
                 for k, v in scale_weights.items():
-                    state_dict[k] = v.cpu()
+                    clean_state_dict[k] = v.cpu()
             
             # Prepare metadata
             metadata = {
@@ -1506,10 +1522,10 @@ class WanVideoSaveModel:
             full_path = os.path.join(save_dir, f"{filename}.safetensors")
             
             log.info(f"Saving model to {full_path}")
-            log.info(f"Model contains {len(state_dict)} parameters")
+            log.info(f"Model contains {len(clean_state_dict)} parameters")
             
-            # Save with metadata
-            save_file(state_dict, full_path, metadata=metadata)
+            # Save with metadata using the clean state dict
+            save_file(clean_state_dict, full_path, metadata=metadata)
             
             # Move model back to original device
             diffusion_model.to(original_device)
