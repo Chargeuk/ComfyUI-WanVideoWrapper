@@ -1495,37 +1495,86 @@ class WanVideoLoraMerger:
         
         return {}
 
-# class WanVideoSaveModel:
-#     @classmethod
-#     def INPUT_TYPES(s):
-#         return {
-#             "required": {
-#                 "model": ("WANVIDEOMODEL", {"tooltip": "WANVideo model to save"}),
-#                 "output_path": ("STRING", {"default": "", "multiline": False, "tooltip": "Path to save the model"}),
-#             },
-#         }
+class WanVideoSaveModel:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("WANVIDEOMODEL", {"tooltip": "WANVideo model to save"}),
+                "filename": ("STRING", {"default": "saved_model", "multiline": False, "tooltip": "Filename for the saved model (without extension)"}),
+            },
+            "optional": {
+                "output_path": ("STRING", {"default": "", "multiline": False, "tooltip": "Custom output directory (optional)"}),
+            }
+        }
 
-#     RETURN_TYPES = ()
-#     FUNCTION = "savemodel"
-#     CATEGORY = "WanVideoWrapper"
-#     DESCRIPTION = "Saves the model including merged LoRAs and quantization to diffusion_models/WanVideoWrapperSavedModels"
-#     OUTPUT_NODE = True
+    RETURN_TYPES = ()
+    FUNCTION = "savemodel"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Saves the WanVideo model including merged LoRAs and quantization"
+    OUTPUT_NODE = True
 
-#     def savemodel(self, model, output_path):
-#         from safetensors.torch import save_file
-#         model_sd = model.model.diffusion_model.state_dict()
-#         for k in model_sd.keys():
-#             print("key:", k, "shape:", model_sd[k].shape, "dtype:", model_sd[k].dtype, "device:", model_sd[k].device)
-#         model_sd
-#         model_name = os.path.basename(model.model["model_name"])
-#         if not output_path:
-#             output_path = os.path.join(folder_paths.models_dir, "diffusion_models", "WanVideoWrapperSavedModels", "saved_" + model_name)
-#         else:
-#             output_path = os.path.join(output_path, model_name)
-#         log.info(f"Saving model to {output_path}")
-#         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-#         save_file(model_sd, output_path)
-#         return ()
+    def savemodel(self, model, filename, output_path=""):
+        from safetensors.torch import save_file
+        import os
+        
+        try:
+            # Get model state dict - handle device properly
+            model_sd = {}
+            diffusion_model = model.model.diffusion_model
+            
+            # Move to CPU to avoid CUDA memory issues when saving large models
+            original_device = next(diffusion_model.parameters()).device
+            diffusion_model = diffusion_model.cpu()
+            
+            # Get state dict
+            state_dict = diffusion_model.state_dict()
+            
+            # Handle fp8 quantization and scale weights if present
+            if hasattr(model.model, 'scale_weights') and model.model["scale_weights"]:
+                scale_weights = model.model["scale_weights"]
+                for k, v in scale_weights.items():
+                    state_dict[k] = v.cpu()
+            
+            # Prepare metadata
+            metadata = {
+                "base_model": model.model.get("model_name", "unknown"),
+                "quantization": model.model.get("quantization", "disabled"),
+                "base_dtype": str(model.model.get("base_dtype", "unknown")),
+                "weight_dtype": str(model.model.get("weight_dtype", "unknown")),
+                "saved_with": "ComfyUI-WanVideoWrapper"
+            }
+            
+            # Determine output path
+            if not output_path:
+                save_dir = os.path.join(folder_paths.models_dir, "diffusion_models", "WanVideoWrapperSavedModels")
+            else:
+                save_dir = output_path
+            
+            os.makedirs(save_dir, exist_ok=True)
+            full_path = os.path.join(save_dir, f"{filename}.safetensors")
+            
+            log.info(f"Saving model to {full_path}")
+            log.info(f"Model contains {len(state_dict)} parameters")
+            
+            # Save with metadata
+            save_file(state_dict, full_path, metadata=metadata)
+            
+            # Move model back to original device
+            diffusion_model.to(original_device)
+            
+            log.info(f"Model successfully saved to {full_path}")
+            
+        except Exception as e:
+            log.error(f"Failed to save model: {str(e)}")
+            # Make sure to move model back to original device even on error
+            try:
+                diffusion_model.to(original_device)
+            except:
+                pass
+            raise e
+            
+        return ()
     
 #region load VAE
 
@@ -1761,6 +1810,7 @@ class LoadWanVideoClipTextEncoder:
 NODE_CLASS_MAPPINGS = {
     "WanVideoModelLoader": WanVideoModelLoader,
     "WanVideoLoraMerger": WanVideoLoraMerger,
+    "WanVideoSaveModel": WanVideoSaveModel,
     "WanVideoVAELoader": WanVideoVAELoader,
     "WanVideoLoraSelect": WanVideoLoraSelect,
     "WanVideoSetLoRAs": WanVideoSetLoRAs,
@@ -1779,6 +1829,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoModelLoader": "WanVideo Model Loader",
     "WanVideoLoraMerger": "WanVideo Lora Merger",
+    "WanVideoSaveModel": "WanVideo Save Model",
     "WanVideoVAELoader": "WanVideo VAE Loader",
     "WanVideoLoraSelect": "WanVideo Lora Select",
     "WanVideoSetLoRAs": "WanVideo Set LoRAs",
