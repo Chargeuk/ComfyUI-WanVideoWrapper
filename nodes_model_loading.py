@@ -1444,7 +1444,57 @@ class WanVideoModelLoader:
             if model._model() == patcher:
                 mm.current_loaded_models.remove(model)
         return (patcher,)
-    
+
+class WanVideoLoraMerger:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "output_name": ("STRING", {"default": "merged_lora"}),
+            },
+            "optional": {
+                "lora": ("WANVIDLORA", {"default": None}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "merge_loras"
+    CATEGORY = "WanVideoWrapper"
+
+    def merge_loras(self, output_name, lora=None):
+        if lora is None:
+            return {}
+        
+        from safetensors.torch import save_file
+        import os
+        
+        merged_sd = {}
+        
+        for l in lora:
+            if l["strength"] == 0:
+                continue
+                
+            lora_sd = load_torch_file(l["path"], safe_load=True)
+            lora_sd = standardize_lora_key_format(lora_sd)
+            
+            strength = l["strength"]
+            
+            for key, value in lora_sd.items():
+                if key in merged_sd:
+                    merged_sd[key] = merged_sd[key] + (value * strength)
+                else:
+                    merged_sd[key] = value * strength
+        
+        # Save to loras folder
+        output_path = os.path.join(
+            folder_paths.models_dir, "loras", f"{output_name}.safetensors"
+        )
+        save_file(merged_sd, output_path)
+        log.info(f"Merged LoRA saved to: {output_path}")
+        
+        return {}
+
 # class WanVideoSaveModel:
 #     @classmethod
 #     def INPUT_TYPES(s):
@@ -1710,6 +1760,7 @@ class LoadWanVideoClipTextEncoder:
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoModelLoader": WanVideoModelLoader,
+    "WanVideoLoraMerger": WanVideoLoraMerger,
     "WanVideoVAELoader": WanVideoVAELoader,
     "WanVideoLoraSelect": WanVideoLoraSelect,
     "WanVideoSetLoRAs": WanVideoSetLoRAs,
@@ -1727,6 +1778,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoModelLoader": "WanVideo Model Loader",
+    "WanVideoLoraMerger": "WanVideo Lora Merger",
     "WanVideoVAELoader": "WanVideo VAE Loader",
     "WanVideoLoraSelect": "WanVideo Lora Select",
     "WanVideoSetLoRAs": "WanVideo Set LoRAs",
