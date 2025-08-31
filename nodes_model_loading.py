@@ -935,6 +935,104 @@ def add_lora_weights(patcher, lora, base_dtype, merge_loras=False):
         del lora_sd
     return patcher, control_lora, unianimate_sd
 
+def load_model_with_metadata(model_path):
+    """Load model and extract metadata"""
+    from safetensors import safe_open
+    import json
+    
+    metadata = {}
+    if model_path.endswith('.safetensors'):
+        try:
+            with safe_open(model_path, framework="pt", device="cpu") as f:
+                metadata = f.metadata() or {}
+        except:
+            pass
+    
+    # Load the actual state dict
+    sd = load_torch_file(model_path, device="cpu", safe_load=True)
+    return sd, metadata
+
+def create_generic_audio_proj_from_state_dict(state_dict):
+    """Create a generic audio projection model from state dict structure"""
+    import torch.nn as nn
+    
+    class GenericAudioProj(nn.Module):
+        def __init__(self, state_dict):
+            super().__init__()
+            
+            # Analyze state dict to create layers
+            layers = {}
+            for key, tensor in state_dict.items():
+                if '.weight' in key:
+                    layer_name = key.replace('.weight', '')
+                    if layer_name not in layers:
+                        layers[layer_name] = {}
+                    layers[layer_name]['weight_shape'] = tensor.shape
+                elif '.bias' in key:
+                    layer_name = key.replace('.bias', '')
+                    if layer_name not in layers:
+                        layers[layer_name] = {}
+                    layers[layer_name]['has_bias'] = True
+            
+            # Create layers based on analysis
+            for layer_name, info in layers.items():
+                weight_shape = info.get('weight_shape')
+                has_bias = info.get('has_bias', False)
+                
+                if weight_shape and len(weight_shape) == 2:
+                    # Linear layer
+                    setattr(self, layer_name, nn.Linear(weight_shape[1], weight_shape[0], bias=has_bias))
+                elif weight_shape and len(weight_shape) == 1:
+                    # Normalization layer
+                    setattr(self, layer_name, nn.LayerNorm(weight_shape[0]))
+        
+        def forward(self, x):
+            # Simple forward pass - may need adjustment based on actual architecture
+            for name, module in self.named_children():
+                if isinstance(module, nn.Linear):
+                    x = module(x)
+                elif isinstance(module, nn.LayerNorm):
+                    x = module(x)
+            return x
+    
+    return GenericAudioProj(state_dict)
+
+def reconstruct_audio_proj_from_architecture(architecture_info, state_dict, device):
+    """Reconstruct audio projection model from saved architecture information"""
+    import torch.nn as nn
+    import importlib
+    
+    class_name = architecture_info["class_name"]
+    module_name = architecture_info["module_name"]
+    construction_params = architecture_info.get("construction_params", {})
+    
+    try:
+        # Try to import the original class
+        module = importlib.import_module(module_name)
+        audio_proj_class = getattr(module, class_name)
+        
+        # Try to create instance with saved parameters
+        if construction_params and hasattr(audio_proj_class, '__init__'):
+            audio_proj = audio_proj_class(**construction_params)
+        else:
+            # Try default constructor
+            audio_proj = audio_proj_class()
+            
+    except Exception as e:
+        log.warning(f"Could not import original class {class_name}, attempting generic reconstruction: {e}")
+        
+        # Fallback: create a generic model based on state dict structure
+        audio_proj = create_generic_audio_proj_from_state_dict(state_dict)
+    
+    # Load the state dict
+    try:
+        audio_proj.load_state_dict(state_dict)
+        audio_proj.to(device)
+        return audio_proj
+    except Exception as e:
+        log.error(f"Failed to load state dict into reconstructed model: {e}")
+        raise
+
 #region Model loading
 class WanVideoModelLoader:
     @classmethod
@@ -1030,8 +1128,14 @@ class WanVideoModelLoader:
         model_path = get_full_path_or_raise("diffusion_models", model)
 
         gguf_reader = None
+        model_metadata = {}
         if not gguf:
-            sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
+            sd, model_metadata = load_model_with_metadata(model_path)
+            # Move to correct device
+            if transformer_load_device != "cpu":
+                for k, v in sd.items():
+                    if isinstance(v, torch.Tensor):
+                        sd[k] = v.to(transformer_load_device)
         else:
             gguf_reader=[]
             from .gguf.gguf import load_gguf
@@ -1097,6 +1201,7 @@ class WanVideoModelLoader:
         # Check if this is a saved model with embedded MultiTalk data
         saved_multitalk_type = None
         saved_audio_proj_weights = {}
+        audio_proj_architecture = None
         
         # Extract saved MultiTalk data if present
         if any(key.startswith("saved_audio_proj.") for key in sd.keys()):
@@ -1107,8 +1212,16 @@ class WanVideoModelLoader:
                 if key.startswith("saved_audio_proj."):
                     saved_audio_proj_weights[key.replace("saved_audio_proj.", "")] = sd.pop(key)
             
-            # Default to MultiTalk type (could be enhanced to read from metadata)
-            saved_multitalk_type = "MultiTalk"
+            # Extract architecture from metadata
+            saved_multitalk_type = model_metadata.get("multitalk_model_type", "MultiTalk")
+            if "audio_proj_architecture" in model_metadata:
+                try:
+                    import json
+                    audio_proj_architecture = json.loads(model_metadata["audio_proj_architecture"])
+                    log.info(f"Loaded audio projection architecture: {audio_proj_architecture['class_name']}")
+                except Exception as e:
+                    log.warning(f"Failed to parse audio projection architecture: {e}")
+                    audio_proj_architecture = None
         
         dim = sd["patch_embedding.weight"].shape[0]
         in_features = sd["blocks.0.self_attn.k.weight"].shape[1]
@@ -1421,13 +1534,23 @@ class WanVideoModelLoader:
             if multitalk_model["proj_model"] is not None:
                 # Normal case: external multitalk_model provided
                 transformer.audio_proj = multitalk_model["proj_model"]
+            elif saved_audio_proj_weights and audio_proj_architecture:
+                # Enhanced reconstruction with architecture info
+                log.info("Reconstructing audio projection model from saved architecture...")
+                try:
+                    audio_proj = reconstruct_audio_proj_from_architecture(
+                        audio_proj_architecture, 
+                        saved_audio_proj_weights, 
+                        device=offload_device
+                    )
+                    transformer.audio_proj = audio_proj
+                    log.info(f"Successfully reconstructed {audio_proj_architecture['class_name']}")
+                except Exception as e:
+                    log.error(f"Failed to reconstruct audio projection model: {str(e)}")
+                    transformer.audio_proj = None
             elif saved_audio_proj_weights:
-                # Restored case: reconstruct audio_proj from saved weights
-                log.info("Reconstructing audio projection model from saved weights...")
-                
-                # We need to reconstruct the audio_proj model architecture
-                # For now, we'll create a simple reconstruction - this may need refinement
-                # based on the actual MultiTalk audio_proj architecture
+                # Fallback to simple reconstruction
+                log.warning("No architecture info found, attempting simple reconstruction...")
                 try:
                     # Try to infer architecture from saved weights
                     proj_input_dim = None
@@ -1454,7 +1577,7 @@ class WanVideoModelLoader:
                         transformer.audio_proj = SimpleAudioProj(proj_input_dim, proj_output_dim)
                         transformer.audio_proj.load_state_dict(saved_audio_proj_weights)
                         transformer.audio_proj.to(device=offload_device)
-                        log.info(f"Successfully reconstructed audio projection model ({proj_input_dim} -> {proj_output_dim})")
+                        log.info(f"Successfully reconstructed simple audio projection model ({proj_input_dim} -> {proj_output_dim})")
                     else:
                         log.warning("Could not infer audio projection model architecture from saved weights")
                         transformer.audio_proj = None
@@ -1594,13 +1717,41 @@ class WanVideoSaveModel:
                 for k, v in scale_weights.items():
                     clean_state_dict[k] = v.cpu()
             
-            # Handle MultiTalk audio projection model if present
+            # Handle MultiTalk audio projection model with architecture preservation
+            audio_proj_architecture = None
             if hasattr(diffusion_model, 'audio_proj') and diffusion_model.audio_proj is not None:
-                log.info("Saving MultiTalk audio projection model...")
-                audio_proj_state = diffusion_model.audio_proj.state_dict()
-                # Add audio_proj weights with a prefix to avoid conflicts
-                for k, v in audio_proj_state.items():
-                    clean_state_dict[f"saved_audio_proj.{k}"] = v.cpu()
+                log.info("Saving MultiTalk audio projection model with architecture...")
+                
+                # Rename existing audio_proj keys to avoid conflicts
+                audio_proj_keys = []
+                for key in list(clean_state_dict.keys()):
+                    if key.startswith("audio_proj."):
+                        new_key = key.replace("audio_proj.", "saved_audio_proj.", 1)
+                        clean_state_dict[new_key] = clean_state_dict.pop(key)
+                        audio_proj_keys.append(new_key)
+                
+                # Store architecture information
+                audio_proj_architecture = {
+                    "class_name": diffusion_model.audio_proj.__class__.__name__,
+                    "module_name": diffusion_model.audio_proj.__class__.__module__,
+                    "state_dict_keys": [k.replace("saved_audio_proj.", "") for k in audio_proj_keys],
+                }
+                
+                # Infer constructor parameters from state dict
+                construction_params = {}
+                for key in audio_proj_keys:
+                    param_key = key.replace("saved_audio_proj.", "")
+                    if ".weight" in param_key:
+                        layer_name = param_key.replace(".weight", "")
+                        if "proj" in layer_name or "linear" in layer_name:
+                            weight_shape = clean_state_dict[key].shape
+                            construction_params[f"{layer_name}_shape"] = weight_shape
+                        elif "norm" in layer_name:
+                            norm_shape = clean_state_dict[key].shape
+                            construction_params[f"{layer_name}_features"] = norm_shape[0]
+                
+                audio_proj_architecture["construction_params"] = construction_params
+                log.info(f"Saved audio projection architecture: {audio_proj_architecture['class_name']} with {len(audio_proj_keys)} parameters")
             
             # Prepare metadata
             metadata = {
@@ -1615,6 +1766,9 @@ class WanVideoSaveModel:
             if hasattr(diffusion_model, 'multitalk_model_type'):
                 metadata["multitalk_model_type"] = diffusion_model.multitalk_model_type
                 metadata["has_multitalk"] = "true"
+                if audio_proj_architecture:
+                    import json
+                    metadata["audio_proj_architecture"] = json.dumps(audio_proj_architecture)
                 log.info(f"Saving MultiTalk model type: {diffusion_model.multitalk_model_type}")
             
             # Determine output path
