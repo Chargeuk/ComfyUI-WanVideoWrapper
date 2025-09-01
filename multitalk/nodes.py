@@ -10,12 +10,30 @@ import json
 script_directory = os.path.dirname(os.path.abspath(__file__))
 folder_paths.add_model_folder_path("wav2vec2", os.path.join(folder_paths.models_dir, "wav2vec2"))
 
+def get_filename_list(folder_name: str) -> list[str]:
+    result = folder_paths.get_filename_list(folder_name)
+    # convert to linux paths rather than windows paths
+    result = [f.replace("\\", "/") for f in result]
+    return result
+
+def get_full_path(folder_name: str, filename: str) -> str | None:
+    # convert the folder_name, which is a path to a path using this operating system's path seperator as it may be wrong
+    folder_name_for_this_os = folder_name.replace("\\", os.sep).replace("/", os.sep)
+    filename_for_this_os = filename.replace("\\", os.sep).replace("/", os.sep)
+    return folder_paths.get_full_path(folder_name_for_this_os, filename_for_this_os)
+
+def get_full_path_or_raise(folder_name: str, filename: str) -> str:
+    result = get_full_path(folder_name, filename)
+    if result is None:
+        raise FileNotFoundError(f"Model in folder '{folder_name}' with filename '{filename}' not found.")
+    return result
+
 class Wav2VecModelLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": (folder_paths.get_filename_list("wav2vec2"), {"tooltip": "These models are loaded from the 'ComfyUI/models/wav2vec2' -folder",}),
+                "model": (get_filename_list("wav2vec2"), {"tooltip": "These models are loaded from the 'ComfyUI/models/wav2vec2' -folder",}),
                 "base_precision": (["fp32", "bf16", "fp16"], {"default": "fp16"}),
                 "load_device": (["main_device", "offload_device"], {"default": "main_device", "tooltip": "Initial device to load the model to, NOT recommended with the larger models unless you have 48GB+ VRAM"}),
             },
@@ -57,7 +75,7 @@ class Wav2VecModelLoader:
         }
         wav2vec_feature_extractor = Wav2Vec2FeatureExtractor(**feature_extractor_config)
 
-        model_path = folder_paths.get_full_path_or_raise("wav2vec2", model)
+        model_path = get_full_path_or_raise("wav2vec2", model)
         sd = load_torch_file(model_path, device=transfomer_load_device, safe_load=True)
 
         for name, param in wav2vec2.named_parameters():
@@ -83,7 +101,7 @@ class MultiTalkModelLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": (folder_paths.get_filename_list("unet_gguf") + folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
+                "model": (get_filename_list("unet_gguf") + get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
             },
         }
 
@@ -95,7 +113,7 @@ class MultiTalkModelLoader:
     def loadmodel(self, model, base_precision=None):
         from .multitalk import AudioProjModel
         
-        model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
+        model_path = get_full_path_or_raise("diffusion_models", model)
 
         audio_window=5
         intermediate_dim=512
