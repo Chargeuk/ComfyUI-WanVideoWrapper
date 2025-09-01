@@ -321,6 +321,129 @@ class MultiTalkWav2VecEmbeds:
         return (multitalk_embeds, out_audio, actual_num_frames)
 
 
+class MultiTalkEmbedsSaver:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "multitalk_embeds": ("MULTITALK_EMBEDS",),
+                "num_frames": ("INT",),
+                "filename": ("STRING", {"default": "multitalk_embeds", "tooltip": "Filename to save the embeddings (without extension)"}),
+                "save_path": ("STRING", {"default": "ComfyUI/output/multitalk_embeds", "tooltip": "Directory path to save the embeddings"}),
+            }
+        }
+
+    RETURN_TYPES = ("MULTITALK_EMBEDS", "INT", "STRING")
+    RETURN_NAMES = ("multitalk_embeds", "num_frames", "saved_path")
+    FUNCTION = "save_embeds"
+    CATEGORY = "WanVideoWrapper"
+
+    def save_embeds(self, multitalk_embeds, num_frames, filename, save_path):
+        import pickle
+        import torch
+        from pathlib import Path
+        
+        # Create directory if it doesn't exist
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create full file path
+        file_path = save_dir / f"{filename}.pkl"
+        
+        # Package only the essential data
+        save_data = {
+            "multitalk_embeds": multitalk_embeds,
+            "num_frames": num_frames,
+            "version": "1.0",  # For future compatibility
+        }
+        
+        # Save to disk
+        try:
+            with open(file_path, 'wb') as f:
+                pickle.dump(save_data, f)
+            log.info(f"[MultiTalk] Saved embeddings to: {file_path}")
+            saved_path = str(file_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to save embeddings: {str(e)}")
+        
+        # Pass through the original data unchanged
+        return (multitalk_embeds, num_frames, saved_path)
+
+
+class MultiTalkEmbedsLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "file_path": ("STRING", {"default": "", "tooltip": "Full path to the saved embeddings file (.pkl)"}),
+            },
+            "optional": {
+                "override_audio_scale": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 100.0, "step": 0.01, "tooltip": "Override audio scale (-1 to use saved value)"}),
+                "override_audio_cfg_scale": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 100.0, "step": 0.01, "tooltip": "Override audio CFG scale (-1 to use saved value)"}),
+                "override_num_frames": ("INT", {"default": -1, "min": -1, "max": 10000, "step": 1, "tooltip": "Override num_frames (-1 to use saved value)"}),
+            }
+        }
+
+    RETURN_TYPES = ("MULTITALK_EMBEDS", "INT")
+    RETURN_NAMES = ("multitalk_embeds", "num_frames")
+    FUNCTION = "load_embeds"
+    CATEGORY = "WanVideoWrapper"
+
+    def load_embeds(self, file_path, override_audio_scale=-1.0, override_audio_cfg_scale=-1.0, override_num_frames=-1):
+        import pickle
+        from pathlib import Path
+        
+        # Validate file path
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Embeddings file not found: {file_path}")
+        
+        if not file_path.suffix == '.pkl':
+            raise ValueError("File must be a .pkl file")
+        
+        # Load data from disk
+        try:
+            with open(file_path, 'rb') as f:
+                save_data = pickle.load(f)
+            log.info(f"[MultiTalk] Loaded embeddings from: {file_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load embeddings: {str(e)}")
+        
+        # Validate loaded data
+        if not isinstance(save_data, dict):
+            raise ValueError("Invalid embeddings file format")
+        
+        required_keys = ["multitalk_embeds", "num_frames"]
+        for key in required_keys:
+            if key not in save_data:
+                raise ValueError(f"Missing required key in embeddings file: {key}")
+        
+        # Extract data
+        multitalk_embeds = save_data["multitalk_embeds"].copy()  # Make a copy to avoid modifying the original
+        num_frames = save_data["num_frames"]
+        
+        # Apply overrides if specified
+        if override_audio_scale >= 0.0:
+            multitalk_embeds["audio_scale"] = override_audio_scale
+            log.info(f"[MultiTalk] Override audio_scale: {override_audio_scale}")
+        
+        if override_audio_cfg_scale >= 0.0:
+            multitalk_embeds["audio_cfg_scale"] = override_audio_cfg_scale
+            log.info(f"[MultiTalk] Override audio_cfg_scale: {override_audio_cfg_scale}")
+        
+        if override_num_frames >= 0:
+            num_frames = override_num_frames
+            log.info(f"[MultiTalk] Override num_frames: {override_num_frames}")
+        
+        # Log info about loaded data
+        version = save_data.get("version", "unknown")
+        log.info(f"[MultiTalk] Loaded embeddings version: {version}")
+        log.info(f"[MultiTalk] Audio features count: {len(multitalk_embeds['audio_features'])}")
+        log.info(f"[MultiTalk] Num frames: {num_frames}")
+        
+        return (multitalk_embeds, num_frames)
+
+
 class WanVideoImageToVideoMultiTalk:
     @classmethod
     def INPUT_TYPES(s):
@@ -401,6 +524,8 @@ class WanVideoImageToVideoMultiTalk:
 NODE_CLASS_MAPPINGS = {
     "MultiTalkModelLoader": MultiTalkModelLoader,
     "MultiTalkWav2VecEmbeds": MultiTalkWav2VecEmbeds,
+    "MultiTalkEmbedsSaver": MultiTalkEmbedsSaver,
+    "MultiTalkEmbedsLoader": MultiTalkEmbedsLoader,
     "WanVideoImageToVideoMultiTalk": WanVideoImageToVideoMultiTalk,
     "Wav2VecModelLoader": Wav2VecModelLoader
 }
@@ -408,6 +533,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MultiTalkModelLoader": "Multi/InfiniteTalk Model Loader",
     "MultiTalkWav2VecEmbeds": "Multi/InfiniteTalk Wav2vec2 Embeds",
+    "MultiTalkEmbedsSaver": "Multi/InfiniteTalk Embeds Saver",
+    "MultiTalkEmbedsLoader": "Multi/InfiniteTalk Embeds Loader",
     "WanVideoImageToVideoMultiTalk": "WanVideo Long I2V Multi/InfiniteTalk",
     "Wav2VecModelLoader": "Wav2vec2 Model Loader"
 }
