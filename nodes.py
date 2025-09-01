@@ -3608,6 +3608,9 @@ class WanVideoSampler:
                         estimated_iterations = total_frames // (frame_num - motion_frame) + 1
                         callback = prepare_callback(patcher, estimated_iterations)
 
+                        if audio_end_idx >= total_frames:
+                            arrive_last_frame = True
+
                         log.info(f"Sampling {total_frames} frames in {estimated_iterations} windows, at {latent.shape[3]*vae_upscale_factor}x{latent.shape[2]*vae_upscale_factor} with {steps} steps")
                         #region Multi-talk Loop Start
                         while True: # start video generation iteratively
