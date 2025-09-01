@@ -26,7 +26,7 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
 					crop_output=True, keep_number_of_steps=False):
     print(f"****** get_scheduler: called with start_step={start_step}, end_step={end_step}, denoise_strength={denoise_strength}, keep_number_of_steps={keep_number_of_steps}")
     original_number_of_steps = steps
-    if (keep_number_of_steps and denoise_strength < 1.0):
+    if (keep_number_of_steps and denoise_strength < 1.0 and denoise_strength > 0.01):
         # increase steps now since they will be reduced later
         steps = round(steps/denoise_strength)
     
