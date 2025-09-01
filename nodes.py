@@ -1572,6 +1572,7 @@ class WanVideoVACEEncode:
                 "input_masks": ("MASK",),
                 "prev_vace_embeds": ("WANVIDIMAGE_EMBEDS",),
                 "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE encoding for reduced memory use"}),
+                "passthrough": ("BOOLEAN", {"default": False, "tooltip": "Pass the prev_vace_embeds through without modification"}),
             },
         }
 
@@ -1580,7 +1581,11 @@ class WanVideoVACEEncode:
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
 
-    def process(self, vae, width, height, num_frames, strength, vace_start_percent, vace_end_percent, input_frames=None, ref_images=None, input_masks=None, prev_vace_embeds=None, tiled_vae=False):
+    def process(self, vae, width, height, num_frames, strength, vace_start_percent, vace_end_percent, input_frames=None, ref_images=None, input_masks=None, prev_vace_embeds=None, tiled_vae=False,
+                passthrough=False):
+        if passthrough or strength <= 0.0:
+            return (prev_vace_embeds,)
+        
         width = (width // 16) * 16
         height = (height // 16) * 16
 
@@ -2068,7 +2073,7 @@ class WanVideoSampler:
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False,
         passthrough=False, denoise_latents=False):
 
-        if passthrough:
+        if passthrough or denoise_strength <= 0.0:
             return (samples, samples,)
 
         patcher = model
