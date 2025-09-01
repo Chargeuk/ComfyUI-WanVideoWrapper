@@ -352,6 +352,9 @@ class WanVideoEnhanceAVideo:
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the steps to apply Enhance-A-Video"}),
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the steps to apply Enhance-A-Video"}),
             },
+            "optional": {
+                "passthrough": ("BOOLEAN", {"default": False, "tooltip": "The node will do nothing and return a None value"}),
+            }
         }
     RETURN_TYPES = ("FETAARGS",)
     RETURN_NAMES = ("feta_args",)
@@ -360,6 +363,11 @@ class WanVideoEnhanceAVideo:
     DESCRIPTION = "https://github.com/NUS-HPC-AI-Lab/Enhance-A-Video"
 
     def setargs(self, **kwargs):
+        # check if passthrough is provided and is true
+        if kwargs.get("passthrough", False):
+            print("WanVideoEnhanceAVideo: Passthrough enabled, returning None")
+            return (None, )
+        print("WanVideoEnhanceAVideo: Passthrough disabled, returning kwargs")
         return (kwargs, )
 
 class WanVideoSetBlockSwap:
