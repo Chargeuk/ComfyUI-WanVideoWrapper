@@ -979,6 +979,7 @@ class WanVideoModelLoader:
                   fantasytalking_model=None, multitalk_model=None, fantasyportrait_model=None,
                   passthrough=False):
         if passthrough:
+            print("WanVideoModelLoader passthrough enabled, returning None")
             return (None,)
 
         assert not (vram_management_args is not None and block_swap_args is not None), "Can't use both block_swap_args and vram_management_args at the same time"

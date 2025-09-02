@@ -1543,6 +1543,9 @@ class WanVideoSLG:
             "start_percent": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of the control signal"}),
             "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of the control signal"}),
             },
+            "optional": {
+                "passthrough": ("BOOLEAN", {"default": False, "tooltip": "The node will do nothing and return a None value"}),
+            },
         }
 
     RETURN_TYPES = ("SLGARGS", )
@@ -1551,7 +1554,11 @@ class WanVideoSLG:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Skips uncond on the selected blocks"
 
-    def process(self, blocks, start_percent, end_percent):
+    def process(self, blocks, start_percent, end_percent,
+                passthrough=False):
+        if passthrough:
+            print("WanVideoSLG passthrough enabled, returning None")
+            return (None,)
         slg_block_list = [int(x.strip()) for x in blocks.split(",")]
 
         slg_args = {
@@ -1881,6 +1888,9 @@ class WanVideoExperimentalArgs:
                 "raag_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Alpha value for RAAG, 1.0 is default, 0.0 is disabled."}),
                 "bidirectional_sampling": ("BOOLEAN", {"default": False, "tooltip": "Enable bidirectional sampling, based on https://github.com/ff2416/WanFM"})
             },
+            "optional": {
+                "passthrough": ("BOOLEAN", {"default": False, "tooltip": "The node will do nothing and return a None value"}),
+            }
         }
 
     RETURN_TYPES = ("EXPERIMENTALARGS", )
@@ -1891,6 +1901,11 @@ class WanVideoExperimentalArgs:
     EXPERIMENTAL = True
 
     def process(self, **kwargs):
+        # check if passthrough is provided and is true
+        if kwargs.get("passthrough", False):
+            print("WanVideoExperimentalArgs: Passthrough enabled, returning None")
+            return (None, )
+        print("WanVideoExperimentalArgs: Passthrough disabled, returning kwargs")
         return (kwargs,)
     
 class WanVideoFreeInitArgs:
@@ -4898,6 +4913,11 @@ class WanVideoDecode:
 
     def decode(self, vae, samples, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, normalization="default"):
         mm.soft_empty_cache()
+        images = samples.get("images", None)
+        if images is not None:
+            print("WanVideoDecode - samples contains pre-decoded images, returning it directly.")
+            return (images,)
+    
         video = samples.get("video", None)
         if video is not None:
             video.clamp_(-1.0, 1.0)
@@ -4974,6 +4994,7 @@ class WanVideoEncode:
                         "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation, helpful for leapfusion I2V where some noise can add motion and give sharper results"}),
                         "latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier, helpful for leapfusion I2V where lower values allow for more motion"}),
                         "mask": ("MASK", ),
+                        "passthrough": ("BOOLEAN", {"default": False, "tooltip": "The node will do nothing and return a None value"}),
                     }
                 }
 
@@ -4982,9 +5003,13 @@ class WanVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "WanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, noise_aug_strength=0.0, latent_strength=1.0, mask=None):
+    def encode(self, vae, image, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, noise_aug_strength=0.0, latent_strength=1.0, mask=None,
+               passthrough=False):
+        if passthrough:
+            print("WanVideoEncode passthrough enabled, returning None")
+            return {"images": image},
+        
         vae.to(device)
-
         image = image.clone()
 
         B, H, W, C = image.shape
