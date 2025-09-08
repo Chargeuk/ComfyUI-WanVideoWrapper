@@ -987,6 +987,18 @@ class WanVideoModelLoader:
             extra_model = vace_model
         lora_low_mem_load = merge_loras = False
         if lora is not None:
+            lorasWithStrength = False
+            # first check if there are any Loras with a strength greater than 0
+            for l in lora:
+                # Exclude LoRAs with strength 0
+                if l["strength"] > 0:
+                    lorasWithStrength = True
+                    continue
+
+            if not lorasWithStrength:
+                # If there are no Loras with strength > 0, we can skip loading them
+                lora = None
+
             for l in lora:
                 lora_low_mem_load = l.get("low_mem_load", False)
                 merge_loras = l.get("merge_loras", True)
