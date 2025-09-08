@@ -451,6 +451,7 @@ class MultiTalkEmbedsLoader:
         
         if override_num_frames >= 0:
             num_frames = override_num_frames
+            multitalk_embeds["max_frames"] = num_frames
             log.info(f"[MultiTalk] Override num_frames: {override_num_frames}")
         
         # Log info about loaded data
@@ -458,7 +459,7 @@ class MultiTalkEmbedsLoader:
         log.info(f"[MultiTalk] Loaded embeddings version: {version}")
         log.info(f"[MultiTalk] Audio features count: {len(multitalk_embeds['audio_features'])}")
         log.info(f"[MultiTalk] Num frames: {num_frames}")
-        
+
         return (multitalk_embeds, num_frames)
 
 

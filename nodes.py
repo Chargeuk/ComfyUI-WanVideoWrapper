@@ -2456,6 +2456,7 @@ class WanVideoSampler:
         # FantasyTalking
         audio_proj = multitalk_audio_embedding = None
         audio_scale = 1.0
+        max_multitalk_frames = None
         if fantasytalking_embeds is not None:
             audio_proj = fantasytalking_embeds["audio_proj"].to(device)
             audio_scale = fantasytalking_embeds["audio_scale"]
@@ -2466,6 +2467,7 @@ class WanVideoSampler:
         elif multitalk_embeds is not None:
             # Handle single or multiple speaker embeddings
             audio_features_in = multitalk_embeds.get("audio_features", None)
+            max_multitalk_frames = multitalk_embeds.get("max_frames", None)
             if audio_features_in is None:
                 multitalk_audio_embedding = None
             else:
@@ -3632,7 +3634,9 @@ class WanVideoSampler:
                                 "end": uni3c_embeds["end"],
                             }
 
-                        total_frames = len(audio_embedding[0])
+                        total_frames = max_multitalk_frames
+                        if total_frames is None:
+                            total_frames = len(audio_embedding[0])
                         estimated_iterations = total_frames // (frame_num - motion_frame) + 1
                         callback = prepare_callback(patcher, estimated_iterations)
 
@@ -4057,7 +4061,7 @@ class WanVideoSampler:
                             if multitalk_embeds is not None:
                                 audio_start_idx += (frame_num - cur_motion_frames_num)
                                 audio_end_idx = audio_start_idx + clip_length
-                                if audio_end_idx >= len(audio_embedding[0]):
+                                if audio_end_idx >= total_frames:
                                     arrive_last_frame = True
                                     miss_lengths = []
                                     source_frames = []
