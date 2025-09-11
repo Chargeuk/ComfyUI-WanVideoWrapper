@@ -82,11 +82,10 @@ class CustomLinear(nn.Linear):
         weight, bias = cast_bias_weight(self, input)
 
         if self.scale_weight is not None:
-            scale_weight = self.scale_weight.to(input.device)
             if weight.numel() < input.numel():
-                weight = weight * scale_weight
+                weight = weight * self.scale_weight
             else:
-                input = input * scale_weight
+                input = input * self.scale_weight
 
         if self.lora is not None:
             weight = self.apply_lora(weight).to(self.compute_dtype)

@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from comfy.utils import common_upscale
+from .utils import log
 
 try:
     from server import PromptServer
@@ -465,6 +466,65 @@ class WanVideoSigmaToStep:
     def convert(self, sigma):
         return (sigma,)
     
+class NormalizeAudioLoudness:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "audio": ("AUDIO",),
+            "lufs": ("FLOAT", {"default": -23.0, "min": -100.0, "max": 0.0, "step": 0.1, "tool": "Loudness Units relative to Full Scale, higher LUFS values (closer to 0) mean louder audio. Lower LUFS values (more negative) mean quieter audio."}),
+           },
+        }
+
+    RETURN_TYPES = ("AUDIO", )
+    RETURN_NAMES = ("audio", )
+    FUNCTION = "normalize"
+    CATEGORY = "WanVideoWrapper"
+
+    def normalize(self, audio, lufs):       
+        audio_input = audio["waveform"]
+        sample_rate = audio["sample_rate"]
+        if audio_input.dim() == 3:
+            audio_input = audio_input.squeeze(0) 
+        audio_input_np = audio_input.detach().transpose(0, 1).numpy().astype(np.float32)
+        audio_input_np = np.ascontiguousarray(audio_input_np)
+        normalized_audio = self.loudness_norm(audio_input_np, sr=sample_rate, lufs=lufs)
+
+        out_audio = {"waveform": torch.from_numpy(normalized_audio).transpose(0, 1).unsqueeze(0).float(), "sample_rate": sample_rate}
+
+        return (out_audio, )
+    
+    def loudness_norm(self, audio_array, sr=16000, lufs=-23):
+        try:
+            import pyloudnorm
+        except:
+            raise ImportError("pyloudnorm package is not installed")
+        meter = pyloudnorm.Meter(sr)
+        loudness = meter.integrated_loudness(audio_array)
+        if abs(loudness) > 100:
+            return audio_array
+        normalized_audio = pyloudnorm.normalize.loudness(audio_array, loudness, lufs)
+        return normalized_audio
+    
+class WanVideoPassImagesFromSamples:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "samples": ("LATENT",),
+                }
+                }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "decode"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Gets possible already decoded images from the samples dictionary, used with Multi/InfiniteTalk sampling"
+
+    def decode(self, samples):
+        video = samples.get("video", None)
+        video.clamp_(-1.0, 1.0)
+        video.add_(1.0).div_(2.0)
+        return video.cpu().float(),
+    
 NODE_CLASS_MAPPINGS = {
     "WanVideoImageResizeToClosest": WanVideoImageResizeToClosest,
     "WanVideoVACEStartToEndFrame": WanVideoVACEStartToEndFrame,
@@ -473,7 +533,9 @@ NODE_CLASS_MAPPINGS = {
     "DummyComfyWanModelObject": DummyComfyWanModelObject,
     "WanVideoLatentReScale": WanVideoLatentReScale,
     "CreateScheduleFloatList": CreateScheduleFloatList,
-    "WanVideoSigmaToStep": WanVideoSigmaToStep
+    "WanVideoSigmaToStep": WanVideoSigmaToStep,
+    "NormalizeAudioLoudness": NormalizeAudioLoudness,
+    "WanVideoPassImagesFromSamples": WanVideoPassImagesFromSamples,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoImageResizeToClosest": "WanVideo Image Resize To Closest",
@@ -483,5 +545,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DummyComfyWanModelObject": "Dummy Comfy Wan Model Object",
     "WanVideoLatentReScale": "WanVideo Latent ReScale",
     "CreateScheduleFloatList": "Create Schedule Float List",
-    "WanVideoSigmaToStep": "WanVideo Sigma To Step"
+    "WanVideoSigmaToStep": "WanVideo Sigma To Step",
+    "NormalizeAudioLoudness": "Normalize Audio Loudness",
+    "WanVideoPassImagesFromSamples": "WanVideo Pass Images From Samples",
 }
