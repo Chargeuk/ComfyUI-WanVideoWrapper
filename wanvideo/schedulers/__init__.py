@@ -22,7 +22,7 @@ scheduler_list = [
     "multitalk"
 ]
 
-def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim=5120, flowedit_args=None, denoise_strength=1.0, sigmas=None, log_timesteps=False
+def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim=5120, flowedit_args=None, denoise_strength=1.0, sigmas=None, log_timesteps=False,
 					crop_output=True, keep_number_of_steps=False):
     print(f"****** get_scheduler: called with start_step={start_step}, end_step={end_step}, denoise_strength={denoise_strength}, keep_number_of_steps={keep_number_of_steps}")
     original_number_of_steps = steps

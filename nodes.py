@@ -2155,7 +2155,7 @@ class WanVideoSampler:
 
         if passthrough or denoise_strength <= 0.0:
             return (samples, samples,)
-
+        input_samples = None
         patcher = model
         model = model.model
         transformer = model.diffusion_model
@@ -3375,9 +3375,11 @@ class WanVideoSampler:
             # Store initial noise for first iteration
             if freeinit_args is not None and iter_idx == 0:
                 initial_noise_saved = current_latent.detach().clone()
-                if samples is not None:
+                if samples is not None and input_samples is not None:
                     current_latent = input_samples.to(device)
                     continue
+                else:
+                    current_latent = latent
             
             # Reset per-iteration states
             self.cache_state = [None, None]
