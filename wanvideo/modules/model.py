@@ -14,7 +14,6 @@ except:
 
 from .attention import attention
 import numpy as np
-from copy import deepcopy
 from tqdm import tqdm
 import gc
 
@@ -25,10 +24,7 @@ from ...echoshot.echoshot import rope_apply_z, rope_apply_c, rope_apply_echoshot
 
 from ...MTV.mtv import apply_rotary_emb
 
-#from .s2v.motioner import MotionerTransformers, FramePackMotioner, rope_precompute
-
-#from comfy.ldm.wan.model import FramePackMotioner
-class FramePackMotioner(nn.Module):
+class FramePackMotioner(nn.Module):#from comfy.ldm.wan.model
     def __init__(
             self,
             inner_dim=1024,
@@ -362,7 +358,8 @@ class WanSelfAttention(nn.Module):
                  num_heads,
                  qk_norm=True,
                  eps=1e-6,
-                 attention_mode='sdpa'):
+                 attention_mode='sdpa',
+                 kv_dim=None):
         assert out_features % num_heads == 0
         super().__init__()
         self.dim = out_features
@@ -379,8 +376,12 @@ class WanSelfAttention(nn.Module):
 
         # layers
         self.q = nn.Linear(in_features, out_features)
-        self.k = nn.Linear(in_features, out_features)
-        self.v = nn.Linear(in_features, out_features)
+        if kv_dim is not None:
+            self.k = nn.Linear(kv_dim, out_features)
+            self.v = nn.Linear(kv_dim, out_features)
+        else:
+            self.k = nn.Linear(in_features, out_features)
+            self.v = nn.Linear(in_features, out_features)
         self.o = nn.Linear(in_features, out_features)
         self.norm_q = WanRMSNorm(out_features, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(out_features, eps=eps) if qk_norm else nn.Identity()
@@ -587,8 +588,8 @@ class LoRALinearLayer(nn.Module):
 #region crossattn
 class WanT2VCrossAttention(WanSelfAttention):
 
-    def __init__(self, in_features, out_features, num_heads, qk_norm=True, eps=1e-6, attention_mode='sdpa'):
-        super().__init__(in_features, out_features, num_heads, qk_norm, eps)
+    def __init__(self, in_features, out_features, num_heads, kv_dim=None, qk_norm=True, eps=1e-6, attention_mode='sdpa'):
+        super().__init__(in_features, out_features, num_heads, qk_norm, eps, kv_dim=kv_dim)
         self.attention_mode = attention_mode
 
     def forward(self, x, context, grid_sizes=None, clip_embed=None, audio_proj=None, audio_scale=1.0, 
@@ -721,6 +722,45 @@ class WanI2VCrossAttention(WanSelfAttention):
             x = x + adapter_x * ip_scale
 
         return self.o(x)
+    
+class WanHuMoCrossAttention(WanSelfAttention):
+
+    def __init__(self, in_features, out_features, num_heads, kv_dim=None, qk_norm=True, eps=1e-6, attention_mode='sdpa'):
+        super().__init__(in_features, out_features, num_heads, qk_norm, eps, kv_dim=kv_dim)
+        self.attention_mode = attention_mode
+
+    def forward(self, x, context, grid_sizes, **kwargs):
+    
+        b, n, d = x.size(0), self.num_heads, self.head_dim
+        q = self.norm_q(self.q(x)).view(b, -1, n, d)
+        k = self.norm_k(self.k(context)).view(b, -1, n, d)
+        v = self.v(context).view(b, -1, n, d)
+
+        # Handle video spatial structure
+        hlen_wlen = grid_sizes[0][1] * grid_sizes[0][2]
+        q = q.reshape(-1, hlen_wlen, n, d)
+        
+        # Handle audio temporal structure (16 tokens per frame)
+        k = k.reshape(-1, 16, n, d)
+        v = v.reshape(-1, 16, n, d)
+
+        x_text = attention(q, k, v, attention_mode=self.attention_mode)
+        x_text = x_text.view(b, -1, n, d).flatten(2)
+
+        x = x_text
+
+        return self.o(x)
+    
+class AudioCrossAttentionWrapper(nn.Module):
+    def __init__(self, in_features, out_features, num_heads, qk_norm=True, eps=1e-6, kv_dim=None):
+        super().__init__()
+
+        self.audio_cross_attn = WanHuMoCrossAttention(in_features, out_features, num_heads, kv_dim=kv_dim)
+        self.norm1_audio = WanLayerNorm(out_features, eps, elementwise_affine=True)
+
+    def forward(self, x, audio, grid_sizes, humo_audio_scale=1.0):
+        x = x + self.audio_cross_attn(self.norm1_audio(x), audio, grid_sizes) * humo_audio_scale
+        return x
 
 class MTVCrafterMotionAttention(WanSelfAttention):
 
@@ -768,7 +808,8 @@ class WanAttentionBlock(nn.Module):
                  eps=1e-6,
                  attention_mode='sdpa',
                  rope_func="comfy",
-                 use_motion_attn=False
+                 use_motion_attn=False,
+                 use_humo_audio_attn=False,
                  ):
         super().__init__()
         self.dim = out_features
@@ -812,6 +853,10 @@ class WanAttentionBlock(nn.Module):
         # modulation
         self.modulation = nn.Parameter(torch.randn(1, 6, out_features) / in_features**0.5)
         self.seg_idx = None
+
+        # HuMo audio cross-attn
+        if use_humo_audio_attn:
+            self.audio_cross_attn_wrapper = AudioCrossAttentionWrapper(in_features, out_features, num_heads, qk_norm, eps, kv_dim=1536)
 
     #@torch.compiler.disable()
     def get_mod(self, e):
@@ -877,26 +922,21 @@ class WanAttentionBlock(nn.Module):
         num_latent_frames=21,
         original_seq_len=None,
         enhance_enabled=False,
-        block_mask=None,
         nag_params={},
         nag_context=None,
         is_uncond=False,
         multitalk_audio_embedding=None,
         ref_target_masks=None,
         human_num=0,
-        inner_t=None,
-        inner_c=None,
+        inner_t=None, inner_c=None,
         cross_freqs=None,
-        x_ip=None,
-        e_ip=None,
+        x_ip=None, e_ip=None,
         freqs_ip=None,
         adapter_proj=None,
         ip_scale=1.0,
         reverse_time=False,
-        mtv_motion_tokens=None,
-        mtv_motion_rotary_emb=None,
-        mtv_strength=1.0,
-        mtv_freqs=None
+        mtv_motion_tokens=None, mtv_motion_rotary_emb=None, mtv_strength=1.0, mtv_freqs=None,
+        humo_audio_input=None, humo_audio_scale=1.0,
     ):
         r"""
         Args:
@@ -1054,7 +1094,9 @@ class WanAttentionBlock(nn.Module):
                                         audio_proj, audio_scale, num_latent_frames, nag_params, nag_context, is_uncond, 
                                         multitalk_audio_embedding, x_ref_attn_map, human_num, inner_t, inner_c, cross_freqs,
                                         adapter_proj=adapter_proj, ip_scale=ip_scale, 
-                                        mtv_freqs=mtv_freqs, mtv_motion_tokens=mtv_motion_tokens, mtv_motion_rotary_emb=mtv_motion_rotary_emb, mtv_strength=mtv_strength)
+                                        mtv_freqs=mtv_freqs, mtv_motion_tokens=mtv_motion_tokens, mtv_motion_rotary_emb=mtv_motion_rotary_emb, mtv_strength=mtv_strength,
+                                        humo_audio_input=humo_audio_input, humo_audio_scale=humo_audio_scale
+                                        )
         else:
             if self.rope_func == "comfy_chunked":
                 y = self.ffn_chunked(x, shift_mlp, scale_mlp)
@@ -1074,7 +1116,8 @@ class WanAttentionBlock(nn.Module):
     def cross_attn_ffn(self, x, context, grid_sizes, shift_mlp, scale_mlp, gate_mlp, clip_embed, 
                        audio_proj, audio_scale, num_latent_frames, nag_params, 
                        nag_context, is_uncond, multitalk_audio_embedding, x_ref_attn_map, human_num, 
-                       inner_t, inner_c, cross_freqs, adapter_proj, ip_scale, mtv_freqs, mtv_motion_tokens, mtv_motion_rotary_emb, mtv_strength):
+                       inner_t, inner_c, cross_freqs, adapter_proj, ip_scale, mtv_freqs, mtv_motion_tokens, mtv_motion_rotary_emb, mtv_strength,
+                       humo_audio_input, humo_audio_scale):
 
             x = x + self.cross_attn(self.norm3(x), context, grid_sizes, clip_embed=clip_embed,
                                     audio_proj=audio_proj, audio_scale=audio_scale,
@@ -1091,6 +1134,10 @@ class WanAttentionBlock(nn.Module):
             if self.use_motion_attn and mtv_motion_tokens is not None and mtv_motion_rotary_emb is not None:                
                 x_motion = self.motion_attn(self.norm4(x), mtv_motion_tokens, mtv_motion_rotary_emb, grid_sizes, mtv_freqs)
                 x = x + x_motion * mtv_strength
+
+            # HuMo Audio Cross-Attention
+            if humo_audio_input is not None:
+                x = self.audio_cross_attn_wrapper(x, humo_audio_input, grid_sizes, humo_audio_scale)
 
             if self.rope_func == "comfy_chunked" and not self.zero_timestep:
                 y = self.ffn_chunked(x, shift_mlp, scale_mlp)
@@ -1415,7 +1462,8 @@ class WanModel(torch.nn.Module):
                 enable_adain=False,
                 adain_mode="attn_norm",
                 audio_inject_layers=[0, 4, 8, 12, 16, 20, 24, 27, 30, 33, 36, 39],
-                zero_timestep=False
+                zero_timestep=False,
+                humo_audio=False,
                 ):
         r"""
         Initialize the diffusion model backbone.
@@ -1525,6 +1573,8 @@ class WanModel(torch.nn.Module):
 
         self.multitalk_model_type = "none"
 
+        self.humo_audio = humo_audio
+
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -1577,7 +1627,7 @@ class WanModel(torch.nn.Module):
             self.blocks = nn.ModuleList([
                 WanAttentionBlock(cross_attn_type, self.in_features, self.out_features, ffn_dim, ffn2_dim, num_heads,
                                 qk_norm, cross_attn_norm, eps,
-                                attention_mode=self.attention_mode, rope_func=self.rope_func, use_motion_attn=(i % 4 == 0 and use_motion_attn))
+                                attention_mode=self.attention_mode, rope_func=self.rope_func, use_motion_attn=(i % 4 == 0 and use_motion_attn), use_humo_audio_attn=self.humo_audio)
                 for i in range(num_layers)
             ])
         #MTV Crafter
@@ -1620,8 +1670,6 @@ class WanModel(torch.nn.Module):
         else:
             self.control_adapter = None
 
-        self.block_mask=None
-
         #S2V
         self.zero_timestep = self.audio_injector = self.trainable_cond_mask =None
         if cond_dim > 0:
@@ -1660,6 +1708,12 @@ class WanModel(torch.nn.Module):
                 drop_mode='padd')
         self.adain_mode = adain_mode
         self.zero_timestep = zero_timestep
+
+        # HuMo Audio
+        if self.humo_audio:
+            from ...HuMo.audio_proj import AudioProjModel
+            self.audio_proj = AudioProjModel(seq_len=8, blocks=5, channels=1280, 
+                intermediate_dim=512, output_dim=1536, context_tokens=16)
 
 
     def block_swap(self, blocks_to_swap, offload_txt_emb=False, offload_img_emb=False, vace_blocks_to_swap=None, prefetch_blocks=0, block_swap_debug=False):
@@ -1893,6 +1947,8 @@ class WanModel(torch.nn.Module):
         s2v_ref_motion=None,
         s2v_pose=None,
         s2v_motion_frames=[1, 0],
+        humo_audio=None,
+        humo_audio_scale=1.0,
 
     ):
         r"""
@@ -2251,6 +2307,16 @@ class WanModel(torch.nn.Module):
             token_ref_target_masks = token_ref_target_masks.view(token_ref_target_masks.shape[0], -1) 
             token_ref_target_masks = token_ref_target_masks.to(x.dtype).to(device)
 
+        humo_audio_input = None
+        if humo_audio is not None:
+            humo_audio_input = self.audio_proj(humo_audio.unsqueeze(0)).permute(0, 3, 1, 2)
+
+            humo_audio_seq_len = torch.tensor(humo_audio.shape[2] * humo_audio_input.shape[3], device=device)
+            humo_audio_input = humo_audio_input.flatten(2).transpose(1, 2) # 1, t*32, 1536
+            pad_len = int(humo_audio_seq_len - humo_audio_input.size(1))
+            if pad_len > 0:
+                humo_audio_input = torch.nn.functional.pad(humo_audio_input, (0, 0, 0, pad_len))
+
         should_calc = True
         #TeaCache
         if self.enable_teacache and self.teacache_start_step <= current_step <= self.teacache_end_step:
@@ -2392,25 +2458,21 @@ class WanModel(torch.nn.Module):
                 original_seq_len=self.original_seq_len,
                 enhance_enabled=enhance_enabled,
                 audio_scale=audio_scale,
-                block_mask=self.block_mask,
-                nag_params=nag_params,
-                nag_context=nag_context,
+                nag_params=nag_params, nag_context=nag_context,
                 is_uncond = is_uncond,
                 multitalk_audio_embedding=multitalk_audio_embedding if multitalk_audio is not None else None,
                 ref_target_masks=token_ref_target_masks if multitalk_audio is not None else None,
                 human_num=human_num if multitalk_audio is not None else 0,
-                inner_t=inner_t,
-                inner_c=inner_c,
+                inner_t=inner_t, inner_c=inner_c,
                 cross_freqs=self.cross_freqs if inner_t is not None else None,
                 freqs_ip=freqs_ip if x_ip is not None else None,
                 e_ip=e0_ip if x_ip is not None else None,
                 adapter_proj=adapter_proj,
                 ip_scale=ip_scale,
                 reverse_time=reverse_time,
-                mtv_motion_tokens=mtv_motion_tokens,
-                mtv_motion_rotary_emb=mtv_motion_rotary_emb,
-                mtv_strength=mtv_strength,
-                mtv_freqs=mtv_freqs
+                mtv_motion_tokens=mtv_motion_tokens, mtv_motion_rotary_emb=mtv_motion_rotary_emb, mtv_strength=mtv_strength, mtv_freqs=mtv_freqs,
+                humo_audio_input=humo_audio_input,
+                humo_audio_scale=humo_audio_scale,
             )
             
             if vace_data is not None:

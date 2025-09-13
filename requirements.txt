@@ -6,6 +6,6 @@ peft>=0.17.0
 sentencepiece>=0.2.0
 protobuf
 pyloudnorm
-gguf>=0.14.0
+gguf>=0.17.1
 opencv-python
 scipy
