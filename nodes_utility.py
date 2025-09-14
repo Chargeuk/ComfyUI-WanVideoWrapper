@@ -513,8 +513,9 @@ class WanVideoPassImagesFromSamples:
                 }
                 }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("images",)
+    RETURN_TYPES = ("IMAGE", "STRING",)
+    RETURN_NAMES = ("images", "output_path",)
+    OUTPUT_TOOLTIPS = ("Decoded images from the samples dictionary", "Output path if provided in the samples dictionary",)
     FUNCTION = "decode"
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Gets possible already decoded images from the samples dictionary, used with Multi/InfiniteTalk sampling"
@@ -523,7 +524,7 @@ class WanVideoPassImagesFromSamples:
         video = samples.get("video", None)
         video.clamp_(-1.0, 1.0)
         video.add_(1.0).div_(2.0)
-        return video.cpu().float(),
+        return video.cpu().float(), samples.get("output_path", "")
     
 NODE_CLASS_MAPPINGS = {
     "WanVideoImageResizeToClosest": WanVideoImageResizeToClosest,

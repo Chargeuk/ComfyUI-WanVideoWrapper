@@ -3032,9 +3032,13 @@ class WanVideoSampler:
                 elif humo_image_cond is not None:
                     if context_window is not None:
                         image_cond_input = humo_image_cond[:, context_window].to(z)
-                        image_cond_input[:, -humo_reference_count:] = humo_image_cond[:, -humo_reference_count:]
+                        humo_image_cond_neg_input = humo_image_cond_neg[:, context_window].to(z)
+                        if humo_reference_count > 0:
+                            image_cond_input[:, -humo_reference_count:] = humo_image_cond[:, -humo_reference_count:]
+                            humo_image_cond_neg_input[:, -humo_reference_count:] = humo_image_cond_neg[:, -humo_reference_count:]
                     else:
                         image_cond_input = humo_image_cond.to(z)
+                        humo_image_cond_neg_input = humo_image_cond_neg.to(z)
                 elif image_cond is not None:
                     if reverse_time: # Flip the image condition
                         image_cond_input = torch.cat([
@@ -3240,10 +3244,10 @@ class WanVideoSampler:
 
                         # HuMo
                         if humo_audio_input_neg is not None and not math.isclose(humo_audio_cfg_scale[idx], 1.0):
-                            if len(cache_state) !=3:
+                            if cache_state is not None and len(cache_state) != 3:
                                 cache_state.append(None)
-                            if t > 980 and humo_image_cond_neg is not None: # use image cond for first timesteps
-                                base_params['y'] = [humo_image_cond_neg.to(z)]
+                            if t > 980 and humo_image_cond_neg_input is not None: # use image cond for first timesteps
+                                base_params['y'] = [humo_image_cond_neg_input]
                             
                             noise_pred_humo_audio_uncond, cache_state_humo = transformer(
                             context=negative_embeds, pred_id=cache_state[2] if cache_state else None, vace_data=None,
@@ -4252,8 +4256,8 @@ class WanVideoSampler:
                                     im = Image.fromarray(video_np[i])
                                     im.save(os.path.join(output_path, f"frame_{img_counter:05d}.png"))
                                     img_counter += 1
-                                
-                            gen_video_list.append(videos if is_first_clip else videos[:, cur_motion_frames_num:])
+                            else:
+                                gen_video_list.append(videos if is_first_clip else videos[:, cur_motion_frames_num:])
 
                             current_condframe_index += 1
                             iteration_count += 1
@@ -4301,14 +4305,16 @@ class WanVideoSampler:
                                     last_frame = original_images[:, :, -1:, :, :]
                                     miss_length   = 1
                                     original_images = torch.cat([original_images, last_frame.repeat(1, 1, miss_length, 1, 1)], dim=2)
-
-                        gen_video_samples = torch.cat(gen_video_list, dim=1)
                         
-                        # Ensure we have exactly the target number of frames
-                        if gen_video_samples.shape[1] > total_frames:
-                            original_frame_count = gen_video_samples.shape[1]
-                            gen_video_samples = gen_video_samples[:, :total_frames]
-                            log.info(f"Truncated generated video from {original_frame_count} frames to {total_frames} frames to match audio length")
+                        if not output_path:
+                            gen_video_samples = torch.cat(gen_video_list, dim=1)
+							# Ensure we have exactly the target number of frames
+	                        if gen_video_samples.shape[1] > total_frames:
+	                            original_frame_count = gen_video_samples.shape[1]
+	                            gen_video_samples = gen_video_samples[:, :total_frames]
+	                            log.info(f"Truncated generated video from {original_frame_count} frames to {total_frames} frames to match audio length")
+                        else:
+                            gen_video_samples = torch.zeros(3, 1, 64, 64) # dummy output
 
                         if force_offload:
                             if not model["auto_cpu_offload"]:
@@ -4318,7 +4324,7 @@ class WanVideoSampler:
                             torch.cuda.reset_peak_memory_stats(device)
                         except:
                             pass
-                        return {"video": gen_video_samples.permute(1, 2, 3, 0)},
+                        return {"video": gen_video_samples.permute(1, 2, 3, 0), "output_path": output_path},
                     # region framepack loop
                     elif framepack:
                         framepack_out = []
@@ -4548,7 +4554,7 @@ class WanVideoSampler:
                                 callback_latent = (latent_model_input[:, :orig_noise_len].to(device) - noise_pred[:, :orig_noise_len].to(device) * t.to(device) / 1000).detach()
                             #elif phantom_latents is not None:
                             #    callback_latent = (latent_model_input[:,:-phantom_latents.shape[1]].to(device) - noise_pred[:,:-phantom_latents.shape[1]].to(device) * t.to(device) / 1000).detach()
-                            elif humo_image_cond is not None:
+                            elif humo_image_cond is not None and humo_reference_count > 0:
                                 callback_latent = (latent_model_input[:,:-humo_reference_count].to(device) - noise_pred[:,:-humo_reference_count].to(device) * t.to(device) / 1000).detach()
                             else:
                                 callback_latent = (latent_model_input.to(device) - noise_pred.to(device) * t.to(device) / 1000).detach()
@@ -4570,7 +4576,7 @@ class WanVideoSampler:
 
         if phantom_latents is not None:
             latent = latent[:,:-phantom_latents.shape[1]]
-        if humo_image_cond is not None:
+        if humo_image_cond is not None and humo_reference_count > 0:
             latent = latent[:,:-humo_reference_count]
         
         cache_states = None
@@ -5382,7 +5388,10 @@ class WanVideoEncodeLatentBatch:
 
         latent_list = []
         for img in images:
-            latent = vae.encode(img.unsqueeze(0).unsqueeze(0).permute(0, 4, 1, 2, 3), device=device, tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))
+            if enable_vae_tiling and tile_x is not None:
+                latent = vae.encode(img.unsqueeze(0).unsqueeze(0).permute(0, 4, 1, 2, 3), device=device, tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))
+            else:
+                latent = vae.encode(img.unsqueeze(0).unsqueeze(0).permute(0, 4, 1, 2, 3), device=device, tiled=enable_vae_tiling)
             vae.model.clear_cache()
             if latent_strength != 1.0:
                 latent *= latent_strength
