@@ -209,7 +209,7 @@ class HuMoEmbeds:
         num_refs = 0
         if reference_images is not None:
             if reference_images.shape[1] != height or reference_images.shape[2] != width:
-                reference_images_in = common_upscale(reference_images.movedim(-1, 1), width, height, "lanczos", "disabled").movedim(-1, 1)
+                reference_images_in = common_upscale(reference_images.movedim(-1, 1), width, height, "lanczos", "disabled").movedim(1, -1)
             else:
                 reference_images_in = reference_images
             samples, = WanVideoEncodeLatentBatch.encode(self, vae, reference_images_in, tiled_vae, None, None, None, None)
