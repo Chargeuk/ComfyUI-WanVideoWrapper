@@ -1525,7 +1525,17 @@ class WanVideoModelLoader:
 
         if merge_loras and lora is not None:
             log.info(f"Moving diffusion model from {patcher.model.diffusion_model.device} to {offload_device}")
-            patcher.model.diffusion_model.to(offload_device)
+            
+            # Check if any parameters are still on meta device
+            has_meta_tensors = any(param.device.type == 'meta' for param in patcher.model.diffusion_model.parameters())
+            
+            if has_meta_tensors:
+                # Use to_empty() for models with meta tensors
+                patcher.model.diffusion_model.to_empty(device=offload_device)
+            else:
+                # Use regular to() for models with real tensors
+                patcher.model.diffusion_model.to(offload_device)
+            
             gc.collect()
             mm.soft_empty_cache()
 

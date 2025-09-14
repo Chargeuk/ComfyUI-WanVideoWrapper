@@ -4309,10 +4309,10 @@ class WanVideoSampler:
                         if not output_path:
                             gen_video_samples = torch.cat(gen_video_list, dim=1)
 							# Ensure we have exactly the target number of frames
-	                        if gen_video_samples.shape[1] > total_frames:
-	                            original_frame_count = gen_video_samples.shape[1]
-	                            gen_video_samples = gen_video_samples[:, :total_frames]
-	                            log.info(f"Truncated generated video from {original_frame_count} frames to {total_frames} frames to match audio length")
+                            if gen_video_samples.shape[1] > total_frames:
+                                original_frame_count = gen_video_samples.shape[1]
+                                gen_video_samples = gen_video_samples[:, :total_frames]
+                                log.info(f"Truncated generated video from {original_frame_count} frames to {total_frames} frames to match audio length")
                         else:
                             gen_video_samples = torch.zeros(3, 1, 64, 64) # dummy output
 
