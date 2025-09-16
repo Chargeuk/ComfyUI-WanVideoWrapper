@@ -85,6 +85,24 @@ def get_full_path_or_raise(folder_name: str, filename: str) -> str:
         raise FileNotFoundError(f"Model in folder '{folder_name}' with filename '{filename}' not found.")
     return result
 
+def parse_prompt_input(prompt):
+    original_prompt = prompt
+    if isinstance(prompt, list):
+        return prompt
+    elif isinstance(prompt, str):
+        # Try to parse as a string representation of a list
+        prompt = prompt.strip()
+        if prompt.startswith('[') and prompt.endswith(']'):
+            try:
+                import ast
+                return ast.literal_eval(prompt)
+            except (ValueError, SyntaxError):
+                # If parsing fails, treat as a single string
+                return [original_prompt]
+        else:
+            return [original_prompt]
+    else:
+        return [str(original_prompt)]
 
 models_dir = folder_paths.models_dir
 
@@ -568,6 +586,7 @@ of the original Wan templates or a custom system prompt.
 
     def process(self, model_name, precision, positive_prompt, negative_prompt, quantization='disabled', use_disk_cache=True, device="gpu", extender_args=None):
         from .nodes_model_loading import LoadWanVideoT5TextEncoder
+
         pbar = ProgressBar(3)
 
         echoshot = True if "[1]" in positive_prompt else False
@@ -627,6 +646,148 @@ of the original Wan templates or a custom system prompt.
         mm.soft_empty_cache()
         gc.collect() 
         return (prompt_embeds_dict, {"prompt_embeds": prompt_embeds_dict["negative_prompt_embeds"]}, positive_prompt)
+
+
+class VTS_WanVideoMultiTextEncodeCached:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "model_name": (folder_paths.get_filename_list("text_encoders"), {"tooltip": "These models are loaded from 'ComfyUI/models/text_encoders'"}),
+            "precision": (["fp32", "bf16"],
+                    {"default": "bf16"}
+                ),
+            "positive_prompt_in": ("STRING", {"default": "", "multiline": True} ),
+            "negative_prompt_in": ("STRING", {"default": "", "multiline": True} ),
+            "quantization": (['disabled', 'fp8_e4m3fn'], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "use_disk_cache": ("BOOLEAN", {"default": True, "tooltip": "Cache the text embeddings to disk for faster re-use, under the custom_nodes/ComfyUI-WanVideoWrapper/text_embed_cache directory"}),
+            "device": (["gpu", "cpu"], {"default": "gpu", "tooltip": "Device to run the text encoding on."}),
+            },
+            "optional": {
+                "extender_args": ("WANVIDEOPROMPTEXTENDER_ARGS", {"tooltip": "Use this node to extend the prompt with additional text."}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", "WANVIDEOTEXTEMBEDS", "STRING")
+    RETURN_NAMES = ("text_embeds", "negative_text_embeds", "positive_prompt")
+    OUTPUT_IS_LIST = (
+        True,
+        True,
+        True,
+    )
+    OUTPUT_TOOLTIPS = ("The text embeddings for both prompts", "The text embeddings for the negative prompt only (for NAG)", "Positive prompt to display prompt extender results")
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = """Encodes text prompts into text embeddings. This node loads and completely unloads the T5 after done,  
+leaving no VRAM or RAM imprint. If prompts have been cached before T5 is not loaded at all.  
+negative output is meant to be used with NAG, it contains only negative prompt embeddings.  
+
+Additionally you can provide a Qwen LLM model to extend the positive prompt with either one  
+of the original Wan templates or a custom system prompt.  
+"""
+
+
+    def process(self, model_name, precision, positive_prompt_in, negative_prompt_in, quantization='disabled', use_disk_cache=True, device="gpu", extender_args=None):
+        from .nodes_model_loading import LoadWanVideoT5TextEncoder
+        # both the positive and negative prompts could be text representations of arrays
+        # where each item in the array is a seperate prompt to be processed
+        # so we need to handle them accordingly
+        positive_prompts = parse_prompt_input(positive_prompt_in)
+        negative_prompts = parse_prompt_input(negative_prompt_in)
+        number_of_positive_prompts = len(positive_prompts)
+        number_of_negative_prompts = len(negative_prompts)
+        total_number_of_prompts = max(number_of_positive_prompts, number_of_negative_prompts)
+        pbar = ProgressBar(total_number_of_prompts * 3)
+        text_embeds_list = []
+        negative_text_embeds_list = []
+        positive_prompt_list = []
+        t5 = None
+
+        # loop through the total_number_of_prompts
+        for i in range(total_number_of_prompts):
+            if i < number_of_positive_prompts:
+                positive_prompt = positive_prompts[i]
+            else:
+                positive_prompt = positive_prompts[-1]
+
+            if i < number_of_negative_prompts:
+                negative_prompt = negative_prompts[i]
+            else:
+                negative_prompt = negative_prompts[-1]
+
+            echoshot = True if "[1]" in positive_prompt else False
+
+            # Handle prompt extension with in-memory cache
+            orig_prompt = positive_prompt
+            if extender_args is not None:
+                extender_key = (orig_prompt, str(extender_args))
+                if extender_key in _extender_cache:
+                    positive_prompt = _extender_cache[extender_key]
+                    log.info(f"Loaded extended prompt from in-memory cache: {positive_prompt}")
+                else:
+                    from .qwen.qwen import QwenLoader, WanVideoPromptExtender
+                    log.info("Using WanVideoPromptExtender to process prompts")
+                    qwen, = QwenLoader().load(
+                        extender_args["model"], 
+                        load_device="main_device" if device == "gpu" else "cpu", 
+                        precision=precision)
+                    positive_prompt, = WanVideoPromptExtender().generate(
+                        qwen=qwen,
+                        max_new_tokens=extender_args["max_new_tokens"],
+                        prompt=orig_prompt,
+                        device=device,
+                        force_offload=False,
+                        custom_system_prompt=extender_args["system_prompt"],
+                        seed=extender_args["seed"]
+                    )
+                    log.info(f"Extended positive prompt: {positive_prompt}")
+                    _extender_cache[extender_key] = positive_prompt
+                    del qwen
+                    mm.soft_empty_cache()
+                    gc.collect() 
+            pbar.update(1)
+
+            # Now check disk cache using the (possibly extended) prompt
+            if use_disk_cache:
+                context, context_null = get_cached_text_embeds(positive_prompt, negative_prompt)
+                if context is not None and context_null is not None:
+                    text_embeds_list.append({
+                        "prompt_embeds": context,
+                        "negative_prompt_embeds": context_null,
+                        "echoshot": echoshot,
+                    })
+                    negative_text_embeds_list.append({
+                        "prompt_embeds": context_null,
+                    })
+                    positive_prompt_list.append(positive_prompt)
+                    pbar.update(2)
+                    continue
+
+            if t5 is None:
+                t5, = LoadWanVideoT5TextEncoder().loadmodel(model_name, precision, "main_device", quantization)
+            pbar.update(1)
+
+            prompt_embeds_dict, = WanVideoTextEncode().process(
+                positive_prompt=positive_prompt,
+                negative_prompt=negative_prompt,
+                t5=t5,
+                force_offload=False,
+                model_to_offload=None,
+                use_disk_cache=use_disk_cache,
+                device=device
+            )
+            text_embeds_list.append(prompt_embeds_dict)
+            negative_text_embeds_list.append({"prompt_embeds": prompt_embeds_dict["negative_prompt_embeds"]})
+            positive_prompt_list.append(positive_prompt)
+            pbar.update(1)
+
+        if t5 is not None:
+            del t5
+            t5 = None
+        mm.soft_empty_cache()
+        gc.collect()
+        print(f"VTS_WanVideoMultiTextEncodeCached Text embeddings collected: {len(text_embeds_list)}, Negative: {len(negative_text_embeds_list)}, Positive: {len(positive_prompt_list)}")
+        return (text_embeds_list, negative_text_embeds_list, positive_prompt_list)
+
 
 #region TextEncode
 class WanVideoTextEncode:
@@ -917,7 +1078,62 @@ class WanVideoApplyNAG:
                 }
             })
         return (prompt_embeds_dict_copy,)
-    
+
+class VTS_WanVideoApplyMultiNAG:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "original_text_embeds_in": ("WANVIDEOTEXTEMBEDS",),
+            "nag_text_embeds_in": ("WANVIDEOTEXTEMBEDS",),
+            "nag_scale": ("FLOAT", {"default": 11.0, "min": 0.0, "max": 100.0, "step": 0.1}),
+            "nag_tau": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 10.0, "step": 0.1}),
+            "nag_alpha": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+        }
+
+    INPUT_IS_LIST = True
+    RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", )
+    RETURN_NAMES = ("text_embeds",)
+    # OUTPUT_IS_LIST = (
+    #     True, 
+    # )
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Adds NAG prompt embeds to original prompt embeds: 'https://github.com/ChenDarYen/Normalized-Attention-Guidance'"
+
+    def process(self, original_text_embeds_in, nag_text_embeds_in, nag_scale, nag_tau, nag_alpha):
+        # only the embeds should be processed as lists
+        # for everyting else we use the 1st item
+        nag_scale = nag_scale[0]
+        nag_tau = nag_tau[0]
+        nag_alpha = nag_alpha[0]
+        text_embeds_list = []
+        number_of_original_text_embeds_in = len(original_text_embeds_in)
+        number_of_nag_text_embeds_in = len(nag_text_embeds_in)
+        maximum_number_of_embeds = max(number_of_original_text_embeds_in, number_of_nag_text_embeds_in)
+
+        for i in range(maximum_number_of_embeds):
+            original_text_embeds = original_text_embeds_in[i] if i < number_of_original_text_embeds_in else original_text_embeds_in[-1]
+            nag_text_embeds = nag_text_embeds_in[i] if i < number_of_nag_text_embeds_in else nag_text_embeds_in[-1]
+
+            prompt_embeds_dict_copy = original_text_embeds.copy()
+            prompt_embeds_dict_copy.update({
+                    "nag_prompt_embeds": nag_text_embeds["prompt_embeds"],
+                    "nag_params": {
+                        "nag_scale": nag_scale,
+                        "nag_tau": nag_tau,
+                        "nag_alpha": nag_alpha,
+                    }
+                })
+            text_embeds_list.append(prompt_embeds_dict_copy)
+
+        text_embeds_result = {
+            "charge_uk_embeds" : text_embeds_list
+        }
+
+        return (text_embeds_result,)
+
+
 class WanVideoTextEmbedBridge:
     @classmethod
     def INPUT_TYPES(s):
@@ -2211,14 +2427,37 @@ class WanVideoSampler:
 
         if not multitalk_sampling and scheduler == "multitalk":
             raise Exception("multitalk scheduler is only for multitalk sampling when using ImagetoVideoMultiTalk -node")
-
+        
+        # check if text_embeds is a list
+        # text_embeds_list = [text_embeds]
+        # if isinstance(text_embeds, list):
+        #     print(f"!!!!!!Received {len(text_embeds)} text_embeds as a list for {steps} steps.")
+        #     text_embeds_list = []
+        #     for text_embed in text_embeds:
+        #         text_embed_correct_device = dict_to_device(text_embed, device)
+        #         text_embeds_list.append(text_embed_correct_device)
+        #     text_embeds = text_embeds[0]
         if text_embeds == None:
+            print(f"!!!!!!Received No text_embeds at all for {steps} steps.")
             text_embeds = {
                 "prompt_embeds": [],
                 "negative_prompt_embeds": [],
             }
+            text_embeds_list = [text_embeds]
         else:
-            text_embeds = dict_to_device(text_embeds, device)
+            
+            charge_uk_embeds = text_embeds.get("charge_uk_embeds", None)
+            if charge_uk_embeds is not None:
+                print(f"!!!!!!Received {len(charge_uk_embeds)} text_embeds as a list for {steps} steps.")
+                text_embeds_list = []
+                for text_embed in charge_uk_embeds:
+                    text_embed_correct_device = dict_to_device(text_embed, device)
+                    text_embeds_list.append(text_embed_correct_device)
+                text_embeds = text_embeds_list[0]
+            else:
+                print(f"!!!!!!Received 1 text_embeds as a single item for {steps} steps.")
+                text_embeds = dict_to_device(text_embeds, device)
+                text_embeds_list = [text_embeds]
 
         seed_g = torch.Generator(device=torch.device("cpu"))
         seed_g.manual_seed(seed)
@@ -2984,8 +3223,10 @@ class WanVideoSampler:
         def predict_with_cfg(z, cfg_scale, positive_embeds, negative_embeds, timestep, idx, image_cond=None, clip_fea=None, 
                              control_latents=None, vace_data=None, unianim_data=None, audio_proj=None, control_camera_latents=None, 
                              add_cond=None, cache_state=None, context_window=None, multitalk_audio_embeds=None, fantasy_portrait_input=None, reverse_time=False,
-                             mtv_motion_tokens=None, s2v_audio_input=None, s2v_ref_motion=None, s2v_motion_frames=[1, 0], s2v_pose=None):
+                             mtv_motion_tokens=None, s2v_audio_input=None, s2v_ref_motion=None, s2v_motion_frames=[1, 0], s2v_pose=None, text_embeds_override=None):
             nonlocal transformer
+            if text_embeds_override is None:
+                text_embeds_override = text_embeds
             z = z.to(dtype)
             autocast_enabled = ("fp8" in model["quantization"] and not transformer.patched_linear)
             with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype) if autocast_enabled else nullcontext():
@@ -3182,8 +3423,8 @@ class WanVideoSampler:
                     "pcd_data": pcd_data_input, # Uni3C input
                     "controlnet": controlnet, # TheDenk's controlnet input
                     "add_cond": add_cond_input, # additional conditioning input
-                    "nag_params": text_embeds.get("nag_params", {}), # normalized attention guidance
-                    "nag_context": text_embeds.get("nag_prompt_embeds", None), # normalized attention guidance context
+                    "nag_params": text_embeds_override.get("nag_params", {}), # normalized attention guidance
+                    "nag_context": text_embeds_override.get("nag_prompt_embeds", None), # normalized attention guidance context
                     "multitalk_audio": multitalk_audio_input if multitalk_audio_embedding is not None else None, # Multi/InfiniteTalk audio input
                     "ref_target_masks": ref_target_masks if multitalk_audio_embedding is not None else None, # Multi/InfiniteTalk reference target masks
                     "inner_t": [shot_len] if shot_len else None, # inner timestep for EchoShot
@@ -4007,6 +4248,13 @@ class WanVideoSampler:
                                         transformer.to(device)
 
                             # Use the appropriate prompt for this section
+                            text_embeds_index = iteration_count
+                            if text_embeds_index >= len(text_embeds_list):
+                                text_embeds_index = len(text_embeds_list) - 1
+
+                            print(f"!!!!Using text embeds index: {text_embeds_index}/{len(text_embeds_list)} for iteration {iteration_count}")
+                            text_embeds = text_embeds_list[text_embeds_index]
+
                             if len(text_embeds["prompt_embeds"]) > 1:
                                 prompt_index = min(iteration_count, len(text_embeds["prompt_embeds"]) - 1)
                                 positive = [text_embeds["prompt_embeds"][prompt_index]]
@@ -4153,7 +4401,8 @@ class WanVideoSampler:
                                 noise_pred, self.cache_state = predict_with_cfg(
                                     latent_model_input, cfg[min(i, len(timesteps)-1)], positive, text_embeds["negative_prompt_embeds"],
                                     timestep, i, y, clip_embeds, control_latents, window_vace_data, partial_unianim_data, audio_proj, control_camera_latents, add_cond,
-                                    cache_state=self.cache_state, multitalk_audio_embeds=audio_embs, fantasy_portrait_input=partial_fantasy_portrait_input)
+                                    cache_state=self.cache_state, multitalk_audio_embeds=audio_embs, fantasy_portrait_input=partial_fantasy_portrait_input,
+                                    text_embeds_override=text_embeds)
 
                                 if callback is not None:
                                     callback_latent = (latent_model_input.to(device) - noise_pred.to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
@@ -4213,7 +4462,7 @@ class WanVideoSampler:
                                         final_timestep, len(timesteps)-1, y, clip_embeds, control_latents, window_vace_data, 
                                         partial_unianim_data, audio_proj, control_camera_latents, add_cond,
                                         cache_state=self.cache_state, multitalk_audio_embeds=audio_embs, 
-                                        fantasy_portrait_input=partial_fantasy_portrait_input)
+                                        fantasy_portrait_input=partial_fantasy_portrait_input, text_embeds_override=text_embeds)
                                     
                                     # Calculate denoised latents using the same formula as normal inference
                                     denoised_latents = (latent_model_input.to(device) - final_noise_pred.to(device) * final_timestep.to(device) / 1000).detach()
@@ -5498,11 +5747,13 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoPhantomEmbeds": WanVideoPhantomEmbeds,
     "WanVideoRealisDanceLatents": WanVideoRealisDanceLatents,
     "WanVideoApplyNAG": WanVideoApplyNAG,
+    "VTS_WanVideoApplyMultiNAG": VTS_WanVideoApplyMultiNAG,
     "WanVideoMiniMaxRemoverEmbeds": WanVideoMiniMaxRemoverEmbeds,
     "WanVideoFreeInitArgs": WanVideoFreeInitArgs,
     "WanVideoSetRadialAttention": WanVideoSetRadialAttention,
     "WanVideoBlockList": WanVideoBlockList,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
+    "VTS_WanVideoMultiTextEncodeCached": VTS_WanVideoMultiTextEncodeCached,
     "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
     "WanVideoScheduler": WanVideoScheduler,
     "WanVideoAddStandInLatent": WanVideoAddStandInLatent,
@@ -5543,11 +5794,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoPhantomEmbeds": "WanVideo Phantom Embeds",
     "WanVideoRealisDanceLatents": "WanVideo RealisDance Latents",
     "WanVideoApplyNAG": "WanVideo Apply NAG",
+    "VTS_WanVideoApplyMultiNAG": "VTS WanVideo Apply Multi NAG",
     "WanVideoMiniMaxRemoverEmbeds": "WanVideo MiniMax Remover Embeds",
     "WanVideoFreeInitArgs": "WanVideo Free Init Args",
     "WanVideoSetRadialAttention": "WanVideo Set Radial Attention",
     "WanVideoBlockList": "WanVideo Block List",
     "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
+    "VTS_WanVideoMultiTextEncodeCached": "VTS WanVideo MultiTextEncode Cached",
     "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
     "WanVideoAddStandInLatent": "WanVideo Add StandIn Latent",
     "WanVideoAddControlEmbeds": "WanVideo Add Control Embeds",
