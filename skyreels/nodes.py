@@ -38,7 +38,7 @@ from comfy.utils import load_torch_file, ProgressBar, common_upscale
 from comfy.clip_vision import clip_preprocess, ClipVisionModel
 from comfy.cli_args import args, LatentPreviewMethod
 from ..nodes_model_loading import load_weights
-from ..nodes import offload_transformer
+from ..nodes_sampler import offload_transformer
 
 device = mm.get_torch_device()
 offload_device = mm.unet_offload_device()

@@ -1,5 +1,13 @@
 import os, gc, math
 import torch
+import torch.nn.functional as F
+import numpy as np
+import hashlib
+
+from .wanvideo.schedulers import get_scheduler, scheduler_list
+
+from .utils import(log, clip_encode_image_tiled, add_noise_to_reference_video, set_module_tensor_to_device)
+from .taehv import TAEHV
 import random
 import torch.nn.functional as F
 import gc
@@ -33,9 +41,8 @@ from contextlib import nullcontext
 from einops import rearrange
 
 from comfy import model_management as mm
-from comfy.utils import ProgressBar, common_upscale, load_torch_file
+from comfy.utils import ProgressBar, common_upscale
 from comfy.clip_vision import clip_preprocess, ClipVisionModel
-from comfy.cli_args import args, LatentPreviewMethod
 import folder_paths
 import importlib.util
 import sys
@@ -336,47 +343,6 @@ offload_device = mm.unet_offload_device()
 VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
 
-try:
-    from .gguf.gguf import GGUFParameter
-except:
-    pass
-
-class MetaParameter(torch.nn.Parameter):
-    def __new__(cls, dtype, quant_type=None):
-        data = torch.empty(0, dtype=dtype)
-        self = torch.nn.Parameter(data, requires_grad=False)
-        self.quant_type = quant_type
-        return self
-
-def offload_transformer(transformer):
-    for block in transformer.blocks:
-        block.kv_cache = None
-    transformer.teacache_state.clear_all()
-    transformer.magcache_state.clear_all()
-    transformer.easycache_state.clear_all()
-    
-    if transformer.patched_linear:
-        for name, param in transformer.named_parameters():
-            if "loras" in name or "controlnet" in name:
-                continue
-            module = transformer
-            subnames = name.split('.')
-            for subname in subnames[:-1]:
-                module = getattr(module, subname)
-            attr_name = subnames[-1]
-            if param.data.is_floating_point():
-                meta_param = torch.nn.Parameter(torch.empty_like(param.data, device='meta'), requires_grad=False)
-                setattr(module, attr_name, meta_param)
-            elif isinstance(param.data, GGUFParameter):
-                quant_type = getattr(param, 'quant_type', None)
-                setattr(module, attr_name, MetaParameter(param.data.dtype, quant_type))
-            else:
-                pass
-    else:
-        transformer.to(offload_device)
-
-    mm.soft_empty_cache()
-    gc.collect()
 
 class WanVideoEnhanceAVideo:
     @classmethod
@@ -1491,7 +1457,6 @@ class WanVideoImageToVideoEncode:
 
         vae.to(device)
         y = vae.encode([concatenated], device, end_=(end_image is not None and not fun_or_fl2v_model),tiled=tiled_vae)[0]
-        vae.model.clear_cache()
         del concatenated
 
         has_ref = False
@@ -1531,6 +1496,191 @@ class WanVideoImageToVideoEncode:
             "has_ref": has_ref,
             "add_cond_latents": add_cond_latents,
             "mask": mask
+        }
+
+        return (image_embeds,)
+    
+# region WanAnimate
+class WanVideoAnimateEmbeds:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "vae": ("WANVAE",),
+            "width": ("INT", {"default": 832, "min": 64, "max": 8096, "step": 8, "tooltip": "Width of the image to encode"}),
+            "height": ("INT", {"default": 480, "min": 64, "max": 8096, "step": 8, "tooltip": "Height of the image to encode"}),
+            "num_frames": ("INT", {"default": 81, "min": 1, "max": 10000, "step": 4, "tooltip": "Number of frames to encode"}),
+            "force_offload": ("BOOLEAN", {"default": True}),
+            "frame_window_size": ("INT", {"default": 77, "min": 1, "max": 1000, "step": 1, "tooltip": "Number of frames to use for temporal attention window"}),
+            "colormatch": (
+            [   
+                'disabled',
+                'mkl',
+                'hm', 
+                'reinhard', 
+                'mvgd', 
+                'hm-mvgd-hm', 
+                'hm-mkl-hm',
+            ], {
+               "default": 'disabled', "tooltip": "Color matching method to use between the windows"
+            },),
+            "pose_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional multiplier for the pose"}),
+            "face_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional multiplier for the face"}),
+            },
+            "optional": {
+                "clip_embeds": ("WANVIDIMAGE_CLIPEMBEDS", {"tooltip": "Clip vision encoded image"}),
+                "ref_images": ("IMAGE", {"tooltip": "Image to encode"}),
+                "pose_images": ("IMAGE", {"tooltip": "end frame"}),
+                "face_images": ("IMAGE", {"tooltip": "end frame"}),
+                "bg_images": ("IMAGE", {"tooltip": "background images"}),
+                "mask": ("MASK", {"tooltip": "mask"}),
+                "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE encoding for reduced memory use"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
+    RETURN_NAMES = ("image_embeds",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+
+    def process(self, vae, width, height, num_frames, force_offload, frame_window_size, colormatch, pose_strength, face_strength,
+                ref_images=None, pose_images=None, face_images=None, clip_embeds=None, tiled_vae=False, bg_images=None, mask=None):
+
+        H = height
+        W = width
+
+        lat_h = H // vae.upsampling_factor
+        lat_w = W // vae.upsampling_factor
+
+        num_refs = ref_images.shape[0] if ref_images is not None else 0
+        num_frames = ((num_frames - 1) // 4) * 4 + 1
+
+        looping = num_frames > frame_window_size
+
+        if num_frames < frame_window_size:
+            frame_window_size = num_frames
+
+        target_shape = (16, (num_frames - 1) // 4 + 1 + num_refs, lat_h, lat_w)
+        latent_window_size = ((frame_window_size - 1) // 4)
+
+        if not looping:
+            num_frames = num_frames + num_refs * 4
+        else:
+            latent_window_size = latent_window_size + 1
+
+        mm.soft_empty_cache()
+        gc.collect()
+        vae.to(device)
+        # Resize and rearrange the input image dimensions
+        pose_latents = ref_latents = ref_latent = None
+        if pose_images is not None:
+            pose_images = pose_images[..., :3]
+            if pose_images.shape[1] != H or pose_images.shape[2] != W:
+                resized_pose_images = common_upscale(pose_images.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
+            else:
+                resized_pose_images = pose_images.permute(3, 0, 1, 2) # C, T, H, W
+            resized_pose_images = resized_pose_images * 2 - 1
+            if not looping:
+                pose_latents = vae.encode([resized_pose_images.to(device, vae.dtype)], device,tiled=tiled_vae)
+                pose_latents = pose_latents.to(offload_device)
+            
+                if pose_latents.shape[2] < latent_window_size:
+                    log.info(f"WanAnimate: Padding pose latents from {pose_latents.shape} to length {latent_window_size}")
+                    pad_len = latent_window_size - pose_latents.shape[2]
+                    pad = torch.zeros(pose_latents.shape[0], pose_latents.shape[1], pad_len, pose_latents.shape[3], pose_latents.shape[4], device=pose_latents.device, dtype=pose_latents.dtype)
+                    pose_latents = torch.cat([pose_latents, pad], dim=2)
+                del resized_pose_images
+            else:
+                resized_pose_images = resized_pose_images.to(offload_device, dtype=vae.dtype)            
+
+        bg_latents = None
+        if bg_images is not None:
+            if bg_images.shape[1] != H or bg_images.shape[2] != W:
+                resized_bg_images = common_upscale(bg_images.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
+            else:
+                resized_bg_images = bg_images.permute(3, 0, 1, 2) # C, T, H, W
+            resized_bg_images = (resized_bg_images[:3] * 2 - 1)
+
+        if not looping:
+            if bg_images is None:
+                resized_bg_images = torch.zeros(3, num_frames - num_refs, H, W, device=device, dtype=vae.dtype)
+            bg_latents = vae.encode([resized_bg_images.to(device, vae.dtype)], device,tiled=tiled_vae)[0].to(offload_device)
+            del resized_bg_images
+        elif bg_images is not None:
+            resized_bg_images = resized_bg_images.to(offload_device, dtype=vae.dtype)
+
+        if ref_images is not None:
+            if ref_images.shape[1] != H or ref_images.shape[2] != W:
+                resized_ref_images = common_upscale(ref_images.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
+            else:
+                resized_ref_images = ref_images.permute(3, 0, 1, 2) # C, T, H, W
+            resized_ref_images = resized_ref_images[:3] * 2 - 1
+
+            ref_latent = vae.encode([resized_ref_images.to(device, vae.dtype)], device,tiled=tiled_vae)[0]
+            msk = torch.zeros(4, 1, lat_h, lat_w, device=device, dtype=vae.dtype)
+            msk[:, :num_refs] = 1
+            ref_latent_masked = torch.cat([msk, ref_latent], dim=0).to(offload_device) # 4+C 1 H W
+
+            if mask is None:
+                bg_mask = torch.zeros(1, num_frames, lat_h, lat_w, device=offload_device, dtype=vae.dtype)
+            else:
+                bg_mask = 1 - mask[:num_frames]
+                if bg_mask.shape[0] < num_frames and not looping:
+                    bg_mask = torch.cat([bg_mask, bg_mask[-1:].repeat(num_frames - bg_mask.shape[0], 1, 1)], dim=0)
+                bg_mask = common_upscale(bg_mask.unsqueeze(1), lat_w, lat_h, "nearest", "disabled").squeeze(1)
+                bg_mask = bg_mask.unsqueeze(-1).permute(3, 0, 1, 2).to(offload_device, vae.dtype) # C, T, H, W
+            
+            if bg_images is None and looping:
+                bg_mask[:, :num_refs] = 1
+            bg_mask_mask_repeated = torch.repeat_interleave(bg_mask[:, 0:1], repeats=4, dim=1) # T, C, H, W
+            bg_mask = torch.cat([bg_mask_mask_repeated, bg_mask[:, 1:]], dim=1)
+            bg_mask = bg_mask.view(1, bg_mask.shape[1] // 4, 4, lat_h, lat_w) # 1, T, C, H, W
+            bg_mask = bg_mask.movedim(1, 2)[0]# C, T, H, W
+
+            if not looping:
+                bg_latents_masked = torch.cat([bg_mask[:, :bg_latents.shape[1]], bg_latents], dim=0)
+                del bg_mask, bg_latents
+                ref_latent = torch.cat([ref_latent_masked, bg_latents_masked], dim=1)
+            else:
+                ref_latent = ref_latent_masked
+
+        if face_images is not None:
+            face_images = face_images[..., :3]
+            if face_images.shape[1] != 512 or face_images.shape[2] != 512:
+                resized_face_images = common_upscale(face_images.movedim(-1, 1), 512, 512, "lanczos", "center").movedim(0, 1)
+            else:
+                resized_face_images = face_images.permute(3, 0, 1, 2) # B, C, T, H, W
+            resized_face_images = (resized_face_images * 2 - 1).unsqueeze(0)
+            resized_face_images = resized_face_images.to(offload_device, dtype=vae.dtype)
+
+
+        seq_len = math.ceil((target_shape[2] * target_shape[3]) / 4 * target_shape[1])
+        
+        if force_offload:
+            vae.model.to(offload_device)
+            mm.soft_empty_cache()
+            gc.collect()
+
+        image_embeds = {
+            "clip_context": clip_embeds.get("clip_embeds", None) if clip_embeds is not None else None,
+            "negative_clip_context": clip_embeds.get("negative_clip_embeds", None) if clip_embeds is not None else None,
+            "max_seq_len": seq_len,
+            "pose_latents": pose_latents,
+            "pose_images": resized_pose_images if pose_images is not None and looping else None,
+            "bg_images": resized_bg_images if bg_images is not None and looping else None,
+            "ref_masks": bg_mask if mask is not None and looping else None,
+            "ref_latent": ref_latent,
+            "ref_image": resized_ref_images if ref_images is not None else None,
+            "face_pixels": resized_face_images if face_images is not None else None,
+            "num_frames": num_frames,
+            "target_shape": target_shape,
+            "frame_window_size": frame_window_size,
+            "lat_h": lat_h,
+            "lat_w": lat_w,
+            "vae": vae,
+            "colormatch": colormatch,
+            "looping": looping,
+            "pose_strength": pose_strength,
+            "face_strength": face_strength,
         }
 
         return (image_embeds,)
@@ -1914,7 +2064,7 @@ class WanVideoVACEEncode:
 
         vae = vae.to(device)
         z0 = self.vace_encode_frames(vae, input_frames, ref_images, masks=input_masks, tiled_vae=tiled_vae)
-        vae.model.clear_cache()
+        
         m0 = self.vace_encode_masks(input_masks, ref_images)
         z = self.vace_latent(z0, m0)
         vae.to(offload_device)
@@ -1955,7 +2105,7 @@ class WanVideoVACEEncode:
             reactive = vae.encode(reactive, device=device, tiled=tiled_vae)
             latents = [torch.cat((u, c), dim=0) for u, c in zip(inactive, reactive)]
             del inactive, reactive
-        vae.model.clear_cache()
+        
         
         cat_latents = []
         for latent, refs in zip(latents, ref_images):
@@ -2315,6 +2465,290 @@ class WanVideoRoPEFunction:
         return (rope_function,)
 
 
+#region VideoDecode
+class WanVideoDecode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "vae": ("WANVAE",),
+                    "samples": ("LATENT",),
+                    "enable_vae_tiling": ("BOOLEAN", {"default": False, "tooltip": (
+                        "Drastically reduces memory use but will introduce seams at tile stride boundaries. "
+                        "The location and number of seams is dictated by the tile stride size. "
+                        "The visibility of seams can be controlled by increasing the tile size. "
+                        "Seams become less obvious at 1.5x stride and are barely noticeable at 2x stride size. "
+                        "Which is to say if you use a stride width of 160, the seams are barely noticeable with a tile width of 320."
+                    )}),
+                    "tile_x": ("INT", {"default": 272, "min": 40, "max": 2048, "step": 8, "tooltip": "Tile width in pixels. Smaller values use less VRAM but will make seams more obvious."}),
+                    "tile_y": ("INT", {"default": 272, "min": 40, "max": 2048, "step": 8, "tooltip": "Tile height in pixels. Smaller values use less VRAM but will make seams more obvious."}),
+                    "tile_stride_x": ("INT", {"default": 144, "min": 32, "max": 2040, "step": 8, "tooltip": "Tile stride width in pixels. Smaller values use less VRAM but will introduce more seams."}),
+                    "tile_stride_y": ("INT", {"default": 128, "min": 32, "max": 2040, "step": 8, "tooltip": "Tile stride height in pixels. Smaller values use less VRAM but will introduce more seams."}),
+                    },
+                    "optional": {
+                        "normalization": (["default", "minmax"], {"advanced": True}),
+                    }
+                }
+
+    @classmethod
+    def VALIDATE_INPUTS(s, tile_x, tile_y, tile_stride_x, tile_stride_y):
+        if tile_x <= tile_stride_x:
+            return "Tile width must be larger than the tile stride width."
+        if tile_y <= tile_stride_y:
+            return "Tile height must be larger than the tile stride height."
+        return True
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "decode"
+    CATEGORY = "WanVideoWrapper"
+
+    def decode(self, vae, samples, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, normalization="default"):
+        mm.soft_empty_cache()
+        video = samples.get("video", None)
+        if video is not None:
+            video.clamp_(-1.0, 1.0)
+            video.add_(1.0).div_(2.0)
+            return video.cpu().float(),
+        latents = samples["samples"]
+        end_image = samples.get("end_image", None)
+        has_ref = samples.get("has_ref", False)
+        drop_last = samples.get("drop_last", False)
+        is_looped = samples.get("looped", False)
+
+        vae.to(device)
+
+        latents = latents.to(device = device, dtype = vae.dtype)
+
+        mm.soft_empty_cache()
+
+        if has_ref:
+            latents = latents[:, :, 1:]
+        if drop_last:
+            latents = latents[:, :, :-1]
+
+        if type(vae).__name__ == "TAEHV":      
+            images = vae.decode_video(latents.permute(0, 2, 1, 3, 4))[0].permute(1, 0, 2, 3)
+            images = torch.clamp(images, 0.0, 1.0)
+            images = images.permute(1, 2, 3, 0).cpu().float()
+            return (images,)
+        else:
+            if end_image is not None:
+                enable_vae_tiling = False
+            images = vae.decode(latents, device=device, end_=(end_image is not None), tiled=enable_vae_tiling, tile_size=(tile_x//8, tile_y//8), tile_stride=(tile_stride_x//8, tile_stride_y//8))[0]
+            
+        
+        images = images.cpu().float()
+
+        if normalization == "minmax":
+            images.sub_(images.min()).div_(images.max() - images.min())
+        else:  
+            images.clamp_(-1.0, 1.0)
+            images.add_(1.0).div_(2.0)
+        
+        if is_looped:
+            temp_latents = torch.cat([latents[:, :, -3:]] + [latents[:, :, :2]], dim=2)
+            temp_images = vae.decode(temp_latents, device=device, end_=(end_image is not None), tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))[0]
+            temp_images = temp_images.cpu().float()
+            temp_images = (temp_images - temp_images.min()) / (temp_images.max() - temp_images.min())
+            images = torch.cat([temp_images[:, 9:].to(images), images[:, 5:]], dim=1)
+
+        if end_image is not None: 
+            images = images[:, 0:-1]
+
+        
+        vae.to(offload_device)
+        mm.soft_empty_cache()
+
+        images.clamp_(0.0, 1.0)
+
+        return (images.permute(1, 2, 3, 0),)
+
+#region VideoEncode
+class WanVideoEncodeLatentBatch:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "vae": ("WANVAE",),
+                    "images": ("IMAGE",),
+                    "enable_vae_tiling": ("BOOLEAN", {"default": False, "tooltip": "Drastically reduces memory use but may introduce seams"}),
+                    "tile_x": ("INT", {"default": 272, "min": 64, "max": 2048, "step": 1, "tooltip": "Tile size in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "tile_y": ("INT", {"default": 272, "min": 64, "max": 2048, "step": 1, "tooltip": "Tile size in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "tile_stride_x": ("INT", {"default": 144, "min": 32, "max": 2048, "step": 32, "tooltip": "Tile stride in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "tile_stride_y": ("INT", {"default": 128, "min": 32, "max": 2048, "step": 32, "tooltip": "Tile stride in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    },
+                }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "encode"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Encodes a batch of images individually to create a latent video batch where each video is a single frame, useful for I2V init purposes, for example as multiple context window inits"
+
+    def encode(self, vae, images, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, latent_strength=1.0):
+        vae.to(device)
+
+        images = images.clone()
+
+        B, H, W, C = images.shape
+        if W % 16 != 0 or H % 16 != 0:
+            new_height = (H // 16) * 16
+            new_width = (W // 16) * 16
+            log.warning(f"Image size {W}x{H} is not divisible by 16, resizing to {new_width}x{new_height}")
+            images = common_upscale(images.movedim(-1, 1), new_width, new_height, "lanczos", "disabled").movedim(1, -1)
+
+        if images.shape[-1] == 4:
+            images = images[..., :3]
+        images = images.to(vae.dtype).to(device) * 2.0 - 1.0
+
+        latent_list = []
+        for img in images:
+            if enable_vae_tiling and tile_x is not None:
+                latent = vae.encode(img.unsqueeze(0).unsqueeze(0).permute(0, 4, 1, 2, 3), device=device, tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))
+            else:
+                latent = vae.encode(img.unsqueeze(0).unsqueeze(0).permute(0, 4, 1, 2, 3), device=device, tiled=enable_vae_tiling)
+            
+            if latent_strength != 1.0:
+                latent *= latent_strength
+            latent_list.append(latent.squeeze(0).cpu())
+        latents_out = torch.stack(latent_list, dim=0)
+
+        log.info(f"WanVideoEncode: Encoded latents shape {latents_out.shape}")
+        vae.to(offload_device)
+        mm.soft_empty_cache()
+
+        return ({"samples": latents_out},)
+
+class WanVideoEncode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "vae": ("WANVAE",),
+                    "image": ("IMAGE",),
+                    "enable_vae_tiling": ("BOOLEAN", {"default": False, "tooltip": "Drastically reduces memory use but may introduce seams"}),
+                    "tile_x": ("INT", {"default": 272, "min": 64, "max": 2048, "step": 1, "tooltip": "Tile size in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "tile_y": ("INT", {"default": 272, "min": 64, "max": 2048, "step": 1, "tooltip": "Tile size in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "tile_stride_x": ("INT", {"default": 144, "min": 32, "max": 2048, "step": 32, "tooltip": "Tile stride in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    "tile_stride_y": ("INT", {"default": 128, "min": 32, "max": 2048, "step": 32, "tooltip": "Tile stride in pixels, smaller values use less VRAM, may introduce more seams"}),
+                    },
+                    "optional": {
+                        "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation, helpful for leapfusion I2V where some noise can add motion and give sharper results"}),
+                        "latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier, helpful for leapfusion I2V where lower values allow for more motion"}),
+                        "mask": ("MASK", ),
+                    }
+                }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "encode"
+    CATEGORY = "WanVideoWrapper"
+
+    def encode(self, vae, image, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, noise_aug_strength=0.0, latent_strength=1.0, mask=None):
+        vae.to(device)
+
+        image = image.clone()
+
+        B, H, W, C = image.shape
+        if W % 16 != 0 or H % 16 != 0:
+            new_height = (H // 16) * 16
+            new_width = (W // 16) * 16
+            log.warning(f"Image size {W}x{H} is not divisible by 16, resizing to {new_width}x{new_height}")
+            image = common_upscale(image.movedim(-1, 1), new_width, new_height, "lanczos", "disabled").movedim(1, -1)
+
+        if image.shape[-1] == 4:
+            image = image[..., :3]
+        image = image.to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W        
+
+        if noise_aug_strength > 0.0:
+            image = add_noise_to_reference_video(image, ratio=noise_aug_strength)
+
+        if isinstance(vae, TAEHV):
+            latents = vae.encode_video(image.permute(0, 2, 1, 3, 4), parallel=False)# B, T, C, H, W
+            latents = latents.permute(0, 2, 1, 3, 4)
+        else:
+            latents = vae.encode(image * 2.0 - 1.0, device=device, tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))
+            
+            vae.to(offload_device)
+        if latent_strength != 1.0:
+            latents *= latent_strength
+
+        log.info(f"WanVideoEncode: Encoded latents shape {latents.shape}")
+        mm.soft_empty_cache()
+ 
+        return ({"samples": latents, "noise_mask": mask},)
+
+NODE_CLASS_MAPPINGS = {
+    "WanVideoDecode": WanVideoDecode,
+    "WanVideoTextEncode": WanVideoTextEncode,
+    "WanVideoTextEncodeSingle": WanVideoTextEncodeSingle,
+    "WanVideoClipVisionEncode": WanVideoClipVisionEncode,
+    "WanVideoImageToVideoEncode": WanVideoImageToVideoEncode,
+    "WanVideoEncode": WanVideoEncode,
+    "WanVideoEncodeLatentBatch": WanVideoEncodeLatentBatch,
+    "WanVideoEmptyEmbeds": WanVideoEmptyEmbeds,
+    "WanVideoEnhanceAVideo": WanVideoEnhanceAVideo,
+    "WanVideoContextOptions": WanVideoContextOptions,
+    "WanVideoTextEmbedBridge": WanVideoTextEmbedBridge,
+    "WanVideoFlowEdit": WanVideoFlowEdit,
+    "WanVideoControlEmbeds": WanVideoControlEmbeds,
+    "WanVideoSLG": WanVideoSLG,
+    "WanVideoLoopArgs": WanVideoLoopArgs,
+    "WanVideoSetBlockSwap": WanVideoSetBlockSwap,
+    "WanVideoExperimentalArgs": WanVideoExperimentalArgs,
+    "WanVideoVACEEncode": WanVideoVACEEncode,
+    "WanVideoPhantomEmbeds": WanVideoPhantomEmbeds,
+    "WanVideoRealisDanceLatents": WanVideoRealisDanceLatents,
+    "WanVideoApplyNAG": WanVideoApplyNAG,
+    "WanVideoMiniMaxRemoverEmbeds": WanVideoMiniMaxRemoverEmbeds,
+    "WanVideoFreeInitArgs": WanVideoFreeInitArgs,
+    "WanVideoSetRadialAttention": WanVideoSetRadialAttention,
+    "WanVideoBlockList": WanVideoBlockList,
+    "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
+    "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
+    "WanVideoScheduler": WanVideoScheduler,
+    "WanVideoAddStandInLatent": WanVideoAddStandInLatent,
+    "WanVideoAddControlEmbeds": WanVideoAddControlEmbeds,
+    "WanVideoAddMTVMotion": WanVideoAddMTVMotion,
+    "WanVideoRoPEFunction": WanVideoRoPEFunction,
+    "WanVideoAddPusaNoise": WanVideoAddPusaNoise,
+    "WanVideoAnimateEmbeds": WanVideoAnimateEmbeds,
+    }
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "WanVideoDecode": "WanVideo Decode",
+    "WanVideoTextEncode": "WanVideo TextEncode",
+    "WanVideoTextEncodeSingle": "WanVideo TextEncodeSingle",
+    "WanVideoTextImageEncode": "WanVideo TextImageEncode (IP2V)",
+    "WanVideoClipVisionEncode": "WanVideo ClipVision Encode",
+    "WanVideoImageToVideoEncode": "WanVideo ImageToVideo Encode",
+    "WanVideoEncode": "WanVideo Encode",
+    "WanVideoEncodeLatentBatch": "WanVideo Encode Latent Batch",
+    "WanVideoEmptyEmbeds": "WanVideo Empty Embeds",
+    "WanVideoEnhanceAVideo": "WanVideo Enhance-A-Video",
+    "WanVideoContextOptions": "WanVideo Context Options",
+    "WanVideoTextEmbedBridge": "WanVideo TextEmbed Bridge",
+    "WanVideoFlowEdit": "WanVideo FlowEdit",
+    "WanVideoControlEmbeds": "WanVideo Control Embeds",
+    "WanVideoSLG": "WanVideo SLG",
+    "WanVideoLoopArgs": "WanVideo Loop Args",
+    "WanVideoSetBlockSwap": "WanVideo Set BlockSwap",
+    "WanVideoExperimentalArgs": "WanVideo Experimental Args",
+    "WanVideoVACEEncode": "WanVideo VACE Encode",
+    "WanVideoPhantomEmbeds": "WanVideo Phantom Embeds",
+    "WanVideoRealisDanceLatents": "WanVideo RealisDance Latents",
+    "WanVideoApplyNAG": "WanVideo Apply NAG",
+    "WanVideoMiniMaxRemoverEmbeds": "WanVideo MiniMax Remover Embeds",
+    "WanVideoFreeInitArgs": "WanVideo Free Init Args",
+    "WanVideoSetRadialAttention": "WanVideo Set Radial Attention",
+    "WanVideoBlockList": "WanVideo Block List",
+    "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
+    "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
+    "WanVideoAddStandInLatent": "WanVideo Add StandIn Latent",
+    "WanVideoAddControlEmbeds": "WanVideo Add Control Embeds",
+    "WanVideoAddMTVMotion": "WanVideo MTV Crafter Motion",
+    "WanVideoRoPEFunction": "WanVideo RoPE Function",
+    "WanVideoAddPusaNoise": "WanVideo Add Pusa Noise",
+    "WanVideoAnimateEmbeds": "WanVideo Animate Embeds",
+}
 #region Sampler
 class WanVideoSampler:
     @classmethod
@@ -5807,4 +6241,3 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoAddMTVMotion": "WanVideo MTV Crafter Motion",
     "WanVideoRoPEFunction": "WanVideo RoPE Function",
     "WanVideoAddPusaNoise": "WanVideo Add Pusa Noise",
-}

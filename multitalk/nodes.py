@@ -572,7 +572,7 @@ class WanVideoImageToVideoMultiTalk:
         image_embeds = {
             "multitalk_sampling": True,
             "multitalk_start_image": resized_start_image if start_image is not None else None,
-            "num_frames": num_frames,
+            "frame_window_size": num_frames,
             "motion_frame": motion_frame,
             "target_h": H,
             "target_w": W,

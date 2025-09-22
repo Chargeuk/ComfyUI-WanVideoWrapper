@@ -64,9 +64,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoSetBlockSwap",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "cc3b79ab180e8c81e6125d539662935cf171c87b"
+        "ver": "cc3b79ab180e8c81e6125d539662935cf171c87b",
+        "Node name for S&R": "WanVideoSetBlockSwap"
       },
       "widgets_values": [],
       "color": "#223",
@@ -142,9 +142,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "ImageResizeKJv2",
         "cnr_id": "comfyui-kjnodes",
-        "ver": "0adab07d1ad3d0780afc97319eaf37c3681af37d"
+        "ver": "0adab07d1ad3d0780afc97319eaf37c3681af37d",
+        "Node name for S&R": "ImageResizeKJv2"
       },
       "widgets_values": [
         512,
@@ -194,9 +194,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoDecode",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "6099ad393b071728032fd481e96d77d2900eee2c"
+        "ver": "6099ad393b071728032fd481e96d77d2900eee2c",
+        "Node name for S&R": "WanVideoDecode"
       },
       "widgets_values": [
         false,
@@ -295,9 +295,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoSetLoRAs",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "cc3b79ab180e8c81e6125d539662935cf171c87b"
+        "ver": "cc3b79ab180e8c81e6125d539662935cf171c87b",
+        "Node name for S&R": "WanVideoSetLoRAs"
       },
       "widgets_values": [],
       "color": "#223",
@@ -384,9 +384,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoModelLoader",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "6099ad393b071728032fd481e96d77d2900eee2c"
+        "ver": "6099ad393b071728032fd481e96d77d2900eee2c",
+        "Node name for S&R": "WanVideoModelLoader"
       },
       "widgets_values": [
         "WanVideo/HuMo/Wan2_1-HuMo-14B_fp8_e4m3fn_scaled_KJ.safetensors",
@@ -424,9 +424,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoBlockSwap",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "6099ad393b071728032fd481e96d77d2900eee2c"
+        "ver": "6099ad393b071728032fd481e96d77d2900eee2c",
+        "Node name for S&R": "WanVideoBlockSwap"
       },
       "widgets_values": [
         20,
@@ -474,9 +474,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoVAELoader",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "6099ad393b071728032fd481e96d77d2900eee2c"
+        "ver": "6099ad393b071728032fd481e96d77d2900eee2c",
+        "Node name for S&R": "WanVideoVAELoader"
       },
       "widgets_values": [
         "Wan2_1_VAE_bf16.safetensors",
@@ -527,6 +527,8 @@
         }
       ],
       "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "8f2c1b7824cfc7ede720de222b6ac17e4bdffaa2",
         "Node name for S&R": "WanVideoTextEncodeCached"
       },
       "widgets_values": [
@@ -579,9 +581,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoLoraSelect",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "cc3b79ab180e8c81e6125d539662935cf171c87b"
+        "ver": "cc3b79ab180e8c81e6125d539662935cf171c87b",
+        "Node name for S&R": "WanVideoLoraSelect"
       },
       "widgets_values": [
         "WanVid/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
@@ -617,9 +619,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "CreateCFGScheduleFloatList",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "95855196c51b1124a19079b746c5d12ec70d9026"
+        "ver": "95855196c51b1124a19079b746c5d12ec70d9026",
+        "Node name for S&R": "CreateCFGScheduleFloatList"
       },
       "widgets_values": [
         8,
@@ -770,9 +772,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoSampler",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "6099ad393b071728032fd481e96d77d2900eee2c"
+        "ver": "6099ad393b071728032fd481e96d77d2900eee2c",
+        "Node name for S&R": "WanVideoSampler"
       },
       "widgets_values": [
         8,
@@ -832,6 +834,8 @@
         }
       ],
       "properties": {
+        "cnr_id": "ComfyUI-MelBandRoFormer",
+        "ver": "b40e263224778ec417114d91d8b3b39934e30de5",
         "Node name for S&R": "MelBandRoFormerSampler"
       },
       "widgets_values": []
@@ -867,6 +871,8 @@
         }
       ],
       "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "8f2c1b7824cfc7ede720de222b6ac17e4bdffaa2",
         "Node name for S&R": "NormalizeAudioLoudness"
       },
       "widgets_values": [
@@ -898,9 +904,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WhisperModelLoader",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "9cefe309e3d8eb9ad3afda576cf7098c72e9efad"
+        "ver": "9cefe309e3d8eb9ad3afda576cf7098c72e9efad",
+        "Node name for S&R": "WhisperModelLoader"
       },
       "widgets_values": [
         "whisper_large_v3_encoder_fp16.safetensors",
@@ -938,9 +944,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "LoadImage",
         "cnr_id": "comfy-core",
-        "ver": "0.3.29"
+        "ver": "0.3.29",
+        "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
         "oldman_upscaled.png",
@@ -973,9 +979,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "LoadAudio",
         "cnr_id": "comfy-core",
-        "ver": "0.3.57"
+        "ver": "0.3.57",
+        "Node name for S&R": "LoadAudio"
       },
       "widgets_values": [
         "one-does-not-simply-walk-into-mordor-its-black-gates-are-guarded-by-more-than-just-orcs.mp3",
@@ -1032,7 +1038,7 @@
       ],
       "size": [
         1915.138671875,
-        334
+        894.6746215820312
       ],
       "flags": {},
       "order": 31,
@@ -1070,9 +1076,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "VHS_VideoCombine",
         "cnr_id": "comfyui-videohelpersuite",
-        "ver": "0a75c7958fe320efcb052f1d9f8451fd20c730a8"
+        "ver": "0a75c7958fe320efcb052f1d9f8451fd20c730a8",
+        "Node name for S&R": "VHS_VideoCombine"
       },
       "widgets_values": {
         "frame_rate": 25,
@@ -1182,48 +1188,6 @@
       "bgcolor": "#653"
     },
     {
-      "id": 121,
-      "type": "ImageBatchMulti",
-      "pos": [
-        1265.909423828125,
-        149.07740783691406
-      ],
-      "size": [
-        270,
-        102
-      ],
-      "flags": {},
-      "order": 25,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image_1",
-          "type": "IMAGE",
-          "link": 220
-        },
-        {
-          "name": "image_2",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "links": [
-            221
-          ]
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        2,
-        null
-      ]
-    },
-    {
       "id": 120,
       "type": "Note",
       "pos": [
@@ -1294,6 +1258,8 @@
         }
       ],
       "properties": {
+        "cnr_id": "ComfyUI-MelBandRoFormer",
+        "ver": "b40e263224778ec417114d91d8b3b39934e30de5",
         "Node name for S&R": "MelBandRoFormerModelLoader"
       },
       "widgets_values": [
@@ -1326,9 +1292,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "WanVideoTorchCompileSettings",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "6099ad393b071728032fd481e96d77d2900eee2c"
+        "ver": "6099ad393b071728032fd481e96d77d2900eee2c",
+        "Node name for S&R": "WanVideoTorchCompileSettings"
       },
       "widgets_values": [
         "inductor",
@@ -1365,9 +1331,9 @@
       ],
       "outputs": [],
       "properties": {
-        "Node name for S&R": "PreviewImage",
         "cnr_id": "comfy-core",
-        "ver": "0.3.29"
+        "ver": "0.3.29",
+        "Node name for S&R": "PreviewImage"
       },
       "widgets_values": []
     },
@@ -1398,9 +1364,9 @@
       ],
       "title": "Width",
       "properties": {
-        "Node name for S&R": "INTConstant",
         "cnr_id": "comfyui-kjnodes",
-        "ver": "3e3a1a8aac61dc4515f6a7da74e026f05a80299f"
+        "ver": "3e3a1a8aac61dc4515f6a7da74e026f05a80299f",
+        "Node name for S&R": "INTConstant"
       },
       "widgets_values": [
         1280
@@ -1435,9 +1401,9 @@
       ],
       "title": "Height",
       "properties": {
-        "Node name for S&R": "INTConstant",
         "cnr_id": "comfyui-kjnodes",
-        "ver": "3e3a1a8aac61dc4515f6a7da74e026f05a80299f"
+        "ver": "3e3a1a8aac61dc4515f6a7da74e026f05a80299f",
+        "Node name for S&R": "INTConstant"
       },
       "widgets_values": [
         720
@@ -1454,7 +1420,7 @@
       ],
       "size": [
         283.1015625,
-        262
+        286
       ],
       "flags": {},
       "order": 27,
@@ -1511,9 +1477,9 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "HuMoEmbeds",
         "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "dbcef53405bb78feae4c5d2c6b310b76e4ef9949"
+        "ver": "dbcef53405bb78feae4c5d2c6b310b76e4ef9949",
+        "Node name for S&R": "HuMoEmbeds"
       },
       "widgets_values": [
         65,
@@ -1522,7 +1488,53 @@
         1,
         2.5,
         0,
-        1
+        1,
+        false
+      ]
+    },
+    {
+      "id": 121,
+      "type": "ImageBatchMulti",
+      "pos": [
+        1265.909423828125,
+        149.07740783691406
+      ],
+      "size": [
+        270,
+        102
+      ],
+      "flags": {},
+      "order": 25,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "image_1",
+          "type": "IMAGE",
+          "link": 220
+        },
+        {
+          "name": "image_2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            221
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "468fcc86f0b29e79a8510e8239eb15714d6747a6"
+      },
+      "widgets_values": [
+        2,
+        null
       ]
     }
   ],
@@ -1792,7 +1804,7 @@
         440.8075546995695
       ]
     },
-    "frontendVersion": "1.27.3",
+    "frontendVersion": "1.27.4",
     "node_versions": {
       "ComfyUI-WanVideoWrapper": "9063b99bd11eafa6dba9d6dae07e27c5647c6e16",
       "ComfyUI-KJNodes": "d8b8c637fbd1fe97b7a8c7ece843150df38f8b21",

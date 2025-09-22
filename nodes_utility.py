@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from comfy.utils import common_upscale
 from .utils import log
+from einops import rearrange
 
 try:
     from server import PromptServer
@@ -165,6 +166,16 @@ class WanVideoVACEStartToEndFrame:
             device = control_images.device
         else:
             raise ValueError("At least one of start_image, end_image, or control_images must be provided")
+
+        if start_image is None and end_image is None and control_images is not None:
+            if control_images.shape[0] >= num_frames:
+                control_images = control_images[:num_frames]
+            elif control_images.shape[0] < num_frames:
+                # padd with empty_frame_level frames
+                padding = torch.ones((num_frames - control_images.shape[0], control_images.shape[1], control_images.shape[2], control_images.shape[3]), device=control_images.device) * empty_frame_level
+                control_images = torch.cat([control_images, padding], dim=0)
+            return (control_images.cpu().float(), torch.zeros_like(control_images[:, :, :, 0]).cpu().float())
+        B, H, W, C = start_image.shape if start_image is not None else end_image.shape
 
         # Convert negative end_index to positive
         if end_index < 0:
@@ -525,6 +536,189 @@ class WanVideoPassImagesFromSamples:
         video.clamp_(-1.0, 1.0)
         video.add_(1.0).div_(2.0)
         return video.cpu().float(), samples.get("output_path", "")
+
+
+class FaceMaskFromPoseKeypoints:
+    @classmethod
+    def INPUT_TYPES(s):
+        input_types = {
+            "required": {
+                "pose_kps": ("POSE_KEYPOINT",),
+                "person_index": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1, "tooltip": "Index of the person to start with"}),
+            }
+        }
+        return input_types
+    RETURN_TYPES = ("MASK",)
+    FUNCTION = "createmask"
+    CATEGORY = "ControlNet Preprocessors/Pose Keypoint Postprocess"
+
+    def createmask(self, pose_kps, person_index):
+        pose_frames = pose_kps
+        prev_center = None
+        np_frames = []
+        for i, pose_frame in enumerate(pose_frames):
+            selected_idx, prev_center = self.select_closest_person(pose_frame, person_index if i == 0 else prev_center)
+            np_frames.append(self.draw_kps(pose_frame, selected_idx))
+        
+        if not np_frames:
+            # Handle case where no frames were processed
+            log.warning("No valid pose frames found, returning empty mask")
+            return (torch.zeros((1, 64, 64), dtype=torch.float32),)
+            
+        np_frames = np.stack(np_frames, axis=0)
+        tensor = torch.from_numpy(np_frames).float() / 255.
+        print("tensor.shape:", tensor.shape)
+        tensor = tensor[:, :, :, 0]
+        return (tensor,)
+
+    def select_closest_person(self, pose_frame, prev_center_or_index):
+        people = pose_frame["people"]
+        if not people:
+            return -1, None
+        
+        centers = []
+        valid_people_indices = []
+        
+        for idx, person in enumerate(people):
+            # Check if face keypoints exist and are valid
+            if "face_keypoints_2d" not in person or not person["face_keypoints_2d"]:
+                continue
+                
+            kps = np.array(person["face_keypoints_2d"])
+            if len(kps) == 0:
+                continue
+                
+            n = len(kps) // 3
+            if n == 0:
+                continue
+                
+            facial_kps = rearrange(kps, "(n c) -> n c", n=n, c=3)[:, :2]
+            
+            # Check if we have valid coordinates (not all zeros)
+            if np.all(facial_kps == 0):
+                continue
+                
+            center = facial_kps.mean(axis=0)
+            
+            # Check if center is valid (not NaN or infinite)
+            if np.isnan(center).any() or np.isinf(center).any():
+                continue
+                
+            centers.append(center)
+            valid_people_indices.append(idx)
+        
+        if not centers:
+            return -1, None
+            
+        if isinstance(prev_center_or_index, (int, np.integer)):
+            # First frame: use person_index, but map to valid people
+            if 0 <= prev_center_or_index < len(valid_people_indices):
+                idx = valid_people_indices[prev_center_or_index]
+                return idx, centers[prev_center_or_index]
+            elif valid_people_indices:
+                # Fallback to first valid person
+                idx = valid_people_indices[0]
+                return idx, centers[0]
+            else:
+                return -1, None
+        elif prev_center_or_index is not None:
+            # Find closest to previous center
+            prev_center = np.array(prev_center_or_index)
+            dists = [np.linalg.norm(center - prev_center) for center in centers]
+            min_idx = int(np.argmin(dists))
+            actual_idx = valid_people_indices[min_idx]
+            return actual_idx, centers[min_idx]
+        else:
+            # prev_center_or_index is None, fallback to first valid person
+            if valid_people_indices:
+                idx = valid_people_indices[0]
+                return idx, centers[0]
+            else:
+                return -1, None
+
+    def draw_kps(self, pose_frame, person_index):
+        import cv2
+        width, height = pose_frame["canvas_width"], pose_frame["canvas_height"]
+        canvas = np.zeros((height, width, 3), dtype=np.uint8)
+        people = pose_frame["people"]
+        
+        if person_index < 0 or person_index >= len(people):
+            return canvas  # Out of bounds, return blank
+            
+        person = people[person_index]
+        
+        # Check if face keypoints exist and are valid
+        if "face_keypoints_2d" not in person or not person["face_keypoints_2d"]:
+            return canvas  # No face keypoints, return blank
+            
+        face_kps_data = person["face_keypoints_2d"]
+        if len(face_kps_data) == 0:
+            return canvas  # Empty keypoints, return blank
+            
+        n = len(face_kps_data) // 3
+        if n < 17:  # Need at least 17 points for outer contour
+            return canvas  # Not enough keypoints, return blank
+            
+        facial_kps = rearrange(np.array(face_kps_data), "(n c) -> n c", n=n, c=3)[:, :2]
+        
+        # Check if we have valid coordinates (not all zeros)
+        if np.all(facial_kps == 0):
+            return canvas  # All keypoints are zero, return blank
+            
+        # Check for NaN or infinite values
+        if np.isnan(facial_kps).any() or np.isinf(facial_kps).any():
+            return canvas  # Invalid coordinates, return blank
+        
+        # Check for negative coordinates or coordinates that would create streaks
+        if np.any(facial_kps < 0):
+            return canvas  # Negative coordinates, likely bad detection
+            
+        # Check if coordinates are reasonable (not too close to edges which might indicate bad detection)
+        min_margin = 5  # Minimum distance from edges
+        if (np.any(facial_kps[:, 0] < min_margin) or 
+            np.any(facial_kps[:, 1] < min_margin) or 
+            np.any(facial_kps[:, 0] > width - min_margin) or 
+            np.any(facial_kps[:, 1] > height - min_margin)):
+            # Check if this looks like a streak to corner (many points near 0,0)
+            corner_points = np.sum((facial_kps[:, 0] < min_margin) & (facial_kps[:, 1] < min_margin))
+            if corner_points > 3:  # Too many points near corner, likely bad detection
+                return canvas
+                
+        facial_kps = facial_kps.astype(np.int32)
+        
+        # Ensure coordinates are within canvas bounds
+        facial_kps[:, 0] = np.clip(facial_kps[:, 0], 0, width - 1)
+        facial_kps[:, 1] = np.clip(facial_kps[:, 1], 0, height - 1)
+        
+        part_color = (255, 255, 255)
+        outer_contour = facial_kps[:17]
+        
+        # Additional validation for the contour before drawing
+        # Check if contour points are too spread out (indicating bad detection)
+        if len(outer_contour) >= 3:
+            # Calculate bounding box of the contour
+            min_x, min_y = np.min(outer_contour, axis=0)
+            max_x, max_y = np.max(outer_contour, axis=0)
+            contour_width = max_x - min_x
+            contour_height = max_y - min_y
+            
+            # If contour spans more than 80% of canvas, likely bad detection
+            if (contour_width > 0.8 * width or contour_height > 0.8 * height):
+                return canvas
+                
+            # Check if we have a valid contour (at least 3 unique points)
+            unique_points = np.unique(outer_contour, axis=0)
+            if len(unique_points) >= 3:
+                # Final check: ensure the contour is reasonable
+                # Calculate area to see if it's too large or too small
+                contour_area = cv2.contourArea(outer_contour)
+                canvas_area = width * height
+                
+                # If contour is less than 0.1% or more than 50% of canvas, skip
+                if 0.001 * canvas_area <= contour_area <= 0.5 * canvas_area:
+                    cv2.fillPoly(canvas, pts=[outer_contour], color=part_color)
+            
+        return canvas
     
 NODE_CLASS_MAPPINGS = {
     "WanVideoImageResizeToClosest": WanVideoImageResizeToClosest,
@@ -537,6 +731,7 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoSigmaToStep": WanVideoSigmaToStep,
     "NormalizeAudioLoudness": NormalizeAudioLoudness,
     "WanVideoPassImagesFromSamples": WanVideoPassImagesFromSamples,
+    "FaceMaskFromPoseKeypoints": FaceMaskFromPoseKeypoints,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoImageResizeToClosest": "WanVideo Image Resize To Closest",
@@ -549,4 +744,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSigmaToStep": "WanVideo Sigma To Step",
     "NormalizeAudioLoudness": "Normalize Audio Loudness",
     "WanVideoPassImagesFromSamples": "WanVideo Pass Images From Samples",
+    "FaceMaskFromPoseKeypoints": "Face Mask From Pose Keypoints",
 }

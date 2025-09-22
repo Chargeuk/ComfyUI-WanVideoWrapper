@@ -4,6 +4,7 @@ import os, gc, uuid
 from .utils import log, apply_lora
 import numpy as np
 from tqdm import tqdm
+import re
 
 from .wanvideo.modules.model import WanModel, LoRALinearLayer
 from .wanvideo.modules.t5 import T5EncoderModel
@@ -776,10 +777,21 @@ class WanVideoSetLoRAs:
 
         return (patcher,)
 
+def rename_fuser_block(name):
+    # map fuser blocks to main blocks
+    new_name = name
+    if "face_adapter.fuser_blocks." in name:
+        match = re.search(r'face_adapter\.fuser_blocks\.(\d+)\.', name)
+        if match:
+            fuser_block_num = int(match.group(1))
+            main_block_num = fuser_block_num * 5
+            new_name = name.replace(f"face_adapter.fuser_blocks.{fuser_block_num}.", f"blocks.{main_block_num}.fuser_block.")
+    return new_name
+
 def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None, 
                  transformer_load_device=None, block_swap_args=None, gguf=False, reader=None, patcher=None):
     params_to_keep = {"time_in", "patch_embedding", "time_", "modulation", "text_embedding", 
-                      "adapter", "add", "ref_conv", "casual_audio_encoder", "cond_encoder", "frame_packer", "audio_proj_glob"}
+                      "adapter", "add", "ref_conv", "casual_audio_encoder", "cond_encoder", "frame_packer", "audio_proj_glob", "face_encoder", "fuser_block"}
     param_count = sum(1 for _ in transformer.named_parameters())
     pbar = ProgressBar(param_count)
     cnt = 0
@@ -801,15 +813,18 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
         for r in reader:
             all_tensors.extend(r.tensors)
         for tensor in all_tensors:
+            name = rename_fuser_block(tensor.name)
+            if "glob" not in name and "audio_proj" in name:
+                name = name.replace("audio_proj", "multitalk_audio_proj")
             load_device = device
-            if "vace_blocks." in tensor.name:
+            if "vace_blocks." in name:
                 try:
-                    vace_block_idx = int(tensor.name.split("vace_blocks.")[1].split(".")[0])
+                    vace_block_idx = int(name.split("vace_blocks.")[1].split(".")[0])
                 except Exception:
                     vace_block_idx = None
-            elif "blocks." in tensor.name:
+            elif "blocks." in name and "face" not in name:
                 try:
-                    block_idx = int(tensor.name.split("blocks.")[1].split(".")[0])
+                    block_idx = int(name.split("blocks.")[1].split(".")[0])
                 except Exception:
                     block_idx = None
 
@@ -823,7 +838,7 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
                         
             is_gguf_quant = tensor.tensor_type not in [GGMLQuantizationType.F32, GGMLQuantizationType.F16]
             weights = torch.from_numpy(tensor.data.copy()).to(load_device)
-            sd[tensor.name] = GGUFParameter(weights, quant_type=tensor.tensor_type) if is_gguf_quant else weights
+            sd[name] = GGUFParameter(weights, quant_type=tensor.tensor_type) if is_gguf_quant else weights
         sd.update(extra_sd)
         del all_tensors, extra_sd
 
@@ -846,7 +861,7 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
                 vace_block_idx = int(name.split("vace_blocks.")[1].split(".")[0])
             except Exception:
                 vace_block_idx = None
-        elif "blocks." in name:
+        elif "blocks." in name and "face" not in name:
             try:
                 block_idx = int(name.split("blocks.")[1].split(".")[0])
             except Exception:
@@ -860,13 +875,13 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
             continue
 
         if gguf:
-            dtype_to_use = torch.float32 if "patch_embedding" in name else base_dtype
+            dtype_to_use = torch.float32 if "patch_embedding" in name or "motion_encoder" in name else base_dtype
         else:
             dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else weight_dtype
             dtype_to_use = weight_dtype if sd[name.replace("_orig_mod.", "")].dtype == weight_dtype else dtype_to_use
             if "modulation" in name or "norm" in name or "bias" in name or "img_emb" in name:
                 dtype_to_use = base_dtype
-            if "patch_embedding" in name:
+            if "patch_embedding" in name or "motion_encoder" in name:
                 dtype_to_use = torch.float32
 
         load_device = transformer_load_device
@@ -883,6 +898,8 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
         cnt += 1
         if cnt % 100 == 0:
             pbar.update(100)
+    #for name, param in transformer.named_parameters():
+    #    print(name, param.device, param.dtype)
 
     pbar.update_absolute(0)
 
@@ -1084,6 +1101,14 @@ class WanVideoModelLoader:
             sd, reader = load_gguf(model_path)
             gguf_reader.append(reader)
 
+        is_wananimate = "pose_patch_embedding.weight" in sd
+        # rename WanAnimate face fuser block keys to insert into main blocks instead
+        if is_wananimate:
+            for key in list(sd.keys()):
+                new_key = rename_fuser_block(key)
+                if new_key != key:
+                    sd[new_key] = sd.pop(key)
+
         if quantization == "disabled":
             for k, v in sd.items():
                 if isinstance(v, torch.Tensor):
@@ -1150,6 +1175,7 @@ class WanVideoModelLoader:
         ffn2_dim = sd["blocks.0.ffn.2.weight"].shape[1]
 
         is_humo = "audio_proj.audio_proj_glob_1.layer.weight" in sd
+        is_wananimate = "pose_patch_embedding.weight" in sd
 
         model_type = "t2v"
         if "audio_injector.injector.0.k.weight" in sd:
@@ -1253,6 +1279,7 @@ class WanVideoModelLoader:
             "rope_func": "comfy",
             "main_device": device,
             "offload_device": offload_device,
+            "dtype": base_dtype,
             "teacache_coefficients": teacache_coefficients_map[model_variant],
             "magcache_ratios": magcache_ratios_map[model_variant],
             "vace_layers": vace_layers,
@@ -1266,6 +1293,7 @@ class WanVideoModelLoader:
             "cond_dim": sd["cond_encoder.weight"].shape[1] if "cond_encoder.weight" in sd else 0,
             "zero_timestep": model_type == "s2v",
             "humo_audio": is_humo,
+            "is_wananimate": is_wananimate,
 
         }
 
@@ -1383,16 +1411,21 @@ class WanVideoModelLoader:
                         class_interval=4,
                         attention_mode=attention_mode,
                     )
-            transformer.audio_proj = multitalk_model["proj_model"]
+            transformer.multitalk_audio_proj = multitalk_model["proj_model"]
             transformer.multitalk_model_type = multitalk_model_type
 
             extra_model_path = multitalk_model["model_path"]
+            extra_sd = {}
             if multitalk_model_path.endswith(".gguf"):
-                extra_sd, extra_reader = load_gguf(extra_model_path)
+                extra_sd_temp, extra_reader = load_gguf(extra_model_path)
                 gguf_reader.append(extra_reader)
                 del extra_reader
             else:
-                extra_sd = load_torch_file(extra_model_path, device=transformer_load_device, safe_load=True)
+                extra_sd_temp = load_torch_file(extra_model_path, device=transformer_load_device, safe_load=True)
+                
+            for k, v in extra_sd_temp.items():
+                extra_sd[k.replace("audio_proj.", "multitalk_audio_proj.")] = v
+                
             sd.update(extra_sd)
             del extra_sd
 
@@ -1476,9 +1509,6 @@ class WanVideoModelLoader:
                 raise NotImplementedError("fp8_fast is not supported with unmerged LoRAs")
             from .fp8_optimization import convert_fp8_linear
             convert_fp8_linear(transformer, base_dtype, params_to_keep, scale_weight_keys=scale_weights)
-
-        if multitalk_model is not None:
-            transformer.audio_proj = multitalk_model["proj_model"]
 
         if vram_management_args is not None:
             if gguf:

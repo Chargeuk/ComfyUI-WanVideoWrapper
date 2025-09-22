@@ -13,7 +13,7 @@ def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, s
         module_prefix = prefix + name + "."
         _replace_linear(module, compute_dtype, state_dict, module_prefix, patches, scale_weights)
 
-        if isinstance(module, nn.Linear) and "loras" not in module_prefix:
+        if isinstance(module, nn.Linear) and "loras" not in module_prefix and "face" not in module_prefix:
             in_features = state_dict[module_prefix + "weight"].shape[1]
             out_features = state_dict[module_prefix + "weight"].shape[0]
             if scale_weights is not None:

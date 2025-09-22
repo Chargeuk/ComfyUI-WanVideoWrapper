@@ -3,6 +3,7 @@ import torch
 import logging
 import math
 from tqdm import tqdm
+from copy import deepcopy
 import types, collections
 from comfy.utils import ProgressBar, copy_to_param, set_attr_param
 from comfy.model_patcher import get_key_weight, string_to_seed
@@ -539,3 +540,31 @@ def get_raag_guidance(noise_pred_cond, noise_pred_uncond, w_max, alpha=1.0, eps=
     ratio_mean = ratio.mean().item()
     adaptive_w = 1.0 + (w_max - 1.0) * math.exp(-alpha * ratio_mean)
     return adaptive_w
+
+def tensor_pingpong_pad(video, target_len):
+    """
+    Pads a video tensor along the frame dimension (dim=2) in a ping-pong fashion.
+    video: torch.Tensor of shape [B, C, F, H, W]
+    target_len: desired number of frames
+    Returns: padded tensor of shape [B, C, target_len, H, W]
+    """
+    in_dims = len(video.shape)
+    if in_dims == 4:
+        video = video.unsqueeze(0)
+    B, C, F, H, W = video.shape
+    idx = 0
+    flip = False
+    indices = []
+    while len(indices) < target_len:
+        indices.append(idx)
+        if flip:
+            idx -= 1
+        else:
+            idx += 1
+        if idx == 0 or idx == F - 1:
+            flip = not flip
+    indices = indices[:target_len]
+    padded_video = video[:, :, indices, :, :]
+    if in_dims == 4:
+        padded_video = padded_video.squeeze(0)
+    return padded_video
