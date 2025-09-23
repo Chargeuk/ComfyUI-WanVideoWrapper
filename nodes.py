@@ -1172,6 +1172,7 @@ class WanVideoTextEmbedReverseBridge:
         print(f"Final positive_embeds type: {type(positive_embeds)}")
         print(f"Final positive_embeds shape: {getattr(positive_embeds, 'shape', 'no shape')}")
         print(f"Final positive_embeds dtype: {getattr(positive_embeds, 'dtype', 'no dtype')}")
+        print(f"Final positive_embeds dimensions: {positive_embeds.dim()}")
         
         # Check if it's a torch tensor
         if not isinstance(positive_embeds, torch.Tensor):
@@ -1185,9 +1186,13 @@ class WanVideoTextEmbedReverseBridge:
                     return None
         
         # Ensure positive_embeds has batch dimension (3D tensor)
+        print(f"Checking if positive_embeds needs batch dimension: dim={positive_embeds.dim()}")
         if positive_embeds.dim() == 2:
+            print("ADDING BATCH DIMENSION TO POSITIVE EMBEDS...")
             positive_embeds = positive_embeds.unsqueeze(0)  # Add batch dimension [seq_len, dim] -> [1, seq_len, dim]
             print(f"Added batch dimension to positive_embeds: {positive_embeds.shape}")
+        else:
+            print(f"Positive embeds already has {positive_embeds.dim()} dimensions, not adding batch dimension")
         
         negative_embeds_raw = wan_text_embeds.get("negative_prompt_embeds", None)
         print(f"negative_embeds_raw type: {type(negative_embeds_raw)}")
@@ -1202,6 +1207,7 @@ class WanVideoTextEmbedReverseBridge:
                 
             print(f"Final negative_embeds type: {type(negative_embeds)}")
             print(f"Final negative_embeds shape: {getattr(negative_embeds, 'shape', 'no shape')}")
+            print(f"Final negative_embeds dimensions: {negative_embeds.dim()}")
             
             # Check if it's a torch tensor
             if not isinstance(negative_embeds, torch.Tensor):
@@ -1215,9 +1221,14 @@ class WanVideoTextEmbedReverseBridge:
                         negative_embeds = None
             
             # Ensure negative_embeds has batch dimension (3D tensor)
-            if negative_embeds is not None and negative_embeds.dim() == 2:
-                negative_embeds = negative_embeds.unsqueeze(0)  # Add batch dimension
-                print(f"Added batch dimension to negative_embeds: {negative_embeds.shape}")
+            if negative_embeds is not None:
+                print(f"Checking if negative_embeds needs batch dimension: dim={negative_embeds.dim()}")
+                if negative_embeds.dim() == 2:
+                    print("ADDING BATCH DIMENSION TO NEGATIVE EMBEDS...")
+                    negative_embeds = negative_embeds.unsqueeze(0)  # Add batch dimension
+                    print(f"Added batch dimension to negative_embeds: {negative_embeds.shape}")
+                else:
+                    print(f"Negative embeds already has {negative_embeds.dim()} dimensions, not adding batch dimension")
         else:
             negative_embeds = None
         
@@ -1235,11 +1246,13 @@ class WanVideoTextEmbedReverseBridge:
         print(f"positive_conditioning structure: list with {len(positive_conditioning)} items")
         print(f"positive_conditioning[0][0] type: {type(positive_conditioning[0][0])}")
         print(f"positive_conditioning[0][0] shape: {getattr(positive_conditioning[0][0], 'shape', 'no shape')}")
+        print(f"positive_conditioning[0][0] dimensions: {positive_conditioning[0][0].dim()}")
         
         if output_negative and negative_embeds is not None:
             negative_conditioning = [[negative_embeds, {}]]
             print(f"negative_conditioning[0][0] type: {type(negative_conditioning[0][0])}")
             print(f"negative_conditioning[0][0] shape: {getattr(negative_conditioning[0][0], 'shape', 'no shape')}")
+            print(f"negative_conditioning[0][0] dimensions: {negative_conditioning[0][0].dim()}")
         else:
             # Create empty negative conditioning if not available
             negative_conditioning = [[torch.zeros_like(positive_embeds), {}]]
@@ -1247,6 +1260,7 @@ class WanVideoTextEmbedReverseBridge:
         
         print("=== END WanVideoTextEmbedReverseBridge DEBUG ===")
         return (positive_conditioning, negative_conditioning)
+    
 class WanVideoTextEmbedBridge:
     @classmethod
     def INPUT_TYPES(s):
