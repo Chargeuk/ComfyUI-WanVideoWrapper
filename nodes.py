@@ -1142,6 +1142,9 @@ class WanVideoTextEmbedReverseBridge:
             "optional": {
                 "conditioning_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength multiplier for the conditioning"}),
                 "output_negative": ("BOOLEAN", {"default": True, "tooltip": "Whether to output negative conditioning as well"}),
+                "target_sequence_length": ("INT", {"default": 512, "min": -1, "max": 2048, "step": 1, "tooltip": "Target sequence length (-1 = keep original)"}),
+                "length_conversion_method": (["truncate", "pad_zeros", "pad_repeat", "interpolate"], {"default": "pad_zeros", "tooltip": "Method to adjust sequence length"}),
+                "convert_to_float32": ("BOOLEAN", {"default": True, "tooltip": "Convert embeddings to float32 for ComfyUI compatibility"}),
             }
         }
 
@@ -1149,9 +1152,11 @@ class WanVideoTextEmbedReverseBridge:
     RETURN_NAMES = ("positive_conditioning", "negative_conditioning")
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
-    DESCRIPTION = "Reverse bridge from WanVideoWrapper text embeddings back to ComfyUI native CONDITIONING format"
+    DESCRIPTION = "Reverse bridge from WanVideoWrapper text embeddings back to ComfyUI native CONDITIONING format with format conversion"
 
-    def process(self, wan_text_embeds, conditioning_strength=1.0, output_negative=True):
+    def process(self, wan_text_embeds, conditioning_strength=1.0, output_negative=True, 
+                target_sequence_length=512, length_conversion_method="pad_zeros", convert_to_float32=True):
+        
         print("=== WanVideoTextEmbedReverseBridge DEBUG ===")
         print(f"Input wan_text_embeds type: {type(wan_text_embeds)}")
         print(f"Input wan_text_embeds keys: {wan_text_embeds.keys() if isinstance(wan_text_embeds, dict) else 'N/A'}")
@@ -1194,8 +1199,10 @@ class WanVideoTextEmbedReverseBridge:
         else:
             print(f"Positive embeds already has {positive_embeds.dim()} dimensions, not adding batch dimension")
         
+        # Handle negative embeddings
         negative_embeds_raw = wan_text_embeds.get("negative_prompt_embeds", None)
         print(f"negative_embeds_raw type: {type(negative_embeds_raw)}")
+        negative_embeds = None
         
         if negative_embeds_raw is not None:
             if isinstance(negative_embeds_raw, list):
@@ -1232,6 +1239,20 @@ class WanVideoTextEmbedReverseBridge:
         else:
             negative_embeds = None
         
+        # Convert data type to float32 if requested
+        if convert_to_float32:
+            print(f"Converting embeddings from {positive_embeds.dtype} to float32")
+            positive_embeds = positive_embeds.float()
+            if negative_embeds is not None:
+                negative_embeds = negative_embeds.float()
+        
+        # Convert sequence length if requested
+        if target_sequence_length > 0:
+            print(f"Converting sequence length from {positive_embeds.shape[1]} to {target_sequence_length}")
+            positive_embeds = self.convert_sequence_length(positive_embeds, target_sequence_length, length_conversion_method)
+            if negative_embeds is not None:
+                negative_embeds = self.convert_sequence_length(negative_embeds, target_sequence_length, length_conversion_method)
+        
         # Apply strength multiplier if specified
         if conditioning_strength != 1.0:
             print(f"Applying conditioning strength: {conditioning_strength}")
@@ -1258,9 +1279,53 @@ class WanVideoTextEmbedReverseBridge:
             negative_conditioning = [[torch.zeros_like(positive_embeds), {}]]
             print("Created empty negative conditioning")
         
+        print(f"Final output - Positive: {positive_embeds.shape} {positive_embeds.dtype}, Negative: {negative_conditioning[0][0].shape} {negative_conditioning[0][0].dtype}")
         print("=== END WanVideoTextEmbedReverseBridge DEBUG ===")
         return (positive_conditioning, negative_conditioning)
     
+    def convert_sequence_length(self, embeddings, target_length, method):
+        """Convert sequence length using specified method"""
+        batch_size, current_length, embedding_dim = embeddings.shape
+        
+        if current_length == target_length:
+            return embeddings
+        
+        if method == "truncate":
+            if current_length > target_length:
+                return embeddings[:, :target_length, :]
+            else:
+                # Pad with zeros if shorter
+                padding = torch.zeros(batch_size, target_length - current_length, embedding_dim, 
+                                    dtype=embeddings.dtype, device=embeddings.device)
+                return torch.cat([embeddings, padding], dim=1)
+                
+        elif method == "pad_zeros":
+            if current_length < target_length:
+                # Pad with zeros
+                padding = torch.zeros(batch_size, target_length - current_length, embedding_dim, 
+                                    dtype=embeddings.dtype, device=embeddings.device)
+                return torch.cat([embeddings, padding], dim=1)
+            else:
+                # Truncate if longer
+                return embeddings[:, :target_length, :]
+                
+        elif method == "pad_repeat":
+            if current_length < target_length:
+                # Repeat the last token
+                last_token = embeddings[:, -1:, :].repeat(1, target_length - current_length, 1)
+                return torch.cat([embeddings, last_token], dim=1)
+            else:
+                # Truncate if longer
+                return embeddings[:, :target_length, :]
+                
+        elif method == "interpolate":
+            # Use linear interpolation to resize sequence
+            embeddings_transposed = embeddings.transpose(1, 2)  # [batch, embedding_dim, seq_len]
+            resized = torch.nn.functional.interpolate(embeddings_transposed, size=target_length, mode='linear', align_corners=False)
+            return resized.transpose(1, 2)  # Back to [batch, seq_len, embedding_dim]
+        
+        return embeddings
+     
 class WanVideoTextEmbedBridge:
     @classmethod
     def INPUT_TYPES(s):
