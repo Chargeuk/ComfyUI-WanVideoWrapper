@@ -648,6 +648,7 @@ of the original Wan templates or a custom system prompt.
         return (prompt_embeds_dict, {"prompt_embeds": prompt_embeds_dict["negative_prompt_embeds"]}, positive_prompt)
 
 
+
 class VTS_WanVideoMultiTextEncodeCached:
     @classmethod
     def INPUT_TYPES(s):
@@ -787,7 +788,6 @@ of the original Wan templates or a custom system prompt.
         gc.collect()
         print(f"VTS_WanVideoMultiTextEncodeCached Text embeddings collected: {len(text_embeds_list)}, Negative: {len(negative_text_embeds_list)}, Positive: {len(positive_prompt_list)}")
         return (text_embeds_list, negative_text_embeds_list, positive_prompt_list)
-
 
 #region TextEncode
 class WanVideoTextEncode:
@@ -952,7 +952,7 @@ class WanVideoTextEncode:
             weights[text] = float(weight)
             
         return cleaned_prompt, weights
-    
+
 class WanVideoTextEncodeSingle:
     @classmethod
     def INPUT_TYPES(s):
@@ -1133,7 +1133,120 @@ class VTS_WanVideoApplyMultiNAG:
 
         return (text_embeds_result,)
 
+class WanVideoTextEmbedReverseBridge:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "wan_text_embeds": ("WANVIDEOTEXTEMBEDS",),
+            },
+            "optional": {
+                "conditioning_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength multiplier for the conditioning"}),
+                "output_negative": ("BOOLEAN", {"default": True, "tooltip": "Whether to output negative conditioning as well"}),
+            }
+        }
 
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("positive_conditioning", "negative_conditioning")
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Reverse bridge from WanVideoWrapper text embeddings back to ComfyUI native CONDITIONING format"
+
+    def process(self, wan_text_embeds, conditioning_strength=1.0, output_negative=True):
+        print("=== WanVideoTextEmbedReverseBridge DEBUG ===")
+        print(f"Input wan_text_embeds type: {type(wan_text_embeds)}")
+        print(f"Input wan_text_embeds keys: {wan_text_embeds.keys() if isinstance(wan_text_embeds, dict) else 'N/A'}")
+        
+        # Extract embeddings from WanVideoWrapper format
+        positive_embeds_raw = wan_text_embeds["prompt_embeds"]
+        print(f"positive_embeds_raw type: {type(positive_embeds_raw)}")
+        
+        if isinstance(positive_embeds_raw, list):
+            print(f"positive_embeds_raw is a list with {len(positive_embeds_raw)} items")
+            for i, item in enumerate(positive_embeds_raw):
+                print(f"  Item {i}: type={type(item)}, shape={getattr(item, 'shape', 'no shape')}")
+            positive_embeds = positive_embeds_raw[0]  # Take first item if it's a list
+        else:
+            print(f"positive_embeds_raw shape: {getattr(positive_embeds_raw, 'shape', 'no shape')}")
+            positive_embeds = positive_embeds_raw
+        
+        print(f"Final positive_embeds type: {type(positive_embeds)}")
+        print(f"Final positive_embeds shape: {getattr(positive_embeds, 'shape', 'no shape')}")
+        print(f"Final positive_embeds dtype: {getattr(positive_embeds, 'dtype', 'no dtype')}")
+        
+        # Check if it's a torch tensor
+        if not isinstance(positive_embeds, torch.Tensor):
+            print(f"WARNING: positive_embeds is not a torch.Tensor, it's {type(positive_embeds)}")
+            if hasattr(positive_embeds, '__iter__') and not isinstance(positive_embeds, (str, bytes)):
+                try:
+                    positive_embeds = torch.stack(list(positive_embeds))
+                    print(f"Converted to tensor with shape: {positive_embeds.shape}")
+                except Exception as e:
+                    print(f"Failed to convert to tensor: {e}")
+                    return None
+        
+        # Ensure positive_embeds has batch dimension (3D tensor)
+        if positive_embeds.dim() == 2:
+            positive_embeds = positive_embeds.unsqueeze(0)  # Add batch dimension [seq_len, dim] -> [1, seq_len, dim]
+            print(f"Added batch dimension to positive_embeds: {positive_embeds.shape}")
+        
+        negative_embeds_raw = wan_text_embeds.get("negative_prompt_embeds", None)
+        print(f"negative_embeds_raw type: {type(negative_embeds_raw)}")
+        
+        if negative_embeds_raw is not None:
+            if isinstance(negative_embeds_raw, list):
+                print(f"negative_embeds_raw is a list with {len(negative_embeds_raw)} items")
+                negative_embeds = negative_embeds_raw[0]  # Take first item if it's a list
+            else:
+                print(f"negative_embeds_raw shape: {getattr(negative_embeds_raw, 'shape', 'no shape')}")
+                negative_embeds = negative_embeds_raw
+                
+            print(f"Final negative_embeds type: {type(negative_embeds)}")
+            print(f"Final negative_embeds shape: {getattr(negative_embeds, 'shape', 'no shape')}")
+            
+            # Check if it's a torch tensor
+            if not isinstance(negative_embeds, torch.Tensor):
+                print(f"WARNING: negative_embeds is not a torch.Tensor, it's {type(negative_embeds)}")
+                if hasattr(negative_embeds, '__iter__') and not isinstance(negative_embeds, (str, bytes)):
+                    try:
+                        negative_embeds = torch.stack(list(negative_embeds))
+                        print(f"Converted negative to tensor with shape: {negative_embeds.shape}")
+                    except Exception as e:
+                        print(f"Failed to convert negative to tensor: {e}")
+                        negative_embeds = None
+            
+            # Ensure negative_embeds has batch dimension (3D tensor)
+            if negative_embeds is not None and negative_embeds.dim() == 2:
+                negative_embeds = negative_embeds.unsqueeze(0)  # Add batch dimension
+                print(f"Added batch dimension to negative_embeds: {negative_embeds.shape}")
+        else:
+            negative_embeds = None
+        
+        # Apply strength multiplier if specified
+        if conditioning_strength != 1.0:
+            print(f"Applying conditioning strength: {conditioning_strength}")
+            positive_embeds = positive_embeds * conditioning_strength
+            if negative_embeds is not None:
+                negative_embeds = negative_embeds * conditioning_strength
+        
+        # Convert to ComfyUI CONDITIONING format
+        # ComfyUI CONDITIONING format is: [[embedding_tensor, pooled_output_dict]]
+        print("Creating ComfyUI CONDITIONING format...")
+        positive_conditioning = [[positive_embeds, {}]]
+        print(f"positive_conditioning structure: list with {len(positive_conditioning)} items")
+        print(f"positive_conditioning[0][0] type: {type(positive_conditioning[0][0])}")
+        print(f"positive_conditioning[0][0] shape: {getattr(positive_conditioning[0][0], 'shape', 'no shape')}")
+        
+        if output_negative and negative_embeds is not None:
+            negative_conditioning = [[negative_embeds, {}]]
+            print(f"negative_conditioning[0][0] type: {type(negative_conditioning[0][0])}")
+            print(f"negative_conditioning[0][0] shape: {getattr(negative_conditioning[0][0], 'shape', 'no shape')}")
+        else:
+            # Create empty negative conditioning if not available
+            negative_conditioning = [[torch.zeros_like(positive_embeds), {}]]
+            print("Created empty negative conditioning")
+        
+        print("=== END WanVideoTextEmbedReverseBridge DEBUG ===")
+        return (positive_conditioning, negative_conditioning)
 class WanVideoTextEmbedBridge:
     @classmethod
     def INPUT_TYPES(s):
@@ -1152,12 +1265,53 @@ class WanVideoTextEmbedBridge:
     DESCRIPTION = "Bridge between ComfyUI native text embedding and WanVideoWrapper text embedding"
 
     def process(self, positive, negative=None):
+        print("=== WanVideoTextEmbedBridge DEBUG ===")
+        print(f"Input positive type: {type(positive)}")
+        print(f"Input positive length: {len(positive) if hasattr(positive, '__len__') else 'no length'}")
+        
+        if hasattr(positive, '__len__') and len(positive) > 0:
+            print(f"positive[0] type: {type(positive[0])}")
+            print(f"positive[0] length: {len(positive[0]) if hasattr(positive[0], '__len__') else 'no length'}")
+            
+            if hasattr(positive[0], '__len__') and len(positive[0]) > 0:
+                print(f"positive[0][0] type: {type(positive[0][0])}")
+                print(f"positive[0][0] shape: {getattr(positive[0][0], 'shape', 'no shape')}")
+                print(f"positive[0][0] dtype: {getattr(positive[0][0], 'dtype', 'no dtype')}")
+        
+        if negative is not None:
+            print(f"Input negative type: {type(negative)}")
+            print(f"Input negative length: {len(negative) if hasattr(negative, '__len__') else 'no length'}")
+            
+            if hasattr(negative, '__len__') and len(negative) > 0:
+                print(f"negative[0] type: {type(negative[0])}")
+                print(f"negative[0] length: {len(negative[0]) if hasattr(negative[0], '__len__') else 'no length'}")
+                
+                if hasattr(negative[0], '__len__') and len(negative[0]) > 0:
+                    print(f"negative[0][0] type: {type(negative[0][0])}")
+                    print(f"negative[0][0] shape: {getattr(negative[0][0], 'shape', 'no shape')}")
+                    print(f"negative[0][0] dtype: {getattr(negative[0][0], 'dtype', 'no dtype')}")
+        else:
+            print("negative is None")
+        
         prompt_embeds_dict = {
                 "prompt_embeds": positive[0][0].to(device),
                 "negative_prompt_embeds": negative[0][0].to(device) if negative is not None else None,
             }
+        
+        print(f"Output prompt_embeds_dict keys: {prompt_embeds_dict.keys()}")
+        print(f"Output prompt_embeds type: {type(prompt_embeds_dict['prompt_embeds'])}")
+        print(f"Output prompt_embeds shape: {getattr(prompt_embeds_dict['prompt_embeds'], 'shape', 'no shape')}")
+        
+        if prompt_embeds_dict['negative_prompt_embeds'] is not None:
+            print(f"Output negative_prompt_embeds type: {type(prompt_embeds_dict['negative_prompt_embeds'])}")
+            print(f"Output negative_prompt_embeds shape: {getattr(prompt_embeds_dict['negative_prompt_embeds'], 'shape', 'no shape')}")
+        else:
+            print("Output negative_prompt_embeds is None")
+        
+        print("=== END WanVideoTextEmbedBridge DEBUG ===")
         return (prompt_embeds_dict,)
-    
+
+
 #region clip vision
 class WanVideoClipVisionEncode:
     @classmethod
@@ -2025,6 +2179,7 @@ class WanVideoContextOptions:
             "optional": {
                 "fuse_method": (["linear", "pyramid"], {"default": "linear", "tooltip": "Window weight function: linear=ramps at edges only, pyramid=triangular weights peaking in middle"}),
                 "reference_latent": ("LATENT", {"tooltip": "Image to be used as init for I2V models for windows where first frame is not the actual first frame. Mostly useful with MAGREF model"}),
+                "rolling_extra": ("BOOLEAN", {"default": False, "tooltip": "If enabled (5B models), feed the previous window's last clean latent (x0) as the first frame of the next window."}),
             }
         }
 
@@ -2034,7 +2189,7 @@ class WanVideoContextOptions:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Context options for WanVideo, allows splitting the video into context windows and attemps blending them for longer generations than the model and memory otherwise would allow."
 
-    def process(self, context_schedule, context_frames, context_stride, context_overlap, freenoise, verbose, image_cond_start_step=6, image_cond_window_count=2, vae=None, fuse_method="linear", reference_latent=None):
+    def process(self, context_schedule, context_frames, context_stride, context_overlap, freenoise, verbose, image_cond_start_step=6, image_cond_window_count=2, vae=None, fuse_method="linear", reference_latent=None, rolling_extra=False):
         context_options = {
             "context_schedule":context_schedule,
             "context_frames":context_frames,
@@ -2044,6 +2199,7 @@ class WanVideoContextOptions:
             "verbose":verbose,
             "fuse_method":fuse_method,
             "reference_latent":reference_latent["samples"] if reference_latent is not None else None,
+            "rolling_extra": rolling_extra,
         }
 
         return (context_options,)
@@ -3855,6 +4011,7 @@ class WanVideoSampler:
                         x0 = x_tgt
                     #region context windowing
                     elif context_options is not None:
+                        print("!!!!!Using context windowing")
                         counter = torch.zeros_like(latent_model_input, device=intermediate_device)
                         noise_pred = torch.zeros_like(latent_model_input, device=intermediate_device)
                         context_queue = list(context(idx, steps, latent_video_length, context_frames, context_stride, context_overlap))
@@ -3868,7 +4025,12 @@ class WanVideoSampler:
                             if not all(0 <= idx < max_idx for idx in window_indices):
                                 raise ValueError(f"Invalid context window indices {window_indices} for latent_model_input with shape {latent_model_input.shape}")
 
+                        # rolling extra latent support (5B models) - carries last frame x0 to next window's first frame
+                        rolling_extra_enabled = context_options.get("rolling_extra", False)
+                        rolling_extra_latent = None  # shape (C,1,H,W)
+
                         for i, c in enumerate(context_queue):
+                            print(f"!!!!! context windowing {i}")
                             window_id = self.window_tracker.get_window_id(c)
                             
                             if cache_args is not None:
@@ -3941,9 +4103,15 @@ class WanVideoSampler:
                                 partial_fantasy_portrait_input = fantasy_portrait_input.copy()
                                 partial_fantasy_portrait_input["adapter_proj"] = fantasy_portrait_input["adapter_proj"][:, c]
 
+                            print(f"setting default partial_latent_model_input for index {i}")
                             partial_latent_model_input = latent_model_input[:, c]
                             if latents_to_insert is not None and c[0] != 0:
+                                print(f"Setting partial_latent_model_input to latents_to_insert for index {i}")
                                 partial_latent_model_input[:, :1] = latents_to_insert
+                            # rolling latent injection (only after first window)
+                            if rolling_extra_enabled and is_5b and rolling_extra_latent is not None and c[0] != 0:
+                                print(f"Injecting rolling extra latent for index {i}")
+                                partial_latent_model_input[:, :1] = rolling_extra_latent.to(partial_latent_model_input)
 
                             partial_unianim_data = None
                             if unianim_data is not None:
@@ -3996,6 +4164,26 @@ class WanVideoSampler:
                                 partial_timestep, idx, partial_img_emb, clip_fea, partial_control_latents, partial_vace_context, partial_unianim_data,partial_audio_proj,
                                 partial_control_camera_latents, partial_add_cond, current_teacache, context_window=c, fantasy_portrait_input=partial_fantasy_portrait_input,
                                 mtv_motion_tokens=partial_mtv_motion_tokens, s2v_audio_input=partial_s2v_audio_input, s2v_motion_frames=[1, 0], s2v_pose=partial_s2v_pose)
+
+                            # capture rolling extra latent (x0 estimate of last frame) for next window
+                            if rolling_extra_enabled and is_5b:
+                                print("Capturing rolling extra latent")
+                                with torch.no_grad():
+                                    try:
+                                        if isinstance(partial_timestep, torch.Tensor):
+                                            if partial_timestep.ndim > 1:
+                                                ts_last = partial_timestep[:, -1].float()
+                                            else:
+                                                ts_last = partial_timestep.float().view(1)
+                                        else:
+                                            ts_last = torch.tensor([float(t)], device=partial_latent_model_input.device)
+                                        # reshape for broadcast
+                                        while ts_last.ndim < noise_pred_context[:, -1:].ndim:
+                                            ts_last = ts_last.view(ts_last.shape[0], *([1]*(noise_pred_context[:, -1:].ndim-1)))
+                                        rolling_extra_latent = (partial_latent_model_input[:, -1:].to(noise_pred_context.dtype) - noise_pred_context[:, -1:] * (ts_last / 1000.0)).detach()
+                                        print("Captured rolling extra latent")
+                                    except Exception as e:
+                                        log.warning(f"Failed to compute rolling extra latent: {e}")
 
                             if cache_args is not None:
                                 self.window_tracker.cache_states[window_id] = new_teacache
@@ -5736,6 +5924,7 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoEnhanceAVideo": WanVideoEnhanceAVideo,
     "WanVideoContextOptions": WanVideoContextOptions,
     "WanVideoTextEmbedBridge": WanVideoTextEmbedBridge,
+    "WanVideoTextEmbedReverseBridge": WanVideoTextEmbedReverseBridge,
     "WanVideoLoopingControlImagesOptions": WanVideoLoopingControlImagesOptions,
     "WanVideoFlowEdit": WanVideoFlowEdit,
     "WanVideoControlEmbeds": WanVideoControlEmbeds,
@@ -5783,6 +5972,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoEnhanceAVideo": "WanVideo Enhance-A-Video",
     "WanVideoContextOptions": "WanVideo Context Options",
     "WanVideoTextEmbedBridge": "WanVideo TextEmbed Bridge",
+    "WanVideoTextEmbedReverseBridge": "WanVideo TextEmbed Reverse Bridge",
     "WanVideoLoopingControlImagesOptions": "WanVideo Looping Control Images Options",
     "WanVideoFlowEdit": "WanVideo FlowEdit",
     "WanVideoControlEmbeds": "WanVideo Control Embeds",
