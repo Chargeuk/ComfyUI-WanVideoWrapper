@@ -176,6 +176,20 @@ def split_text_by_sentences(text, max_tokens):
     
     return chunks if chunks else [text]
 
+def split_text_by_double_newline(text):
+    """Split text by double newlines and return an array of results"""
+    # Split by double newlines (handles both \n\n and \r\n\r\n)
+    chunks = text.split('\n\n')
+    
+    # Clean up each chunk by stripping whitespace
+    cleaned_chunks = []
+    for chunk in chunks:
+        cleaned_chunk = chunk.strip()
+        if cleaned_chunk:  # Only add non-empty chunks
+            cleaned_chunks.append(cleaned_chunk)
+    # Return the original text as a single item if no splits were found
+    return cleaned_chunks if cleaned_chunks else [text]
+
 def encode_with_chunking(encoder, prompts, device_to, max_tokens):
     """Encode prompts with chunking support"""
     results = []
@@ -197,6 +211,62 @@ def encode_with_chunking(encoder, prompts, device_to, max_tokens):
             for i, chunk in enumerate(chunks):
                 log.info(f"Encoding chunk {i+1}/{len(chunks)}: {get_token_count(encoder, chunk)} tokens")
                 log.info(f"Chunk text:\n{chunk}")
+                chunk_encoded = encoder([chunk], device_to)
+                chunk_embeddings.append(chunk_encoded[0])
+            
+            # Concatenate all chunks
+            concatenated = torch.cat(chunk_embeddings, dim=0)
+            results.append(concatenated)
+            log.info(f"Final concatenated shape: {concatenated.shape}")
+    
+    return results
+
+def encode_with_chunking_enhanced(encoder, prompts, device_to, max_tokens, chunk_by_double_line=False):
+    """Enhanced encode prompts with chunking support, including double newline splitting"""
+    results = []
+    tokenizer = get_t5_tokenizer(encoder)
+    
+    for prompt in prompts:
+        token_count = get_token_count(encoder, prompt)
+        
+        if not chunk_by_double_line and token_count <= max_tokens:
+            # Short enough and not using double line chunking - encode normally
+            encoded = encoder([prompt], device_to)
+            results.append(encoded[0])
+        else:
+            # Need to chunk the prompt
+            chunks = []
+            
+            if chunk_by_double_line:
+                # First split by double newlines
+                log.info(f"Splitting prompt by double newlines first")
+                initial_chunks = split_text_by_double_newline(prompt)
+                log.info(f"Initial double-newline split created {len(initial_chunks)} chunks")
+                
+                # Then check each chunk for token limits and split further if needed
+                for i, chunk in enumerate(initial_chunks):
+                    chunk_token_count = get_token_count(encoder, chunk)
+                    log.info(f"Double-newline chunk {i+1}: {chunk_token_count} tokens")
+                    
+                    if chunk_token_count <= max_tokens:
+                        chunks.append(chunk)
+                    else:
+                        # Split this chunk further by sentences
+                        log.info(f"Double-newline chunk {i+1} exceeds {max_tokens} tokens, splitting by sentences")
+                        sentence_chunks = split_text_by_sentences(chunk, max_tokens)
+                        chunks.extend(sentence_chunks)
+                        log.info(f"Split into {len(sentence_chunks)} sentence chunks")
+            else:
+                # Use the original sentence-based chunking
+                log.info(f"Chunking prompt: {token_count} tokens -> chunks of {max_tokens}")
+                chunks = split_text_by_sentences(prompt, max_tokens)
+            
+            # Encode all chunks
+            chunk_embeddings = []
+            for i, chunk in enumerate(chunks):
+                chunk_token_count = get_token_count(encoder, chunk)
+                log.info(f"Encoding chunk {i+1}/{len(chunks)}: {chunk_token_count} tokens")
+                log.info(f"Chunk text preview: {chunk[:100]}{'...' if len(chunk) > 100 else ''}")
                 chunk_encoded = encoder([chunk], device_to)
                 chunk_embeddings.append(chunk_encoded[0])
             
@@ -670,6 +740,7 @@ class WanVideoTextEncodeCached:
                 "extender_args": ("WANVIDEOPROMPTEXTENDER_ARGS", {"tooltip": "Use this node to extend the prompt with additional text."}),
                 "max_chunk_tokens": ("INT", {"default": 480, "min": 256, "max": 512, "step": 16, "tooltip": "Maximum tokens per chunk (leave some headroom below 512)"}),
                 "enable_chunking": ("BOOLEAN", {"default": True, "tooltip": "Enable automatic text chunking for long prompts"}),
+                "chunk_by_double_line": ("BOOLEAN", {"default": False, "tooltip": "When enabled with chunking, always split text by double newlines first, then by token limits"}),
             }
         }
 
@@ -688,7 +759,7 @@ of the original Wan templates or a custom system prompt.
 
 
     def process(self, model_name, precision, positive_prompt, negative_prompt, quantization='disabled', use_disk_cache=True, device="gpu", extender_args=None,
-                max_chunk_tokens=480, enable_chunking=True):
+                max_chunk_tokens=480, enable_chunking=True, chunk_by_double_line=False):
         from .nodes_model_loading import LoadWanVideoT5TextEncoder
 
         pbar = ProgressBar(3)
@@ -745,7 +816,8 @@ of the original Wan templates or a custom system prompt.
             use_disk_cache=use_disk_cache,
             device=device,
             max_chunk_tokens=max_chunk_tokens,
-            enable_chunking=enable_chunking
+            enable_chunking=enable_chunking,
+            chunk_by_double_line=chunk_by_double_line
         )
         pbar.update(1)
         del t5
@@ -773,6 +845,7 @@ class VTS_WanVideoMultiTextEncodeCached:
                 "extender_args": ("WANVIDEOPROMPTEXTENDER_ARGS", {"tooltip": "Use this node to extend the prompt with additional text."}),
                 "max_chunk_tokens": ("INT", {"default": 480, "min": 256, "max": 512, "step": 16, "tooltip": "Maximum tokens per chunk (leave some headroom below 512)"}),
                 "enable_chunking": ("BOOLEAN", {"default": True, "tooltip": "Enable automatic text chunking for long prompts"}),
+                "chunk_by_double_line": ("BOOLEAN", {"default": False, "tooltip": "When enabled with chunking, always split text by double newlines first, then by token limits"}),
             }
         }
 
@@ -796,7 +869,7 @@ of the original Wan templates or a custom system prompt.
 
 
     def process(self, model_name, precision, positive_prompt_in, negative_prompt_in, quantization='disabled', use_disk_cache=True, device="gpu", extender_args=None,
-                max_chunk_tokens=480, enable_chunking=True):
+                max_chunk_tokens=480, enable_chunking=True, chunk_by_double_line=False):
         from .nodes_model_loading import LoadWanVideoT5TextEncoder
         # both the positive and negative prompts could be text representations of arrays
         # where each item in the array is a seperate prompt to be processed
@@ -885,7 +958,8 @@ of the original Wan templates or a custom system prompt.
                 use_disk_cache=use_disk_cache,
                 device=device,
                 max_chunk_tokens=max_chunk_tokens,
-                enable_chunking=enable_chunking
+                enable_chunking=enable_chunking,
+                chunk_by_double_line=chunk_by_double_line
             )
             text_embeds_list.append(prompt_embeds_dict)
             negative_text_embeds_list.append({"prompt_embeds": prompt_embeds_dict["negative_prompt_embeds"]})
@@ -1705,6 +1779,7 @@ class WanVideoTextEncode:
                 "device": (["gpu", "cpu"], {"default": "gpu", "tooltip": "Device to run the text encoding on."}),
                 "max_chunk_tokens": ("INT", {"default": 480, "min": 256, "max": 512, "step": 16, "tooltip": "Maximum tokens per chunk (leave some headroom below 512)"}),
                 "enable_chunking": ("BOOLEAN", {"default": True, "tooltip": "Enable automatic text chunking for long prompts"}),
+                "chunk_by_double_line": ("BOOLEAN", {"default": False, "tooltip": "When enabled with chunking, always split text by double newlines first, then by token limits"}),
             }
         }
 
@@ -1715,7 +1790,7 @@ class WanVideoTextEncode:
     DESCRIPTION = "Encodes text prompts into text embeddings. For rudimentary prompt travel you can input multiple prompts separated by '|', they will be equally spread over the video length"
 
 
-    def process(self, positive_prompt, negative_prompt, t5=None, force_offload=True, model_to_offload=None, use_disk_cache=False, device="gpu", max_chunk_tokens=480, enable_chunking=True):
+    def process(self, positive_prompt, negative_prompt, t5=None, force_offload=True, model_to_offload=None, use_disk_cache=False, device="gpu", max_chunk_tokens=480, enable_chunking=True, chunk_by_double_line=False):
         if t5 is None and not use_disk_cache:
             raise ValueError("T5 encoder is required for text encoding. Please provide a valid T5 encoder or enable disk cache.")
 
@@ -1791,9 +1866,12 @@ class WanVideoTextEncode:
             if use_disk_cache and context is not None:
                 pass
             else:
-                if enable_chunking and needs_chunking(encoder, positive_prompts, max_chunk_tokens):
-                    log.info("Long prompts detected, using chunked encoding")
-                    context = encode_with_chunking(encoder, positive_prompts, device_to, max_chunk_tokens)
+                if enable_chunking and (chunk_by_double_line or needs_chunking(encoder, positive_prompts, max_chunk_tokens)):
+                    if chunk_by_double_line:
+                        log.info("Using double newline chunking for positive prompts")
+                    else:
+                        log.info("Long prompts detected, using chunked encoding")
+                    context = encode_with_chunking_enhanced(encoder, positive_prompts, device_to, max_chunk_tokens, chunk_by_double_line)
                 else:
                     log.info("Using standard encoding for positive prompts as there is no need for chunking")
                     context = encoder(positive_prompts, device_to)
@@ -1809,9 +1887,12 @@ class WanVideoTextEncode:
             if use_disk_cache and context_null is not None:
                 pass
             else:
-                if enable_chunking and get_token_count(encoder, negative_prompt) > max_chunk_tokens:
-                    log.info("Long negative prompt detected, using chunked encoding")
-                    context_null = encode_with_chunking(encoder, [negative_prompt], device_to, max_chunk_tokens)
+                if enable_chunking and (chunk_by_double_line or get_token_count(encoder, negative_prompt) > max_chunk_tokens):
+                    if chunk_by_double_line:
+                        log.info("Using double newline chunking for negative prompt")
+                    else:
+                        log.info("Long negative prompt detected, using chunked encoding")
+                    context_null = encode_with_chunking_enhanced(encoder, [negative_prompt], device_to, max_chunk_tokens, chunk_by_double_line)
                 else:
                     log.info("Using standard encoding for negative prompt as there is no need for chunking")
                     context_null = encoder([negative_prompt], device_to)
