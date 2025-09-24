@@ -789,7 +789,796 @@ of the original Wan templates or a custom system prompt.
         print(f"VTS_WanVideoMultiTextEncodeCached Text embeddings collected: {len(text_embeds_list)}, Negative: {len(negative_text_embeds_list)}, Positive: {len(positive_prompt_list)}")
         return (text_embeds_list, negative_text_embeds_list, positive_prompt_list)
 
+
+class VTS_ClipComparer:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning_a": ("CONDITIONING",),
+                "conditioning_b": ("CONDITIONING",),
+            },
+            "optional": {
+                "compare_pooled": ("BOOLEAN", {"default": True, "tooltip": "Compare pooled outputs if present"}),
+                "detailed": ("BOOLEAN", {"default": True, "tooltip": "Include extended statistics"}),
+                "sample_tokens": ("INT", {"default": 5, "min": 1, "max": 64, "step": 1, "tooltip": "Number of random token indices to sample when detailed"}),
+                "random_seed": ("INT", {"default": 0, "min": 0, "max": 2**31-1}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Compares two CONDITIONING inputs and reports similarities/differences."
+
+    def _tensor_stats(self, t):
+        return {
+            "shape": tuple(t.shape),
+            "dtype": str(t.dtype),
+            "device": str(t.device),
+            "mean": float(t.float().mean().item()),
+            "std": float(t.float().std(unbiased=False).item()),
+            "min": float(t.float().min().item()),
+            "max": float(t.float().max().item()),
+        }
+
+    def _compare_tensors(self, a, b):
+        if a.shape != b.shape:
+            return {"shape_mismatch": True}
+        a_f = a.float()
+        b_f = b.float()
+        diff = a_f - b_f
+        abs_diff = diff.abs()
+        mse = float(diff.pow(2).mean().item())
+        mean_abs = float(abs_diff.mean().item())
+        max_abs = float(abs_diff.max().item())
+        denom = a_f.abs().mean().item() + 1e-8
+        rel_mean = float(mean_abs / denom)
+        a_flat = a_f.view(-1)
+        b_flat = b_f.view(-1)
+        an = a_flat.norm()
+        bn = b_flat.norm()
+        if an.item() == 0 or bn.item() == 0:
+            cos = float('nan')
+        else:
+            cos = float(torch.clamp(torch.dot(a_flat, b_flat) / (an * bn), -1.0, 1.0).item())
+        return {
+            "shape_mismatch": False,
+            "mse": mse,
+            "mean_abs": mean_abs,
+            "max_abs": max_abs,
+            "relative_mean_abs": rel_mean,
+            "cosine_similarity": cos,
+        }
+
+    def _is_tensor_like(self, v):
+        if isinstance(v, torch.Tensor):
+            return True
+        if isinstance(v, list) and len(v) > 0 and all(isinstance(x, torch.Tensor) for x in v):
+            return True
+        return False
+
+    def _meta_equal(self, a, b):
+        # Safe equality that avoids ambiguous tensor boolean
+        if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+            return torch.equal(a, b)
+        if isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b):
+                return False
+            for av, bv in zip(a, b):
+                if not self._meta_equal(av, bv):
+                    return False
+            return True
+        if isinstance(a, dict) and isinstance(b, dict):
+            if set(a.keys()) != set(b.keys()):
+                return False
+            for key in a.keys():
+                if not self._meta_equal(a[key], b[key]):
+                    return False
+            return True
+        try:
+            return a == b
+        except:
+            return False
+
+    def _extract_conditioning_data(self, conditioning):
+        """Extract embeddings and pooled data from CONDITIONING format"""
+        if not isinstance(conditioning, list) or len(conditioning) == 0:
+            return None, None
+        
+        cond_item = conditioning[0]
+        if not isinstance(cond_item, list) or len(cond_item) < 2:
+            return None, None
+            
+        embeddings = cond_item[0]  # First element is the embedding tensor
+        pooled_dict = cond_item[1]  # Second element is the pooled output dict
+        
+        return embeddings, pooled_dict
+
+    def process(self, conditioning_a, conditioning_b, compare_pooled=True, detailed=True, sample_tokens=5, random_seed=0):
+        lines = []
+        def log(line):
+            print(line)
+            lines.append(line)
+
+        log("=== VTS_ClipComparer Report ===")
+
+        # Extract conditioning data
+        embeds_a, pooled_a = self._extract_conditioning_data(conditioning_a)
+        embeds_b, pooled_b = self._extract_conditioning_data(conditioning_b)
+
+        log(f"Conditioning A format: {type(conditioning_a)} with {len(conditioning_a) if hasattr(conditioning_a, '__len__') else 'unknown'} items")
+        log(f"Conditioning B format: {type(conditioning_b)} with {len(conditioning_b) if hasattr(conditioning_b, '__len__') else 'unknown'} items")
+
+        if embeds_a is None and embeds_b is None:
+            log("Both conditioning inputs are invalid or empty")
+            log(f"\nOVERALL_IDENTICAL=False")
+            log("=== END VTS_ClipComparer Report ===")
+            return ("\n".join(lines),)
+
+        if embeds_a is None or embeds_b is None:
+            log(f"One conditioning is invalid (A valid? {embeds_a is not None}, B valid? {embeds_b is not None})")
+            log(f"\nOVERALL_IDENTICAL=False")
+            log("=== END VTS_ClipComparer Report ===")
+            return ("\n".join(lines),)
+
+        # Compare main embeddings
+        log(f"\n-- Main Embeddings Comparison --")
+        
+        if not isinstance(embeds_a, torch.Tensor) or not isinstance(embeds_b, torch.Tensor):
+            log(f"Non-tensor embeddings: A={type(embeds_a)}, B={type(embeds_b)} (skipping numeric comparison)")
+        else:
+            stats_a = self._tensor_stats(embeds_a)
+            stats_b = self._tensor_stats(embeds_b)
+            log(f"A stats: shape={stats_a['shape']} dtype={stats_a['dtype']} device={stats_a['device']} mean={stats_a['mean']:.6f} std={stats_a['std']:.6f} min={stats_a['min']:.6f} max={stats_a['max']:.6f}")
+            log(f"B stats: shape={stats_b['shape']} dtype={stats_b['dtype']} device={stats_b['device']} mean={stats_b['mean']:.6f} std={stats_b['std']:.6f} min={stats_b['min']:.6f} max={stats_b['max']:.6f}")
+
+            cmp_stats = self._compare_tensors(embeds_a, embeds_b)
+            if cmp_stats["shape_mismatch"]:
+                log(f"Shape mismatch: A={stats_a['shape']} B={stats_b['shape']} (no further comparison)")
+            else:
+                log(f"Diff: mse={cmp_stats['mse']:.8g} mean_abs={cmp_stats['mean_abs']:.8g} max_abs={cmp_stats['max_abs']:.8g} rel_mean_abs={cmp_stats['relative_mean_abs']:.8g} cosine={cmp_stats['cosine_similarity']:.8g}")
+
+                if detailed and embeds_a.dim() >= 2:
+                    torch.manual_seed(random_seed)
+                    seq_len = embeds_a.shape[1]
+                    if seq_len > 0:
+                        n_samples = min(sample_tokens, seq_len)
+                        idx = torch.randperm(seq_len)[:n_samples].tolist()
+                        log(f"Sampled token indices ({n_samples}): {idx}")
+                        for i_tok in idx:
+                            a_tok = embeds_a[:, i_tok].float().reshape(-1)
+                            b_tok = embeds_b[:, i_tok].float().reshape(-1)
+                            diff_tok = a_tok - b_tok
+                            abs_tok = diff_tok.abs()
+                            mean_abs_tok = abs_tok.mean().item()
+                            max_abs_tok = abs_tok.max().item()
+                            denom_tok = a_tok.abs().mean().item() + 1e-8
+                            rel_tok = mean_abs_tok / denom_tok
+                            an = a_tok.norm()
+                            bn = b_tok.norm()
+                            if an.item() == 0 or bn.item() == 0:
+                                cos_tok = float('nan')
+                            else:
+                                cos_tok = float(torch.clamp(torch.dot(a_tok, b_tok) / (an * bn), -1.0, 1.0).item())
+                            log(f"  token[{i_tok}]: mean_abs={mean_abs_tok:.6g} max_abs={max_abs_tok:.6g} rel_mean_abs={rel_tok:.6g} cosine={cos_tok:.6g}")
+
+        # Compare pooled outputs if requested
+        if compare_pooled:
+            log(f"\n-- Pooled Outputs Comparison --")
+            
+            if pooled_a is None and pooled_b is None:
+                log("Both pooled outputs are None")
+            elif pooled_a is None or pooled_b is None:
+                log(f"One pooled output is None (A is None? {pooled_a is None}, B is None? {pooled_b is None})")
+            else:
+                log(f"A pooled keys: {sorted(pooled_a.keys()) if isinstance(pooled_a, dict) else 'not a dict'}")
+                log(f"B pooled keys: {sorted(pooled_b.keys()) if isinstance(pooled_b, dict) else 'not a dict'}")
+                
+                if isinstance(pooled_a, dict) and isinstance(pooled_b, dict):
+                    keys_a = set(pooled_a.keys())
+                    keys_b = set(pooled_b.keys())
+                    only_a = keys_a - keys_b
+                    only_b = keys_b - keys_a
+                    shared = sorted(keys_a & keys_b)
+                    
+                    if only_a:
+                        log(f"Keys only in A pooled: {sorted(only_a)}")
+                    if only_b:
+                        log(f"Keys only in B pooled: {sorted(only_b)}")
+                    log(f"Shared pooled keys: {shared}")
+                    
+                    for key in shared:
+                        val_a = pooled_a[key]
+                        val_b = pooled_b[key]
+                        log(f"  {key}: A_type={type(val_a)} B_type={type(val_b)}")
+                        
+                        if isinstance(val_a, torch.Tensor) and isinstance(val_b, torch.Tensor):
+                            if val_a.shape != val_b.shape:
+                                log(f"    Shape mismatch: A={tuple(val_a.shape)} B={tuple(val_b.shape)}")
+                            else:
+                                cmp_pooled = self._compare_tensors(val_a, val_b)
+                                log(f"    Diff: mse={cmp_pooled['mse']:.8g} mean_abs={cmp_pooled['mean_abs']:.8g} max_abs={cmp_pooled['max_abs']:.8g} cosine={cmp_pooled['cosine_similarity']:.8g}")
+                        else:
+                            equal = self._meta_equal(val_a, val_b)
+                            def short(v):
+                                s = repr(v)
+                                return s if len(s) < 120 else s[:117] + "..."
+                            log(f"    equal={equal} A_val={short(val_a)} B_val={short(val_b)}")
+
+        # Determine overall identity
+        identical = True
+        
+        # Check main embeddings
+        if isinstance(embeds_a, torch.Tensor) and isinstance(embeds_b, torch.Tensor):
+            if embeds_a.shape != embeds_b.shape or embeds_a.dtype != embeds_b.dtype or not torch.equal(embeds_a, embeds_b):
+                identical = False
+        else:
+            if not self._meta_equal(embeds_a, embeds_b):
+                identical = False
+        
+        # Check pooled outputs if comparing them
+        if compare_pooled and identical:
+            if not self._meta_equal(pooled_a, pooled_b):
+                identical = False
+
+        log(f"\nOVERALL_IDENTICAL={identical}")
+        log("=== END VTS_ClipComparer Report ===")
+        return ("\n".join(lines),)
+
+class VTS_WanT5Comparer:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "embeds_a": ("WANVIDEOTEXTEMBEDS",),
+                "embeds_b": ("WANVIDEOTEXTEMBEDS",),
+            },
+            "optional": {
+                "compare_negative": ("BOOLEAN", {"default": True, "tooltip": "Compare negative_prompt_embeds if present"}),
+                "detailed": ("BOOLEAN", {"default": True, "tooltip": "Include extended statistics"}),
+                "sample_tokens": ("INT", {"default": 5, "min": 1, "max": 64, "step": 1, "tooltip": "Number of random token indices to sample when detailed"}),
+                "random_seed": ("INT", {"default": 0, "min": 0, "max": 2**31-1}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Compares two WANVIDEOTEXTEMBEDS dicts and reports similarities/differences."
+
+    def _tensor_stats(self, t):
+        return {
+            "shape": tuple(t.shape),
+            "dtype": str(t.dtype),
+            "device": str(t.device),
+            "mean": float(t.float().mean().item()),
+            "std": float(t.float().std(unbiased=False).item()),
+            "min": float(t.float().min().item()),
+            "max": float(t.float().max().item()),
+        }
+
+    def _compare_tensors(self, a, b):
+        if a.shape != b.shape:
+            return {"shape_mismatch": True}
+        a_f = a.float()
+        b_f = b.float()
+        diff = a_f - b_f
+        abs_diff = diff.abs()
+        mse = float(diff.pow(2).mean().item())
+        mean_abs = float(abs_diff.mean().item())
+        max_abs = float(abs_diff.max().item())
+        denom = a_f.abs().mean().item() + 1e-8
+        rel_mean = float(mean_abs / denom)
+        a_flat = a_f.view(-1)
+        b_flat = b_f.view(-1)
+        an = a_flat.norm()
+        bn = b_flat.norm()
+        if an.item() == 0 or bn.item() == 0:
+            cos = float('nan')
+        else:
+            cos = float(torch.clamp(torch.dot(a_flat, b_flat) / (an * bn), -1.0, 1.0).item())
+        return {
+            "shape_mismatch": False,
+            "mse": mse,
+            "mean_abs": mean_abs,
+            "max_abs": max_abs,
+            "relative_mean_abs": rel_mean,
+            "cosine_similarity": cos,
+        }
+
+    def _unwrap_embed(self, v):
+        # Handle lists that wrap tensors
+        if isinstance(v, list):
+            if len(v) == 1 and isinstance(v[0], torch.Tensor):
+                return v[0]
+            if all(isinstance(x, torch.Tensor) for x in v):
+                # Try stacking (adds a new leading dim)
+                try:
+                    return torch.stack(v)
+                except:
+                    pass
+        return v
+
+    def _is_tensor_like(self, v):
+        if isinstance(v, torch.Tensor):
+            return True
+        if isinstance(v, list) and len(v) > 0 and all(isinstance(x, torch.Tensor) for x in v):
+            return True
+        return False
+
+    def _meta_equal(self, a, b):
+        # Safe equality that avoids ambiguous tensor boolean
+        if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+            return torch.equal(a, b)
+        if isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b):
+                return False
+            for av, bv in zip(a, b):
+                if not self._meta_equal(av, bv):
+                    return False
+            return True
+        try:
+            return a == b
+        except:
+            return False
+
+    def process(self, embeds_a, embeds_b, compare_negative=True, detailed=True, sample_tokens=5, random_seed=0):
+        lines = []
+        def log(line):
+            print(line)
+            lines.append(line)
+
+        log("=== VTS_WanT5Comparer Report ===")
+
+        keys_a = set(embeds_a.keys())
+        keys_b = set(embeds_b.keys())
+        log(f"Keys A: {sorted(keys_a)}")
+        log(f"Keys B: {sorted(keys_b)}")
+        only_a = keys_a - keys_b
+        only_b = keys_b - keys_a
+        if only_a:
+            log(f"Keys only in A: {sorted(only_a)}")
+        if only_b:
+            log(f"Keys only in B: {sorted(only_b)}")
+        shared = sorted(keys_a & keys_b)
+        log(f"Shared keys: {shared}")
+
+        primary_keys = ["prompt_embeds"]
+        if compare_negative:
+            primary_keys.append("negative_prompt_embeds")
+
+        extra_tensor_keys = []
+        for k in shared:
+            if k not in primary_keys and self._is_tensor_like(embeds_a.get(k, None)):
+                extra_tensor_keys.append(k)
+
+        for key in primary_keys + extra_tensor_keys:
+            if key not in embeds_a or key not in embeds_b:
+                continue
+            a_val = self._unwrap_embed(embeds_a[key])
+            b_val = self._unwrap_embed(embeds_b[key])
+            log(f"\n-- Key: {key} --")
+
+            if a_val is None and b_val is None:
+                log("Both None")
+                continue
+            if a_val is None or b_val is None:
+                log(f"One is None (A is None? {a_val is None}, B is None? {b_val is None})")
+                continue
+
+            if not isinstance(a_val, torch.Tensor) or not isinstance(b_val, torch.Tensor):
+                log(f"Non-tensor (after unwrap) types: A={type(a_val)}, B={type(b_val)} (skipping numeric comparison)")
+                continue
+
+            stats_a = self._tensor_stats(a_val)
+            stats_b = self._tensor_stats(b_val)
+            log(f"A stats: shape={stats_a['shape']} dtype={stats_a['dtype']} device={stats_a['device']} mean={stats_a['mean']:.6f} std={stats_a['std']:.6f} min={stats_a['min']:.6f} max={stats_a['max']:.6f}")
+            log(f"B stats: shape={stats_b['shape']} dtype={stats_b['dtype']} device={stats_b['device']} mean={stats_b['mean']:.6f} std={stats_b['std']:.6f} min={stats_b['min']:.6f} max={stats_b['max']:.6f}")
+
+            cmp_stats = self._compare_tensors(a_val, b_val)
+            if cmp_stats["shape_mismatch"]:
+                log(f"Shape mismatch: A={stats_a['shape']} B={stats_b['shape']} (no further comparison)")
+                continue
+
+            log(f"Diff: mse={cmp_stats['mse']:.8g} mean_abs={cmp_stats['mean_abs']:.8g} max_abs={cmp_stats['max_abs']:.8g} rel_mean_abs={cmp_stats['relative_mean_abs']:.8g} cosine={cmp_stats['cosine_similarity']:.8g}")
+
+            if detailed and a_val.dim() >= 2:
+                torch.manual_seed(random_seed)
+                seq_len = a_val.shape[1]
+                if seq_len > 0:
+                    n_samples = min(sample_tokens, seq_len)
+                    idx = torch.randperm(seq_len)[:n_samples].tolist()
+                    log(f"Sampled token indices ({n_samples}): {idx}")
+                    for i_tok in idx:
+                        a_tok = a_val[:, i_tok].float().reshape(-1)
+                        b_tok = b_val[:, i_tok].float().reshape(-1)
+                        diff_tok = a_tok - b_tok
+                        abs_tok = diff_tok.abs()
+                        mean_abs_tok = abs_tok.mean().item()
+                        max_abs_tok = abs_tok.max().item()
+                        denom_tok = a_tok.abs().mean().item() + 1e-8
+                        rel_tok = mean_abs_tok / denom_tok
+                        an = a_tok.norm()
+                        bn = b_tok.norm()
+                        if an.item() == 0 or bn.item() == 0:
+                            cos_tok = float('nan')
+                        else:
+                            cos_tok = float(torch.clamp(torch.dot(a_tok, b_tok) / (an * bn), -1.0, 1.0).item())
+                        log(f"  token[{i_tok}]: mean_abs={mean_abs_tok:.6g} max_abs={max_abs_tok:.6g} rel_mean_abs={rel_tok:.6g} cosine={cos_tok:.6g}")
+
+        meta_keys = [k for k in shared if k not in primary_keys + extra_tensor_keys]
+        if meta_keys:
+            log("\n-- Meta key comparison --")
+        for k in meta_keys:
+            a_v = embeds_a.get(k, None)
+            b_v = embeds_b.get(k, None)
+            # Skip if tensor-like (already handled)
+            if self._is_tensor_like(a_v) or self._is_tensor_like(b_v):
+                log(f"{k}: skipped (tensor-like container)")
+                continue
+            equal = self._meta_equal(a_v, b_v)
+            # Truncate long repr
+            def short(v):
+                s = repr(v)
+                return s if len(s) < 120 else s[:117] + "..."
+            log(f"{k}: equal={equal} A_type={type(a_v)} B_type={type(b_v)} A_val={short(a_v)} B_val={short(b_v)}")
+
+        identical = True
+        for key in primary_keys:
+            if key not in embeds_a or key not in embeds_b:
+                continue
+            a_val = self._unwrap_embed(embeds_a[key])
+            b_val = self._unwrap_embed(embeds_b[key])
+            if a_val is None and b_val is None:
+                continue
+            if (a_val is None) != (b_val is None):
+                identical = False
+                break
+            if isinstance(a_val, torch.Tensor) and isinstance(b_val, torch.Tensor):
+                if a_val.shape != b_val.shape or a_val.dtype != b_val.dtype or not torch.equal(a_val, b_val):
+                    identical = False
+                    break
+            else:
+                if not self._meta_equal(a_val, b_val):
+                    identical = False
+                    break
+
+        log(f"\nOVERALL_IDENTICAL={identical}")
+        log("=== END VTS_WanT5Comparer Report ===")
+        return ("\n".join(lines),)
+
+
 #region TextEncode
+class WanVideoTextEmbedReverseBridge:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "wan_text_embeds": ("WANVIDEOTEXTEMBEDS",),
+            },
+            "optional": {
+                "conditioning_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength multiplier for the conditioning"}),
+                "output_negative": ("BOOLEAN", {"default": True, "tooltip": "Whether to output negative conditioning as well"}),
+                "target_sequence_length": ("INT", {"default": 512, "min": -1, "max": 2048, "step": 1, "tooltip": "Minimum sequence length (-1 = keep original). Only pads if shorter than this value."}),
+                "length_conversion_method": (["truncate", "pad_zeros", "pad_repeat", "interpolate"], {"default": "pad_zeros", "tooltip": "Method to adjust sequence length"}),
+                "convert_to_float32": ("BOOLEAN", {"default": True, "tooltip": "Convert embeddings to float32 for ComfyUI compatibility"}),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("positive_conditioning", "negative_conditioning")
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Reverse bridge from WanVideoWrapper text embeddings back to ComfyUI native CONDITIONING format with format conversion"
+
+    def process(self, wan_text_embeds, conditioning_strength=1.0, output_negative=True, 
+                target_sequence_length=512, length_conversion_method="pad_zeros", convert_to_float32=True):
+        
+        print("=== WanVideoTextEmbedReverseBridge DEBUG ===")
+        print(f"Input wan_text_embeds type: {type(wan_text_embeds)}")
+        print(f"Input wan_text_embeds keys: {wan_text_embeds.keys() if isinstance(wan_text_embeds, dict) else 'N/A'}")
+        
+        # Extract embeddings from WanVideoWrapper format
+        positive_embeds_raw = wan_text_embeds["prompt_embeds"]
+        print(f"positive_embeds_raw type: {type(positive_embeds_raw)}")
+        
+        if isinstance(positive_embeds_raw, list):
+            print(f"positive_embeds_raw is a list with {len(positive_embeds_raw)} items")
+            for i, item in enumerate(positive_embeds_raw):
+                print(f"  Item {i}: type={type(item)}, shape={getattr(item, 'shape', 'no shape')}")
+            positive_embeds = positive_embeds_raw[0]  # Take first item if it's a list
+        else:
+            print(f"positive_embeds_raw shape: {getattr(positive_embeds_raw, 'shape', 'no shape')}")
+            positive_embeds = positive_embeds_raw
+        
+        print(f"Final positive_embeds type: {type(positive_embeds)}")
+        print(f"Final positive_embeds shape: {getattr(positive_embeds, 'shape', 'no shape')}")
+        print(f"Final positive_embeds dtype: {getattr(positive_embeds, 'dtype', 'no dtype')}")
+        print(f"Final positive_embeds dimensions: {positive_embeds.dim()}")
+        
+        # Check if it's a torch tensor
+        if not isinstance(positive_embeds, torch.Tensor):
+            print(f"WARNING: positive_embeds is not a torch.Tensor, it's {type(positive_embeds)}")
+            if hasattr(positive_embeds, '__iter__') and not isinstance(positive_embeds, (str, bytes)):
+                try:
+                    positive_embeds = torch.stack(list(positive_embeds))
+                    print(f"Converted to tensor with shape: {positive_embeds.shape}")
+                except Exception as e:
+                    print(f"Failed to convert to tensor: {e}")
+                    return None
+        
+        # Ensure positive_embeds has batch dimension (3D tensor)
+        print(f"Checking if positive_embeds needs batch dimension: dim={positive_embeds.dim()}")
+        if positive_embeds.dim() == 2:
+            print("ADDING BATCH DIMENSION TO POSITIVE EMBEDS...")
+            positive_embeds = positive_embeds.unsqueeze(0)  # Add batch dimension [seq_len, dim] -> [1, seq_len, dim]
+            print(f"Added batch dimension to positive_embeds: {positive_embeds.shape}")
+        else:
+            print(f"Positive embeds already has {positive_embeds.dim()} dimensions, not adding batch dimension")
+        
+        # Handle negative embeddings
+        negative_embeds_raw = wan_text_embeds.get("negative_prompt_embeds", None)
+        print(f"negative_embeds_raw type: {type(negative_embeds_raw)}")
+        negative_embeds = None
+        
+        if negative_embeds_raw is not None:
+            if isinstance(negative_embeds_raw, list):
+                print(f"negative_embeds_raw is a list with {len(negative_embeds_raw)} items")
+                negative_embeds = negative_embeds_raw[0]  # Take first item if it's a list
+            else:
+                print(f"negative_embeds_raw shape: {getattr(negative_embeds_raw, 'shape', 'no shape')}")
+                negative_embeds = negative_embeds_raw
+                
+            print(f"Final negative_embeds type: {type(negative_embeds)}")
+            print(f"Final negative_embeds shape: {getattr(negative_embeds, 'shape', 'no shape')}")
+            print(f"Final negative_embeds dimensions: {negative_embeds.dim()}")
+            
+            # Check if it's a torch tensor
+            if not isinstance(negative_embeds, torch.Tensor):
+                print(f"WARNING: negative_embeds is not a torch.Tensor, it's {type(negative_embeds)}")
+                if hasattr(negative_embeds, '__iter__') and not isinstance(negative_embeds, (str, bytes)):
+                    try:
+                        negative_embeds = torch.stack(list(negative_embeds))
+                        print(f"Converted negative to tensor with shape: {negative_embeds.shape}")
+                    except Exception as e:
+                        print(f"Failed to convert negative to tensor: {e}")
+                        negative_embeds = None
+            
+            # Ensure negative_embeds has batch dimension (3D tensor)
+            if negative_embeds is not None:
+                print(f"Checking if negative_embeds needs batch dimension: dim={negative_embeds.dim()}")
+                if negative_embeds.dim() == 2:
+                    print("ADDING BATCH DIMENSION TO NEGATIVE EMBEDS...")
+                    negative_embeds = negative_embeds.unsqueeze(0)  # Add batch dimension
+                    print(f"Added batch dimension to negative_embeds: {negative_embeds.shape}")
+                else:
+                    print(f"Negative embeds already has {negative_embeds.dim()} dimensions, not adding batch dimension")
+        else:
+            negative_embeds = None
+        
+        # Convert data type to float32 if requested
+        if convert_to_float32:
+            print(f"Converting embeddings from {positive_embeds.dtype} to float32")
+            positive_embeds = positive_embeds.float()
+            if negative_embeds is not None:
+                negative_embeds = negative_embeds.float()
+        
+        # Convert sequence length if requested (minimum length enforcement)
+        if target_sequence_length > 0:
+            if positive_embeds.shape[1] < target_sequence_length:
+                print(f"Padding sequence length from {positive_embeds.shape[1]} to minimum {target_sequence_length}")
+                positive_embeds = self.convert_sequence_length(positive_embeds, target_sequence_length, length_conversion_method)
+            else:
+                print(f"Sequence length {positive_embeds.shape[1]} already meets minimum {target_sequence_length}, no padding needed")
+            
+            if negative_embeds is not None:
+                if negative_embeds.shape[1] < target_sequence_length:
+                    print(f"Padding negative sequence length from {negative_embeds.shape[1]} to minimum {target_sequence_length}")
+                    negative_embeds = self.convert_sequence_length(negative_embeds, target_sequence_length, length_conversion_method)
+                else:
+                    print(f"Negative sequence length {negative_embeds.shape[1]} already meets minimum {target_sequence_length}, no padding needed")
+        
+        # Apply strength multiplier if specified
+        if conditioning_strength != 1.0:
+            print(f"Applying conditioning strength: {conditioning_strength}")
+            positive_embeds = positive_embeds * conditioning_strength
+            if negative_embeds is not None:
+                negative_embeds = negative_embeds * conditioning_strength
+        
+        # Convert to ComfyUI CONDITIONING format
+        # ComfyUI CONDITIONING format is: [[embedding_tensor, pooled_output_dict]]
+        print("Creating ComfyUI CONDITIONING format...")
+        positive_conditioning = [[positive_embeds, {}]]
+        print(f"positive_conditioning structure: list with {len(positive_conditioning)} items")
+        print(f"positive_conditioning[0][0] type: {type(positive_conditioning[0][0])}")
+        print(f"positive_conditioning[0][0] shape: {getattr(positive_conditioning[0][0], 'shape', 'no shape')}")
+        print(f"positive_conditioning[0][0] dimensions: {positive_conditioning[0][0].dim()}")
+        
+        if output_negative and negative_embeds is not None:
+            negative_conditioning = [[negative_embeds, {}]]
+            print(f"negative_conditioning[0][0] type: {type(negative_conditioning[0][0])}")
+            print(f"negative_conditioning[0][0] shape: {getattr(negative_conditioning[0][0], 'shape', 'no shape')}")
+            print(f"negative_conditioning[0][0] dimensions: {negative_conditioning[0][0].dim()}")
+        else:
+            # Create empty negative conditioning if not available
+            negative_conditioning = [[torch.zeros_like(positive_embeds), {}]]
+            print("Created empty negative conditioning")
+        
+        print(f"Final output - Positive: {positive_embeds.shape} {positive_embeds.dtype}, Negative: {negative_conditioning[0][0].shape} {negative_conditioning[0][0].dtype}")
+        print("=== END WanVideoTextEmbedReverseBridge DEBUG ===")
+        return (positive_conditioning, negative_conditioning)
+    
+    def convert_sequence_length(self, embeddings, min_length, method):
+        """Convert sequence length using specified method - now treats target as minimum length"""
+        batch_size, current_length, embedding_dim = embeddings.shape
+        
+        # Only pad if current length is less than minimum
+        if current_length >= min_length:
+            return embeddings
+        
+        # All methods will pad to reach minimum length since current_length < min_length
+        if method == "truncate":
+            # When treating as minimum, truncate method just pads with zeros
+            padding = torch.zeros(batch_size, min_length - current_length, embedding_dim, 
+                                dtype=embeddings.dtype, device=embeddings.device)
+            return torch.cat([embeddings, padding], dim=1)
+                
+        elif method == "pad_zeros":
+            # Pad with zeros to reach minimum
+            padding = torch.zeros(batch_size, min_length - current_length, embedding_dim, 
+                                dtype=embeddings.dtype, device=embeddings.device)
+            return torch.cat([embeddings, padding], dim=1)
+                
+        elif method == "pad_repeat":
+            # Repeat the last token to reach minimum
+            last_token = embeddings[:, -1:, :].repeat(1, min_length - current_length, 1)
+            return torch.cat([embeddings, last_token], dim=1)
+                
+        elif method == "interpolate":
+            # Use linear interpolation to resize to minimum length
+            embeddings_transposed = embeddings.transpose(1, 2)  # [batch, embedding_dim, seq_len]
+            resized = torch.nn.functional.interpolate(embeddings_transposed, size=min_length, mode='linear', align_corners=False)
+            return resized.transpose(1, 2)  # Back to [batch, seq_len, embedding_dim]
+        
+        return embeddings
+     
+class WanVideoTextEmbedBridge:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "positive": ("CONDITIONING",),
+            },
+            "optional": {
+                "negative": ("CONDITIONING",),
+                "max_sequence_length": ("INT", {"default": 512, "min": 0, "max": 2048, "step": 1, "tooltip": "Maximum sequence length for WanVideo model compatibility (0 = no limit)"}),
+                "length_adjustment_method": (["truncate", "interpolate"], {"default": "truncate", "tooltip": "Method to adjust sequence length when exceeding max_sequence_length"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", )
+    RETURN_NAMES = ("text_embeds",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Bridge between ComfyUI native text embedding and WanVideoWrapper text embedding. Automatically handles sequence length adjustment when embeddings exceed the specified limit."
+
+    def process(self, positive, negative=None, max_sequence_length=512, length_adjustment_method="truncate"):
+        print("=== WanVideoTextEmbedBridge DEBUG ===")
+        print(f"Input positive type: {type(positive)}")
+        print(f"Input positive length: {len(positive) if hasattr(positive, '__len__') else 'no length'}")
+        
+        if hasattr(positive, '__len__') and len(positive) > 0:
+            print(f"positive[0] type: {type(positive[0])}")
+            print(f"positive[0] length: {len(positive[0]) if hasattr(positive[0], '__len__') else 'no length'}")
+            
+            if hasattr(positive[0], '__len__') and len(positive[0]) > 0:
+                print(f"positive[0][0] type: {type(positive[0][0])}")
+                print(f"positive[0][0] shape: {getattr(positive[0][0], 'shape', 'no shape')}")
+                print(f"positive[0][0] dtype: {getattr(positive[0][0], 'dtype', 'no dtype')}")
+        
+        if negative is not None:
+            print(f"Input negative type: {type(negative)}")
+            print(f"Input negative length: {len(negative) if hasattr(negative, '__len__') else 'no length'}")
+            
+            if hasattr(negative, '__len__') and len(negative) > 0:
+                print(f"negative[0] type: {type(negative[0])}")
+                print(f"negative[0] length: {len(negative[0]) if hasattr(negative[0], '__len__') else 'no length'}")
+                
+                if hasattr(negative[0], '__len__') and len(negative[0]) > 0:
+                    print(f"negative[0][0] type: {type(negative[0][0])}")
+                    print(f"negative[0][0] shape: {getattr(negative[0][0], 'shape', 'no shape')}")
+                    print(f"negative[0][0] dtype: {getattr(negative[0][0], 'dtype', 'no dtype')}")
+        else:
+            print("negative is None")
+        
+        # Extract and process positive embeddings
+        positive_embed = positive[0][0].to(device)
+        
+        # Check if sequence length adjustment is needed for positive embeddings
+        # Fixed: Check shape[1] (sequence length) instead of shape[0] (batch size)
+        if max_sequence_length > 0 and positive_embed.shape[1] > max_sequence_length:
+            print(f"WARNING: Positive embeddings sequence length {positive_embed.shape[1]} exceeds max_sequence_length {max_sequence_length}.")
+            print(f"Applying {length_adjustment_method} to fit into {max_sequence_length} tokens.")
+            positive_embed = self.adjust_sequence_length(positive_embed, max_sequence_length, length_adjustment_method)
+            print(f"Adjusted positive embeddings shape: {positive_embed.shape}")
+        else:
+            if max_sequence_length == 0:
+                print(f"Sequence length limiting disabled (max_sequence_length=0): {positive_embed.shape}")
+            else:
+                print(f"Positive embeddings shape is within limits: {positive_embed.shape}")
+
+        # Process negative embeddings if provided
+        negative_embed = None
+        if negative is not None:
+            negative_embed = negative[0][0].to(device)
+            
+            # Check if sequence length adjustment is needed for negative embeddings
+            # Fixed: Check shape[1] (sequence length) instead of shape[0] (batch size)
+            if max_sequence_length > 0 and negative_embed.shape[1] > max_sequence_length:
+                print(f"WARNING: Negative embeddings sequence length {negative_embed.shape[1]} exceeds max_sequence_length {max_sequence_length}.")
+                print(f"Applying {length_adjustment_method} to fit into {max_sequence_length} tokens.")
+                negative_embed = self.adjust_sequence_length(negative_embed, max_sequence_length, length_adjustment_method)
+                print(f"Adjusted negative embeddings shape: {negative_embed.shape}")
+            else:
+                if max_sequence_length == 0:
+                    print(f"Sequence length limiting disabled (max_sequence_length=0): {negative_embed.shape}")
+                else:
+                    print(f"Negative embeddings shape is within limits: {negative_embed.shape}")
+
+        prompt_embeds_dict = {
+                "prompt_embeds": positive_embed,
+                "negative_prompt_embeds": negative_embed,
+            }
+        
+        print(f"Output prompt_embeds_dict keys: {prompt_embeds_dict.keys()}")
+        print(f"Output prompt_embeds type: {type(prompt_embeds_dict['prompt_embeds'])}")
+        print(f"Output prompt_embeds shape: {getattr(prompt_embeds_dict['prompt_embeds'], 'shape', 'no shape')}")
+        
+        if prompt_embeds_dict['negative_prompt_embeds'] is not None:
+            print(f"Output negative_prompt_embeds type: {type(prompt_embeds_dict['negative_prompt_embeds'])}")
+            print(f"Output negative_prompt_embeds shape: {getattr(prompt_embeds_dict['negative_prompt_embeds'], 'shape', 'no shape')}")
+        else:
+            print("Output negative_prompt_embeds is None")
+        
+        print("=== END WanVideoTextEmbedBridge DEBUG ===")
+        return (prompt_embeds_dict,)
+
+    def adjust_sequence_length(self, embeddings, target_length, method):
+        """Adjust sequence length using the specified method"""
+        # Fixed: Work with 3D tensors [batch, seq_len, embed_dim]
+        current_length = embeddings.shape[1]  # Get sequence length from dimension 1
+        
+        if current_length <= target_length:
+            return embeddings  # No adjustment needed
+        
+        if method == "truncate":
+            # Simple truncation - cut off the end along sequence dimension
+            return embeddings[:, :target_length, :]
+            
+        elif method == "interpolate":
+            # Linear interpolation scaling (this is the "linear scaling" method)
+            # Input is already 3D: [batch, seq_len, embed_dim]
+            
+            # Transpose for interpolation: [batch, seq_len, embed_dim] -> [batch, embed_dim, seq_len]
+            embeddings_transposed = embeddings.transpose(1, 2)
+            
+            # Use linear interpolation to resize sequence dimension
+            resized = torch.nn.functional.interpolate(
+                embeddings_transposed, 
+                size=target_length, 
+                mode='linear', 
+                align_corners=False
+            )
+            
+            # Transpose back: [batch, embed_dim, seq_len] -> [batch, seq_len, embed_dim]
+            result = resized.transpose(1, 2)
+            
+            return result
+        
+        # Fallback to truncation if unknown method
+        return embeddings[:, :target_length, :]
+
 class WanVideoTextEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -1133,262 +1922,6 @@ class VTS_WanVideoApplyMultiNAG:
 
         return (text_embeds_result,)
 
-class WanVideoTextEmbedReverseBridge:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-            "wan_text_embeds": ("WANVIDEOTEXTEMBEDS",),
-            },
-            "optional": {
-                "conditioning_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Strength multiplier for the conditioning"}),
-                "output_negative": ("BOOLEAN", {"default": True, "tooltip": "Whether to output negative conditioning as well"}),
-                "target_sequence_length": ("INT", {"default": 512, "min": -1, "max": 2048, "step": 1, "tooltip": "Target sequence length (-1 = keep original)"}),
-                "length_conversion_method": (["truncate", "pad_zeros", "pad_repeat", "interpolate"], {"default": "pad_zeros", "tooltip": "Method to adjust sequence length"}),
-                "convert_to_float32": ("BOOLEAN", {"default": True, "tooltip": "Convert embeddings to float32 for ComfyUI compatibility"}),
-            }
-        }
-
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
-    RETURN_NAMES = ("positive_conditioning", "negative_conditioning")
-    FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
-    DESCRIPTION = "Reverse bridge from WanVideoWrapper text embeddings back to ComfyUI native CONDITIONING format with format conversion"
-
-    def process(self, wan_text_embeds, conditioning_strength=1.0, output_negative=True, 
-                target_sequence_length=512, length_conversion_method="pad_zeros", convert_to_float32=True):
-        
-        print("=== WanVideoTextEmbedReverseBridge DEBUG ===")
-        print(f"Input wan_text_embeds type: {type(wan_text_embeds)}")
-        print(f"Input wan_text_embeds keys: {wan_text_embeds.keys() if isinstance(wan_text_embeds, dict) else 'N/A'}")
-        
-        # Extract embeddings from WanVideoWrapper format
-        positive_embeds_raw = wan_text_embeds["prompt_embeds"]
-        print(f"positive_embeds_raw type: {type(positive_embeds_raw)}")
-        
-        if isinstance(positive_embeds_raw, list):
-            print(f"positive_embeds_raw is a list with {len(positive_embeds_raw)} items")
-            for i, item in enumerate(positive_embeds_raw):
-                print(f"  Item {i}: type={type(item)}, shape={getattr(item, 'shape', 'no shape')}")
-            positive_embeds = positive_embeds_raw[0]  # Take first item if it's a list
-        else:
-            print(f"positive_embeds_raw shape: {getattr(positive_embeds_raw, 'shape', 'no shape')}")
-            positive_embeds = positive_embeds_raw
-        
-        print(f"Final positive_embeds type: {type(positive_embeds)}")
-        print(f"Final positive_embeds shape: {getattr(positive_embeds, 'shape', 'no shape')}")
-        print(f"Final positive_embeds dtype: {getattr(positive_embeds, 'dtype', 'no dtype')}")
-        print(f"Final positive_embeds dimensions: {positive_embeds.dim()}")
-        
-        # Check if it's a torch tensor
-        if not isinstance(positive_embeds, torch.Tensor):
-            print(f"WARNING: positive_embeds is not a torch.Tensor, it's {type(positive_embeds)}")
-            if hasattr(positive_embeds, '__iter__') and not isinstance(positive_embeds, (str, bytes)):
-                try:
-                    positive_embeds = torch.stack(list(positive_embeds))
-                    print(f"Converted to tensor with shape: {positive_embeds.shape}")
-                except Exception as e:
-                    print(f"Failed to convert to tensor: {e}")
-                    return None
-        
-        # Ensure positive_embeds has batch dimension (3D tensor)
-        print(f"Checking if positive_embeds needs batch dimension: dim={positive_embeds.dim()}")
-        if positive_embeds.dim() == 2:
-            print("ADDING BATCH DIMENSION TO POSITIVE EMBEDS...")
-            positive_embeds = positive_embeds.unsqueeze(0)  # Add batch dimension [seq_len, dim] -> [1, seq_len, dim]
-            print(f"Added batch dimension to positive_embeds: {positive_embeds.shape}")
-        else:
-            print(f"Positive embeds already has {positive_embeds.dim()} dimensions, not adding batch dimension")
-        
-        # Handle negative embeddings
-        negative_embeds_raw = wan_text_embeds.get("negative_prompt_embeds", None)
-        print(f"negative_embeds_raw type: {type(negative_embeds_raw)}")
-        negative_embeds = None
-        
-        if negative_embeds_raw is not None:
-            if isinstance(negative_embeds_raw, list):
-                print(f"negative_embeds_raw is a list with {len(negative_embeds_raw)} items")
-                negative_embeds = negative_embeds_raw[0]  # Take first item if it's a list
-            else:
-                print(f"negative_embeds_raw shape: {getattr(negative_embeds_raw, 'shape', 'no shape')}")
-                negative_embeds = negative_embeds_raw
-                
-            print(f"Final negative_embeds type: {type(negative_embeds)}")
-            print(f"Final negative_embeds shape: {getattr(negative_embeds, 'shape', 'no shape')}")
-            print(f"Final negative_embeds dimensions: {negative_embeds.dim()}")
-            
-            # Check if it's a torch tensor
-            if not isinstance(negative_embeds, torch.Tensor):
-                print(f"WARNING: negative_embeds is not a torch.Tensor, it's {type(negative_embeds)}")
-                if hasattr(negative_embeds, '__iter__') and not isinstance(negative_embeds, (str, bytes)):
-                    try:
-                        negative_embeds = torch.stack(list(negative_embeds))
-                        print(f"Converted negative to tensor with shape: {negative_embeds.shape}")
-                    except Exception as e:
-                        print(f"Failed to convert negative to tensor: {e}")
-                        negative_embeds = None
-            
-            # Ensure negative_embeds has batch dimension (3D tensor)
-            if negative_embeds is not None:
-                print(f"Checking if negative_embeds needs batch dimension: dim={negative_embeds.dim()}")
-                if negative_embeds.dim() == 2:
-                    print("ADDING BATCH DIMENSION TO NEGATIVE EMBEDS...")
-                    negative_embeds = negative_embeds.unsqueeze(0)  # Add batch dimension
-                    print(f"Added batch dimension to negative_embeds: {negative_embeds.shape}")
-                else:
-                    print(f"Negative embeds already has {negative_embeds.dim()} dimensions, not adding batch dimension")
-        else:
-            negative_embeds = None
-        
-        # Convert data type to float32 if requested
-        if convert_to_float32:
-            print(f"Converting embeddings from {positive_embeds.dtype} to float32")
-            positive_embeds = positive_embeds.float()
-            if negative_embeds is not None:
-                negative_embeds = negative_embeds.float()
-        
-        # Convert sequence length if requested
-        if target_sequence_length > 0:
-            print(f"Converting sequence length from {positive_embeds.shape[1]} to {target_sequence_length}")
-            positive_embeds = self.convert_sequence_length(positive_embeds, target_sequence_length, length_conversion_method)
-            if negative_embeds is not None:
-                negative_embeds = self.convert_sequence_length(negative_embeds, target_sequence_length, length_conversion_method)
-        
-        # Apply strength multiplier if specified
-        if conditioning_strength != 1.0:
-            print(f"Applying conditioning strength: {conditioning_strength}")
-            positive_embeds = positive_embeds * conditioning_strength
-            if negative_embeds is not None:
-                negative_embeds = negative_embeds * conditioning_strength
-        
-        # Convert to ComfyUI CONDITIONING format
-        # ComfyUI CONDITIONING format is: [[embedding_tensor, pooled_output_dict]]
-        print("Creating ComfyUI CONDITIONING format...")
-        positive_conditioning = [[positive_embeds, {}]]
-        print(f"positive_conditioning structure: list with {len(positive_conditioning)} items")
-        print(f"positive_conditioning[0][0] type: {type(positive_conditioning[0][0])}")
-        print(f"positive_conditioning[0][0] shape: {getattr(positive_conditioning[0][0], 'shape', 'no shape')}")
-        print(f"positive_conditioning[0][0] dimensions: {positive_conditioning[0][0].dim()}")
-        
-        if output_negative and negative_embeds is not None:
-            negative_conditioning = [[negative_embeds, {}]]
-            print(f"negative_conditioning[0][0] type: {type(negative_conditioning[0][0])}")
-            print(f"negative_conditioning[0][0] shape: {getattr(negative_conditioning[0][0], 'shape', 'no shape')}")
-            print(f"negative_conditioning[0][0] dimensions: {negative_conditioning[0][0].dim()}")
-        else:
-            # Create empty negative conditioning if not available
-            negative_conditioning = [[torch.zeros_like(positive_embeds), {}]]
-            print("Created empty negative conditioning")
-        
-        print(f"Final output - Positive: {positive_embeds.shape} {positive_embeds.dtype}, Negative: {negative_conditioning[0][0].shape} {negative_conditioning[0][0].dtype}")
-        print("=== END WanVideoTextEmbedReverseBridge DEBUG ===")
-        return (positive_conditioning, negative_conditioning)
-    
-    def convert_sequence_length(self, embeddings, target_length, method):
-        """Convert sequence length using specified method"""
-        batch_size, current_length, embedding_dim = embeddings.shape
-        
-        if current_length == target_length:
-            return embeddings
-        
-        if method == "truncate":
-            if current_length > target_length:
-                return embeddings[:, :target_length, :]
-            else:
-                # Pad with zeros if shorter
-                padding = torch.zeros(batch_size, target_length - current_length, embedding_dim, 
-                                    dtype=embeddings.dtype, device=embeddings.device)
-                return torch.cat([embeddings, padding], dim=1)
-                
-        elif method == "pad_zeros":
-            if current_length < target_length:
-                # Pad with zeros
-                padding = torch.zeros(batch_size, target_length - current_length, embedding_dim, 
-                                    dtype=embeddings.dtype, device=embeddings.device)
-                return torch.cat([embeddings, padding], dim=1)
-            else:
-                # Truncate if longer
-                return embeddings[:, :target_length, :]
-                
-        elif method == "pad_repeat":
-            if current_length < target_length:
-                # Repeat the last token
-                last_token = embeddings[:, -1:, :].repeat(1, target_length - current_length, 1)
-                return torch.cat([embeddings, last_token], dim=1)
-            else:
-                # Truncate if longer
-                return embeddings[:, :target_length, :]
-                
-        elif method == "interpolate":
-            # Use linear interpolation to resize sequence
-            embeddings_transposed = embeddings.transpose(1, 2)  # [batch, embedding_dim, seq_len]
-            resized = torch.nn.functional.interpolate(embeddings_transposed, size=target_length, mode='linear', align_corners=False)
-            return resized.transpose(1, 2)  # Back to [batch, seq_len, embedding_dim]
-        
-        return embeddings
-     
-class WanVideoTextEmbedBridge:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-            "positive": ("CONDITIONING",),
-            },
-            "optional": {
-                "negative": ("CONDITIONING",),
-            }
-        }
-
-    RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", )
-    RETURN_NAMES = ("text_embeds",)
-    FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
-    DESCRIPTION = "Bridge between ComfyUI native text embedding and WanVideoWrapper text embedding"
-
-    def process(self, positive, negative=None):
-        print("=== WanVideoTextEmbedBridge DEBUG ===")
-        print(f"Input positive type: {type(positive)}")
-        print(f"Input positive length: {len(positive) if hasattr(positive, '__len__') else 'no length'}")
-        
-        if hasattr(positive, '__len__') and len(positive) > 0:
-            print(f"positive[0] type: {type(positive[0])}")
-            print(f"positive[0] length: {len(positive[0]) if hasattr(positive[0], '__len__') else 'no length'}")
-            
-            if hasattr(positive[0], '__len__') and len(positive[0]) > 0:
-                print(f"positive[0][0] type: {type(positive[0][0])}")
-                print(f"positive[0][0] shape: {getattr(positive[0][0], 'shape', 'no shape')}")
-                print(f"positive[0][0] dtype: {getattr(positive[0][0], 'dtype', 'no dtype')}")
-        
-        if negative is not None:
-            print(f"Input negative type: {type(negative)}")
-            print(f"Input negative length: {len(negative) if hasattr(negative, '__len__') else 'no length'}")
-            
-            if hasattr(negative, '__len__') and len(negative) > 0:
-                print(f"negative[0] type: {type(negative[0])}")
-                print(f"negative[0] length: {len(negative[0]) if hasattr(negative[0], '__len__') else 'no length'}")
-                
-                if hasattr(negative[0], '__len__') and len(negative[0]) > 0:
-                    print(f"negative[0][0] type: {type(negative[0][0])}")
-                    print(f"negative[0][0] shape: {getattr(negative[0][0], 'shape', 'no shape')}")
-                    print(f"negative[0][0] dtype: {getattr(negative[0][0], 'dtype', 'no dtype')}")
-        else:
-            print("negative is None")
-        
-        prompt_embeds_dict = {
-                "prompt_embeds": positive[0][0].to(device),
-                "negative_prompt_embeds": negative[0][0].to(device) if negative is not None else None,
-            }
-        
-        print(f"Output prompt_embeds_dict keys: {prompt_embeds_dict.keys()}")
-        print(f"Output prompt_embeds type: {type(prompt_embeds_dict['prompt_embeds'])}")
-        print(f"Output prompt_embeds shape: {getattr(prompt_embeds_dict['prompt_embeds'], 'shape', 'no shape')}")
-        
-        if prompt_embeds_dict['negative_prompt_embeds'] is not None:
-            print(f"Output negative_prompt_embeds type: {type(prompt_embeds_dict['negative_prompt_embeds'])}")
-            print(f"Output negative_prompt_embeds shape: {getattr(prompt_embeds_dict['negative_prompt_embeds'], 'shape', 'no shape')}")
-        else:
-            print("Output negative_prompt_embeds is None")
-        
-        print("=== END WanVideoTextEmbedBridge DEBUG ===")
-        return (prompt_embeds_dict,)
 
 
 #region clip vision
@@ -2662,16 +3195,7 @@ class WanVideoSampler:
 
         if not multitalk_sampling and scheduler == "multitalk":
             raise Exception("multitalk scheduler is only for multitalk sampling when using ImagetoVideoMultiTalk -node")
-        
-        # check if text_embeds is a list
-        # text_embeds_list = [text_embeds]
-        # if isinstance(text_embeds, list):
-        #     print(f"!!!!!!Received {len(text_embeds)} text_embeds as a list for {steps} steps.")
-        #     text_embeds_list = []
-        #     for text_embed in text_embeds:
-        #         text_embed_correct_device = dict_to_device(text_embed, device)
-        #         text_embeds_list.append(text_embed_correct_device)
-        #     text_embeds = text_embeds[0]
+
         if text_embeds == None:
             print(f"!!!!!!Received No text_embeds at all for {steps} steps.")
             text_embeds = {
@@ -6022,6 +6546,8 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoBlockList": WanVideoBlockList,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
     "VTS_WanVideoMultiTextEncodeCached": VTS_WanVideoMultiTextEncodeCached,
+    "VTS_WanT5Comparer": VTS_WanT5Comparer,
+    "VTS_ClipComparer": VTS_ClipComparer,
     "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
     "WanVideoScheduler": WanVideoScheduler,
     "WanVideoAddStandInLatent": WanVideoAddStandInLatent,
@@ -6070,6 +6596,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoBlockList": "WanVideo Block List",
     "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
     "VTS_WanVideoMultiTextEncodeCached": "VTS WanVideo MultiTextEncode Cached",
+    "VTS_WanT5Comparer": "VTS WanT5 Comparer",
+    "VTS_ClipComparer": "VTS Clip Comparer",
     "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
     "WanVideoAddStandInLatent": "WanVideo Add StandIn Latent",
     "WanVideoAddControlEmbeds": "WanVideo Add Control Embeds",

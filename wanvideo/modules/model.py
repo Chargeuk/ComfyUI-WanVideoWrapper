@@ -2246,6 +2246,17 @@ class WanModel(torch.nn.Module):
                     raise NotImplementedError("nag_context is not supported with EchoShot")
                 inner_c = [[u.shape[0] for u in context]]
 
+            # Store original text_len for restoration later
+            original_text_len = self.text_len
+            
+            # Find the maximum sequence length in the current batch
+            max_seq_len = max(u.size(0) for u in context)
+            
+            # If any embedding is longer than current text_len, update it temporarily
+            if max_seq_len > self.text_len:
+                print(f"Dynamically expanding text_len from {self.text_len} to {max_seq_len}")
+                self.text_len = max_seq_len
+
             context = self.text_embedding(
                 torch.stack([
                     torch.cat(
@@ -2255,12 +2266,21 @@ class WanModel(torch.nn.Module):
             
             # NAG
             if nag_context is not None:
+                # Also check NAG context for maximum length
+                max_nag_seq_len = max(u.size(0) for u in nag_context)
+                if max_nag_seq_len > self.text_len:
+                    print(f"Further expanding text_len from {self.text_len} to {max_nag_seq_len} for NAG context")
+                    self.text_len = max_nag_seq_len
+                    
                 nag_context = self.text_embedding(
                 torch.stack([
                     torch.cat(
                         [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
                     for u in nag_context
                 ]).to(x.dtype))
+            
+            # Restore original text_len after processing
+            self.text_len = original_text_len
             
             if self.offload_txt_emb:
                 self.text_embedding.to(self.offload_device, non_blocking=self.use_non_blocking)
