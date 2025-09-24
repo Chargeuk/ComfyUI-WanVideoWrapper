@@ -153,38 +153,6 @@ def needs_chunking(encoder, prompts, max_tokens=512):
         log.warning(f"Tokenizer error: {e}, using character estimation")
         return any(len(p) > max_tokens * 4 for p in prompts)
 
-def split_text_by_tokens(tokenizer, text, max_tokens):
-    """Split text into chunks based on actual token count"""
-    if tokenizer is None:
-        # Fallback to sentence-based splitting
-        return split_text_by_sentences(text, max_tokens)
-    
-    try:
-        # Tokenize the full text
-        tokens = tokenizer.encode(text, add_special_tokens=False)
-        
-        if len(tokens) <= max_tokens:
-            return [text]
-        
-        chunks = []
-        current_start = 0
-        
-        while current_start < len(tokens):
-            # Get chunk of tokens
-            chunk_end = min(current_start + max_tokens, len(tokens))
-            chunk_tokens = tokens[current_start:chunk_end]
-            
-            # Decode back to text
-            chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
-            chunks.append(chunk_text)
-            
-            current_start = chunk_end
-        
-        return chunks
-        
-    except Exception as e:
-        log.warning(f"Token-based splitting failed: {e}, falling back to sentence splitting")
-        return split_text_by_sentences(text, max_tokens)
 
 def split_text_by_sentences(text, max_tokens):
     """Fallback: split by sentences with rough token estimation"""
@@ -223,11 +191,12 @@ def encode_with_chunking(encoder, prompts, device_to, max_tokens):
         else:
             # Split into chunks and concatenate
             log.info(f"Chunking prompt: {token_count} tokens -> chunks of {max_tokens}")
-            chunks = split_text_by_tokens(tokenizer, prompt, max_tokens)
+            chunks = split_text_by_sentences(prompt, max_tokens)
             
             chunk_embeddings = []
             for i, chunk in enumerate(chunks):
                 log.info(f"Encoding chunk {i+1}/{len(chunks)}: {get_token_count(encoder, chunk)} tokens")
+                log.info(f"Chunk text:\n{chunk}")
                 chunk_encoded = encoder([chunk], device_to)
                 chunk_embeddings.append(chunk_encoded[0])
             
