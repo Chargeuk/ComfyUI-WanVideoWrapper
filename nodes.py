@@ -177,9 +177,15 @@ def split_text_by_sentences(text, max_tokens):
     return chunks if chunks else [text]
 
 def split_text_by_double_newline(text):
-    """Split text by double newlines and return an array of results"""
-    # Split by double newlines (handles both \n\n and \r\n\r\n)
-    chunks = text.split('\n\n')
+    """Split text by double newlines (including those with whitespace between) and return an array of results"""
+    import re
+    
+    # Pattern to match: newline, optional whitespace (spaces/tabs), then another newline
+    # This handles \n\n, \n \n, \n\t\n, \n  \t \n, etc.
+    pattern = r'\n\s*\n'
+    
+    # Split by the pattern
+    chunks = re.split(pattern, text)
     
     # Clean up each chunk by stripping whitespace
     cleaned_chunks = []
@@ -187,6 +193,7 @@ def split_text_by_double_newline(text):
         cleaned_chunk = chunk.strip()
         if cleaned_chunk:  # Only add non-empty chunks
             cleaned_chunks.append(cleaned_chunk)
+    
     # Return the original text as a single item if no splits were found
     return cleaned_chunks if cleaned_chunks else [text]
 
@@ -263,10 +270,11 @@ def encode_with_chunking_enhanced(encoder, prompts, device_to, max_tokens, chunk
             
             # Encode all chunks
             chunk_embeddings = []
+            max_preview = 300
             for i, chunk in enumerate(chunks):
                 chunk_token_count = get_token_count(encoder, chunk)
                 log.info(f"Encoding chunk {i+1}/{len(chunks)}: {chunk_token_count} tokens")
-                log.info(f"Chunk text preview: {chunk[:100]}{'...' if len(chunk) > 100 else ''}")
+                log.info(f"Chunk text preview: {chunk[:max_preview]}{'...' if len(chunk) > max_preview else ''}")
                 chunk_encoded = encoder([chunk], device_to)
                 chunk_embeddings.append(chunk_encoded[0])
             
@@ -5164,22 +5172,62 @@ class WanVideoSampler:
                             if cond_image is not None:
                                 video_frames = torch.zeros(1, 3, frame_num-cond_image.shape[2], target_h, target_w, device=device, dtype=vae.dtype)
                                 padding_frames_pixels_values = torch.concat([cond_image.to(device, vae.dtype), video_frames], dim=2)
-
+                                
                                 # encode
-                                vae.to(device)
-                                y = vae.encode(padding_frames_pixels_values, device=device, tiled=tiled_vae, pbar=False).to(dtype)[0]
+                                encoder = WanVideoEncode()
+                                used_padding_frames_pixels_values = padding_frames_pixels_values.clone()
+                                print(f"Encoding video frames with shape {used_padding_frames_pixels_values.shape}")
+                                used_padding_frames_pixels_values = used_padding_frames_pixels_values.permute(0, 2, 3, 4, 1).squeeze(0)
+                                print(f"Encoding video frames with shape after permute-squeeze {used_padding_frames_pixels_values.shape}")
+                                used_padding_frames_pixels_values.clamp_(-1.0, 1.0)
+                                used_padding_frames_pixels_values.add_(1.0).div_(2.0)
+                                encode_result = encoder.encode(
+                                    vae,
+                                    used_padding_frames_pixels_values,
+                                    enable_vae_tiling=tiled_vae,
+                                    tile_x = 272,
+                                    tile_y = 272,
+                                    tile_stride_x = 144,
+                                    tile_stride_y = 128)[0]
+                                y = encode_result["samples"].to(dtype)[0]
+                                
+                                # old encode
+                                # vae.to(device)
+                                # y = vae.encode(padding_frames_pixels_values, device=device, tiled=tiled_vae, pbar=False).to(dtype)[0]
                                 
                                 if mode == "multitalk":
                                     latent_motion_frames = y[:, :cur_motion_frames_latent_num] # C T H W
                                 else:
                                     cond_ = cond_image if is_first_clip else cond_frame
-                                    latent_motion_frames = vae.encode(cond_.to(device, vae.dtype), device=device, tiled=tiled_vae, pbar=False).to(dtype)[0]
-                                vae.model.clear_cache()
-                                vae.to(offload_device)
+                                    # encode with class
+                                    encoder = WanVideoEncode()
+                                    used_cond = cond_.clone()
+                                    print(f"Encoding video frames with shape {used_cond.shape}")
+                                    used_cond = used_cond.permute(0, 2, 3, 4, 1).squeeze(0)
+                                    print(f"Encoding video frames with shape after permute-squeeze {used_cond.shape}")
+                                    used_cond = used_cond.to(device, vae.dtype)
+                                    used_cond.clamp_(-1.0, 1.0)
+                                    used_cond.add_(1.0).div_(2.0)
+                                    encode_result = encoder.encode(
+                                        vae,
+                                        used_cond,
+                                        enable_vae_tiling=tiled_vae,
+                                        tile_x = 272,
+                                        tile_y = 272,
+                                        tile_stride_x = 144,
+                                        tile_stride_y = 128)[0]
+                                    latent_motion_frames = encode_result["samples"].to(dtype)[0]
+                                    # old encode
+                                    # latent_motion_frames = vae.encode(cond_.to(device, vae.dtype), device=device, tiled=tiled_vae, pbar=False).to(dtype)[0]
+                                # vae.model.clear_cache()
+                                # vae.to(offload_device)
 
                                 #motion_frame_index = cur_motion_frames_latent_num if mode == "infinitetalk" else 1
                                 msk = torch.zeros(4, latent_frame_num, lat_h, lat_w, device=device, dtype=dtype)
                                 msk[:, :1] = 1
+                                print(f"msk shape: {msk.shape}")
+                                print(f"y shape: {y.shape}")
+                                print(f"latent_frame_num: {latent_frame_num}, lat_h: {lat_h}, lat_w: {lat_w}")
                                 y = torch.cat([msk, y]) # 4+C T H W
                                 mm.soft_empty_cache()
                             else:
@@ -5469,10 +5517,27 @@ class WanVideoSampler:
                                         del saved_motion_frames
                             
                             del latent_motion_frames
-                            vae.to(device)
-                            videos = vae.decode(latent.unsqueeze(0).to(device, vae.dtype), device=device, tiled=tiled_vae, pbar=False)[0].cpu()
-                            vae.model.clear_cache()
-                            vae.to(offload_device)
+
+                            # new decode with class
+                            decoder = WanVideoDecode()
+                            samples_to_decode = {"samples": latent.unsqueeze(0)}
+                            decode_result = decoder.decode(
+                                vae,
+                                samples_to_decode,
+                                enable_vae_tiling=tiled_vae,
+                                tile_x = 272,
+                                tile_y = 272,
+                                tile_stride_x = 144,
+                                tile_stride_y = 128)
+                            videos = decode_result[0]
+                            videos = videos.permute(3, 0, 1, 2)
+                            videos.mul_(2.0).sub_(1.0)
+
+                            # old decode
+                            # vae.to(device)
+                            # videos = vae.decode(latent.unsqueeze(0).to(device, vae.dtype), device=device, tiled=tiled_vae, pbar=False)[0].cpu()
+                            # vae.model.clear_cache()
+                            # vae.to(offload_device)
 
                             sampling_pbar.close()
                             
@@ -5675,10 +5740,26 @@ class WanVideoSampler:
                                 step_iteration_count += 1
                                 del latent_model_input, noise_pred
                                 
-                            
+                            # old decode
                             vae.to(device)
                             decode_latents = torch.cat([ref_motion.unsqueeze(0), latent.unsqueeze(0)], dim=2)
-                            image = vae.decode(decode_latents.to(device, vae.dtype), device=device, pbar=False)[0]
+
+                            # new decode with class
+                            decoder = WanVideoDecode()
+                            samples_to_decode = {"samples": latent.unsqueeze(0)}
+                            decode_result = decoder.decode(
+                                vae,
+                                samples_to_decode,
+                                enable_vae_tiling=tiled_vae,
+                                tile_x = 272,
+                                tile_y = 272,
+                                tile_stride_x = 144,
+                                tile_stride_y = 128)
+                            image = decode_result[0]
+                            image = image.permute(3, 0, 1, 2)
+                            image.mul_(2.0).sub_(1.0)
+
+                            # image = vae.decode(decode_latents.to(device, vae.dtype), device=device, pbar=False)[0]
                             del decode_latents
                             image = image.unsqueeze(0)[:, :, -infer_frames:]
                             if r == 0:
@@ -6694,11 +6775,53 @@ class WanVideoEncode:
             image = image[..., :3]
         image = image.to(vae.dtype).to(device).unsqueeze(0).permute(0, 4, 1, 2, 3) # B, C, T, H, W        
 
+        print(f"WanVideoEncode Original image shape: {image.shape}")
+        print(f"WanVideoEncode Image after transformations shape: {image.shape}")
+        print(f"WanVideoEncode Image after permute for TAEHV: {image.permute(0, 2, 1, 3, 4).shape}")
+        print(f"WanVideoEncode Is image empty? {image.numel() == 0}")
+
         if noise_aug_strength > 0.0:
             image = add_noise_to_reference_video(image, ratio=noise_aug_strength)
 
+        # if isinstance(vae, TAEHV):
+        #     image_for_vae = image.permute(0, 2, 1, 3, 4)  # B, T, C, H, W
+        #     # TAEHV requires at least 2 frames due to TPool layers with stride=2
+        #     if image_for_vae.shape[1] == 1:
+        #         print("WanVideoEncode: Padding single frame to 5 frames for TAEHV compatibility")
+        #         image_for_vae = image_for_vae.repeat(1, 5, 1, 1, 1)
+        #     latents = vae.encode_video(image_for_vae, parallel=False)
+        #     # Take only the first frame's latents if we padded
+        #     if image.shape[2] == 1 and latents.shape[1] > 1:
+        #         print("WanVideoEncode: Removing padded frames from latents, so we only have 1 frame")
+        #         latents = latents[:, :1]  # Keep only first frame
+        #     latents = latents.permute(0, 2, 1, 3, 4)
         if isinstance(vae, TAEHV):
-            latents = vae.encode_video(image.permute(0, 2, 1, 3, 4), parallel=False)# B, T, C, H, W
+            image_for_vae = image.permute(0, 2, 1, 3, 4)  # B, T, C, H, W
+            # TAEHV requires at least 2 frames due to TPool layers with stride=2
+            # Always duplicate the last frame 5 times to ensure consistent encoding
+            estimated_number_of_latents = int((image_for_vae.shape[1] - 1) / 4) + 1
+            will_have_odd_number_of_latents = estimated_number_of_latents % 2 == 1
+            print(f"WanVideoEncode: Original frames: {image_for_vae.shape[1]}, will create {estimated_number_of_latents} latent frames, will_have_odd_number_of_latents: {will_have_odd_number_of_latents}")
+            if will_have_odd_number_of_latents:
+                print(f"WanVideoEncode: duplicating last frame 4 times for TAEHV compatibility")
+                last_frame = image_for_vae[:, -1:].repeat(1, 4, 1, 1, 1)  # Duplicate last frame 4 times
+                image_for_vae = torch.cat([image_for_vae, last_frame], dim=1)  # Append duplicated frames
+                print(f"WanVideoEncode: After padding with duplicated frames: {image_for_vae.shape}")
+            else:
+                print(f"WanVideoEncode: No need to duplicate frames for TAEHV compatibility")
+
+            latents = vae.encode_video(image_for_vae, parallel=False)
+            actual_number_of_latents = latents.shape[1]
+            latent_difference = actual_number_of_latents - estimated_number_of_latents
+            print(f"WanVideoEncode: Encoded latents shape: {latents.shape}")
+            print(f"WanVideoEncode: actual_number_of_latents: {actual_number_of_latents}, estimated_number_of_latents: {estimated_number_of_latents}, latent_difference: {latent_difference}")
+            if latent_difference > 0:
+                # Always drop the last 1 latent frames (corresponding to the 4 duplicated input frames)
+                latents = latents[:, :-latent_difference]  # Remove the last 1 latent frames, which should remove the equivalent of 4 images
+                print(f"WanVideoEncode: Final latents shape after dropping last 1 latent frames: {latents.shape}")
+            else:
+                print(f"WanVideoEncode: No need to drop any latent frames")
+            
             latents = latents.permute(0, 2, 1, 3, 4)
         else:
             latents = vae.encode(image * 2.0 - 1.0, device=device, tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))
