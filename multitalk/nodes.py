@@ -536,7 +536,7 @@ class WanVideoImageToVideoMultiTalk:
                     "infinitetalk"
                 ], {"default": "auto", "tooltip": "The sampling strategy to use in the long video generation loop, should match the model used"}),
                 "output_path": ("STRING", {"default": "", "tooltip": "If set, will save each window's resulting frames to this folder, also DISABLES returning the final video tensor to save memory"}),
-
+                "vae_decoder": ("WANVAE",),
             }
         }
 
@@ -546,8 +546,9 @@ class WanVideoImageToVideoMultiTalk:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Enables Multi/InfiniteTalk long video generation sampling method, the video is created in windows with overlapping frames. Not compatible or necessary to be used with context windows and many other features besides Multi/InfiniteTalk."
 
-    def process(self, vae, width, height, frame_window_size, motion_frame, force_offload, colormatch, start_image=None, tiled_vae=False, clip_embeds=None, mode="multitalk", output_path=""):
-
+    def process(self, vae, width, height, frame_window_size, motion_frame, force_offload, colormatch, start_image=None, tiled_vae=False, clip_embeds=None, mode="multitalk", output_path="", vae_decoder=None):
+        if not vae_decoder:
+            vae_decoder = vae
         H = height
         W = width
         VAE_STRIDE = (4, 8, 8)
@@ -579,6 +580,7 @@ class WanVideoImageToVideoMultiTalk:
             "tiled_vae": tiled_vae,
             "force_offload": force_offload,
             "vae": vae,
+            "vae_decoder": vae_decoder,
             "target_shape": target_shape,
             "clip_context": clip_embeds.get("clip_embeds", None) if clip_embeds is not None else None,
             "colormatch": colormatch,

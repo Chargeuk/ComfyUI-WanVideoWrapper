@@ -5021,6 +5021,7 @@ class WanVideoSampler:
                         tiled_vae = image_embeds.get("tiled_vae", False)
                         frame_num = clip_length = image_embeds.get("num_frames", 81)
                         vae = image_embeds.get("vae", None)
+                        vae_decoder = image_embeds.get("vae_decoder", vae)
                         clip_embeds = image_embeds.get("clip_context", None)
                         if clip_embeds is not None:
                             clip_embeds = clip_embeds.to(dtype)
@@ -5522,7 +5523,7 @@ class WanVideoSampler:
                             decoder = WanVideoDecode()
                             samples_to_decode = {"samples": latent.unsqueeze(0)}
                             decode_result = decoder.decode(
-                                vae,
+                                vae_decoder,
                                 samples_to_decode,
                                 enable_vae_tiling=tiled_vae,
                                 tile_x = 272,
@@ -5748,7 +5749,7 @@ class WanVideoSampler:
                             decoder = WanVideoDecode()
                             samples_to_decode = {"samples": latent.unsqueeze(0)}
                             decode_result = decoder.decode(
-                                vae,
+                                vae_decoder,
                                 samples_to_decode,
                                 enable_vae_tiling=tiled_vae,
                                 tile_x = 272,
