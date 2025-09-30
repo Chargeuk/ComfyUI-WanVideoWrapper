@@ -5223,7 +5223,6 @@ class WanVideoSampler:
                                 # vae.model.clear_cache()
                                 # vae.to(offload_device)
 
-                                #motion_frame_index = cur_motion_frames_latent_num if mode == "infinitetalk" else 1
                                 msk = torch.zeros(4, latent_frame_num, lat_h, lat_w, device=device, dtype=dtype)
                                 msk[:, :1] = 1
                                 print(f"msk shape: {msk.shape}")
@@ -6803,13 +6802,11 @@ class WanVideoEncode:
             estimated_number_of_latents = int((image_for_vae.shape[1] - 1) / 4) + 1
             will_have_odd_number_of_latents = estimated_number_of_latents % 2 == 1
             print(f"WanVideoEncode: Original frames: {image_for_vae.shape[1]}, will create {estimated_number_of_latents} latent frames, will_have_odd_number_of_latents: {will_have_odd_number_of_latents}")
-            if will_have_odd_number_of_latents:
-                print(f"WanVideoEncode: duplicating last frame 4 times for TAEHV compatibility")
-                last_frame = image_for_vae[:, -1:].repeat(1, 4, 1, 1, 1)  # Duplicate last frame 4 times
-                image_for_vae = torch.cat([image_for_vae, last_frame], dim=1)  # Append duplicated frames
-                print(f"WanVideoEncode: After padding with duplicated frames: {image_for_vae.shape}")
-            else:
-                print(f"WanVideoEncode: No need to duplicate frames for TAEHV compatibility")
+            # ALWAYS duplicate the last frame 4 times for TAEHV compatibility
+            print(f"WanVideoEncode: duplicating last frame 4 times for TAEHV compatibility")
+            last_frame = image_for_vae[:, -1:].repeat(1, 4, 1, 1, 1)  # Duplicate last frame 4 times
+            image_for_vae = torch.cat([image_for_vae, last_frame], dim=1)  # Append duplicated frames
+            print(f"WanVideoEncode: After padding with duplicated frames: {image_for_vae.shape}")
 
             latents = vae.encode_video(image_for_vae, parallel=False)
             actual_number_of_latents = latents.shape[1]
@@ -6820,6 +6817,8 @@ class WanVideoEncode:
                 # Always drop the last 1 latent frames (corresponding to the 4 duplicated input frames)
                 latents = latents[:, :-latent_difference]  # Remove the last 1 latent frames, which should remove the equivalent of 4 images
                 print(f"WanVideoEncode: Final latents shape after dropping last 1 latent frames: {latents.shape}")
+            elif latent_difference < 0:
+                print(f"WanVideoEncode: We have less encoded frames than expected: {latents.shape}")
             else:
                 print(f"WanVideoEncode: No need to drop any latent frames")
             
