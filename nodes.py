@@ -3,6 +3,8 @@ import torch
 import random
 import torch.nn.functional as F
 import gc
+
+from .vts_model_loading import VTS_TAEWrapper
 from .utils import log, print_memory, apply_lora, clip_encode_image_tiled, fourier_filter
 import numpy as np
 import math
@@ -27,7 +29,7 @@ from .utils import(log, print_memory, apply_lora, clip_encode_image_tiled, fouri
 from .cache_methods.cache_methods import cache_report
 from .nodes_model_loading import load_weights
 from .enhance_a_video.globals import set_enhance_weight, set_num_frames
-from .taehv import TAEHV
+from .taehv import TAEHV, VTS_TAEHV
 from .nodes_utility import WanVideoVACEStartToEndFrame, colormatch
 from contextlib import nullcontext
 from einops import rearrange
@@ -6610,6 +6612,12 @@ class WanVideoDecode:
     CATEGORY = "WanVideoWrapper"
 
     def decode(self, vae, samples, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, normalization="default"):
+        if isinstance(vae, VTS_TAEWrapper):
+            print("WanVideoDecode - using VTS_TAEWrapper for decoding.")
+            images = vae.decode(latent=samples)
+            print("WanVideoDecode - completed decoding using VTS_TAEWrapper.")
+            return (images,)
+
         mm.soft_empty_cache()
         images = samples.get("images", None)
         if images is not None:
@@ -6783,18 +6791,6 @@ class WanVideoEncode:
         if noise_aug_strength > 0.0:
             image = add_noise_to_reference_video(image, ratio=noise_aug_strength)
 
-        # if isinstance(vae, TAEHV):
-        #     image_for_vae = image.permute(0, 2, 1, 3, 4)  # B, T, C, H, W
-        #     # TAEHV requires at least 2 frames due to TPool layers with stride=2
-        #     if image_for_vae.shape[1] == 1:
-        #         print("WanVideoEncode: Padding single frame to 5 frames for TAEHV compatibility")
-        #         image_for_vae = image_for_vae.repeat(1, 5, 1, 1, 1)
-        #     latents = vae.encode_video(image_for_vae, parallel=False)
-        #     # Take only the first frame's latents if we padded
-        #     if image.shape[2] == 1 and latents.shape[1] > 1:
-        #         print("WanVideoEncode: Removing padded frames from latents, so we only have 1 frame")
-        #         latents = latents[:, :1]  # Keep only first frame
-        #     latents = latents.permute(0, 2, 1, 3, 4)
         if isinstance(vae, TAEHV):
             image_for_vae = image.permute(0, 2, 1, 3, 4)  # B, T, C, H, W
             # TAEHV requires at least 2 frames due to TPool layers with stride=2
