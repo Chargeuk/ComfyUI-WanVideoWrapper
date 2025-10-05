@@ -3358,6 +3358,8 @@ class WanVideoSampler:
         patcher = model
         model = model.model
         transformer = model.diffusion_model
+        encoder = None
+        decoder = None
 
         dtype = model["base_dtype"]
         weight_dtype = model["weight_dtype"]
@@ -5177,7 +5179,8 @@ class WanVideoSampler:
                                 padding_frames_pixels_values = torch.concat([cond_image.to(device, vae.dtype), video_frames], dim=2)
                                 
                                 # encode
-                                encoder = WanVideoEncode()
+                                if not encoder:
+                                    encoder = WanVideoEncode()
                                 used_padding_frames_pixels_values = padding_frames_pixels_values.clone()
                                 print(f"Encoding video frames with shape {used_padding_frames_pixels_values.shape}")
                                 used_padding_frames_pixels_values = used_padding_frames_pixels_values.permute(0, 2, 3, 4, 1).squeeze(0)
@@ -5203,7 +5206,8 @@ class WanVideoSampler:
                                 else:
                                     cond_ = cond_image if is_first_clip else cond_frame
                                     # encode with class
-                                    encoder = WanVideoEncode()
+                                    if not encoder:
+                                        encoder = WanVideoEncode()
                                     used_cond = cond_.clone()
                                     print(f"Encoding video frames with shape {used_cond.shape}")
                                     used_cond = used_cond.permute(0, 2, 3, 4, 1).squeeze(0)
@@ -5521,7 +5525,8 @@ class WanVideoSampler:
                             del latent_motion_frames
 
                             # new decode with class
-                            decoder = WanVideoDecode()
+                            if not decoder:
+                                decoder = WanVideoDecode()
                             samples_to_decode = {"samples": latent.unsqueeze(0)}
                             decode_result = decoder.decode(
                                 vae_decoder,
@@ -5747,7 +5752,8 @@ class WanVideoSampler:
                             decode_latents = torch.cat([ref_motion.unsqueeze(0), latent.unsqueeze(0)], dim=2)
 
                             # new decode with class
-                            decoder = WanVideoDecode()
+                            if not decoder:
+                                decoder = WanVideoDecode()
                             samples_to_decode = {"samples": latent.unsqueeze(0)}
                             decode_result = decoder.decode(
                                 vae_decoder,
@@ -6614,7 +6620,7 @@ class WanVideoDecode:
     def decode(self, vae, samples, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, normalization="default"):
         if isinstance(vae, VTS_TAEWrapper):
             print("WanVideoDecode - using VTS_TAEWrapper for decoding.")
-            images = vae.decode(latent=samples)
+            images = vae.decode(latent=samples).to(vae.dtype).to(device)
             print("WanVideoDecode - completed decoding using VTS_TAEWrapper.")
             return (images,)
 
@@ -6768,6 +6774,12 @@ class WanVideoEncode:
         if passthrough:
             print("WanVideoEncode passthrough enabled, returning None")
             return {"images": image},
+
+        if isinstance(vae, VTS_TAEWrapper):
+            print("WanVideoEncode - using VTS_TAEWrapper for encoding.")
+            latents = vae.encode(image).to(device=device, dtype=vae.dtype)
+            print("WanVideoEncode - completed encoding using VTS_TAEWrapper.")
+            return ({"samples": latents, "noise_mask": mask},)
         
         vae.to(device)
         image = image.clone()

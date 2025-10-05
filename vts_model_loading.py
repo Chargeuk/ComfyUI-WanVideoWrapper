@@ -56,6 +56,9 @@ except Exception as e:
 class VTS_TAEWrapper:
     def __init__(self, kwargs):
         self.initialiseValues = kwargs
+        self.dtype = VTS_TAEVideoNodeBase.get_dtype_from_string(kwargs.get("dtype", "float32"))
+        self.encoder = None
+        self.decoder = None
 
     def decode(self, latent: dict):
         if VTS_ConvertLatents is None:
@@ -69,12 +72,32 @@ class VTS_TAEWrapper:
                                                      conversion_direction="WanWrapper->ComfyUI",
                                                      conversion_method="channel_wise")
         converted_latent = result[0]
-        decoder = VTS_TAEVideoDecode()
+        if not self.decoder:
+            self.decoder = VTS_TAEVideoDecode()
         # Pass the latent first, then unpack the initialization values as keyword arguments
-        result = decoder.go(latent=converted_latent, **self.initialiseValues)
+        result = self.decoder.go(latent=converted_latent, **self.initialiseValues)
         decoded_images = result[0]  # Assuming the first element is the decoded images
         return decoded_images
     
+    def encode(self, images: torch.Tensor):
+        if VTS_ConvertLatents is None:
+            raise RuntimeError("VTS_ConvertLatents is not available.")
+        
+        if VTS_TAEVideoEncode is None:
+            raise RuntimeError("VTS_TAEVideoEncode is not available.")
+
+        if not self.encoder:
+            self.encoder = VTS_TAEVideoEncode()
+        result = self.encoder.go(image=images, **self.initialiseValues)
+        encoded_latents = result[0]  # Assuming the first element is the encoded latents
+
+        converter = VTS_ConvertLatents()
+        result = converter.convert_latents(source_latent=encoded_latents,
+                                                     conversion_direction="ComfyUI->WanWrapper",
+                                                     conversion_method="channel_wise")
+        encoded_latents = result[0].get("samples")
+        return encoded_latents
+
 class VTS_TAEVLoader(VTS_TAEVideoNodeBase):
     RETURN_TYPES = ("WANVAE",)
     RETURN_NAMES = ("vae", )
