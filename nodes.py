@@ -5536,7 +5536,7 @@ class WanVideoSampler:
                                 tile_y = 272,
                                 tile_stride_x = 144,
                                 tile_stride_y = 128)
-                            videos = decode_result[0]
+                            videos = decode_result[0].cpu()  # Ensure videos is on CPU
                             videos = videos.permute(3, 0, 1, 2)
                             videos.mul_(2.0).sub_(1.0)
 
