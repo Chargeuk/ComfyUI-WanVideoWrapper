@@ -2389,13 +2389,18 @@ class WanVideoImageToVideoEncode:
         lat_h = H // vae.upsampling_factor
         lat_w = W // vae.upsampling_factor
 
+        print(f"WanVideoImageToVideoEncode: provided num_frames={num_frames}, width={width}, height={height}, lat_w={lat_w}, lat_h={lat_h}")
+
         num_frames = ((num_frames - 1) // 4) * 4 + 1
+
+        print(f"WanVideoImageToVideoEncode: converted num_frames={num_frames}")
         two_ref_images = start_image is not None and end_image is not None
 
         if start_image is None and end_image is not None:
             fun_or_fl2v_model = True # end image alone only works with this option
 
         base_frames = num_frames + (1 if two_ref_images and not fun_or_fl2v_model else 0)
+        print(f"WanVideoImageToVideoEncode: base_frames={base_frames}")
         if temporal_mask is None:
             mask = torch.zeros(1, base_frames, lat_h, lat_w, device=device, dtype=vae.dtype)
             if start_image is not None:
@@ -2498,6 +2503,9 @@ class WanVideoImageToVideoEncode:
             mm.soft_empty_cache()
             gc.collect()
 
+        numberOfImageEmbedFrames = y.shape[1]
+        print(f"WanVideoImageToVideoEncode: final num_frames={num_frames}, numberOfImageEmbedFrames={numberOfImageEmbedFrames}")
+
         image_embeds = {
             "image_embeds": y,
             "clip_context": clip_embeds.get("clip_embeds", None) if clip_embeds is not None else None,
@@ -2516,6 +2524,191 @@ class WanVideoImageToVideoEncode:
 
         return (image_embeds,)
     
+class WanVideoImageSequenceEncode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "imageFrames": ("IMAGE", {"tooltip": "Sequence of image frames to encode"}),
+            "numberOfStartImages": ("INT", {"default": 1, "min": 0, "max": 100, "step": 1, "tooltip": "Number of images from the start to mark as real content"}),
+            "numberOfEndImages": ("INT", {"default": 1, "min": 0, "max": 100, "step": 1, "tooltip": "Number of images from the end to mark as real content"}),
+            "vae": ("WANVAE",),
+            "force_offload": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "clip_embeds": ("WANVIDIMAGE_CLIPEMBEDS", {"tooltip": "Clip vision encoded image"}),
+                "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE encoding for reduced memory use"}),
+                "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation"}),
+                "start_latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier for start frames"}),
+                "end_latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier for end frames"}),
+                "fun_or_fl2v_model": ("BOOLEAN", {"default": False, "tooltip": "Enable when using official FLF2V or Fun model"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
+    RETURN_NAMES = ("image_embeds",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+
+    def process(self, imageFrames, numberOfStartImages, numberOfEndImages, vae, force_offload=True, 
+                clip_embeds=None, tiled_vae=False, noise_aug_strength=0.0, 
+                start_latent_strength=1.0, end_latent_strength=1.0, fun_or_fl2v_model=False):
+        
+        if vae is None:
+            raise ValueError("VAE is required for image encoding.")
+        
+        # Get frame information
+        num_frames = imageFrames.shape[0]  # Total number of frames
+        height = imageFrames.shape[1]
+        width = imageFrames.shape[2]
+        
+        # Validate input parameters
+        if numberOfStartImages + numberOfEndImages > num_frames:
+            raise ValueError(f"numberOfStartImages ({numberOfStartImages}) + numberOfEndImages ({numberOfEndImages}) cannot exceed total frames ({num_frames})")
+        
+        fun_or_fl2v_model = bool(fun_or_fl2v_model)
+        if numberOfStartImages == 0 and numberOfEndImages > 0 and not fun_or_fl2v_model:
+            print("WanVideoImageSequenceEncode: Enabling fun_or_fl2v_model because only end images are provided.")
+            fun_or_fl2v_model = True
+        
+        lat_h = height // vae.upsampling_factor
+        lat_w = width // vae.upsampling_factor
+
+        print(f"WanVideoImageSequenceEncode: num_frames={num_frames}, width={width}, height={height}, lat_w={lat_w}, lat_h={lat_h}")
+        print(f"WanVideoImageSequenceEncode: numberOfStartImages={numberOfStartImages}, numberOfEndImages={numberOfEndImages}")
+
+        # Adjust num_frames to follow the pattern: ((num_frames - 1) // 4) * 4 + 1
+        adjusted_num_frames = ((num_frames - 1) // 4) * 4 + 1
+        print(f"WanVideoImageSequenceEncode: adjusted num_frames={adjusted_num_frames}")
+
+        two_ref_sections = numberOfStartImages > 0 and numberOfEndImages > 0
+        extra_stride = two_ref_sections and not fun_or_fl2v_model
+
+        # Align mask length with the stride logic used by the original node
+        base_frames = adjusted_num_frames + (1 if extra_stride else 0)
+        print(f"WanVideoImageSequenceEncode: base_frames={base_frames}")
+
+        # Create mask - 1 for real content, 0 for empty/interpolated
+        mask = torch.zeros(1, base_frames, lat_h, lat_w, device=device, dtype=vae.dtype)
+        
+        # Mark start images
+        if numberOfStartImages > 0:
+            mask[:, :numberOfStartImages] = 1
+            
+        # Mark end images  
+        if numberOfEndImages > 0:
+            mask[:, -numberOfEndImages:] = 1
+
+        print(f"WanVideoImageSequenceEncode: Created mask with shape {mask.shape}")
+
+        # Process mask similar to original node
+        # Repeat first frame and optionally end frame
+        start_mask_repeated = torch.repeat_interleave(mask[:, 0:1], repeats=4, dim=1)
+        if extra_stride:
+            end_mask_repeated = torch.repeat_interleave(mask[:, -1:], repeats=4, dim=1)
+            mask = torch.cat([start_mask_repeated, mask[:, 1:-1], end_mask_repeated], dim=1)
+        else:
+            mask = torch.cat([start_mask_repeated, mask[:, 1:]], dim=1)
+
+        print(f"WanVideoImageSequenceEncode: Mask after repeating shape {mask.shape}")
+
+        # Reshape mask into groups of 4 frames
+        mask = mask.view(1, mask.shape[1] // 4, 4, lat_h, lat_w)
+        mask = mask.movedim(1, 2)[0]  # C, T, H, W
+
+        # Prepare images for VAE encoding
+        processed_images = imageFrames[..., :3]  # Take only RGB channels
+        
+        # If we have more frames than adjusted_num_frames, truncate
+        if processed_images.shape[0] > adjusted_num_frames:
+            processed_images = processed_images[:adjusted_num_frames]
+        # If we have fewer frames than adjusted_num_frames, pad with zeros
+        elif processed_images.shape[0] < adjusted_num_frames:
+            padding_frames = adjusted_num_frames - processed_images.shape[0]
+            zeros = torch.zeros(padding_frames, height, width, 3, dtype=processed_images.dtype, device=processed_images.device)
+            processed_images = torch.cat([processed_images, zeros], dim=0)
+        
+        # Resize if needed
+        if processed_images.shape[1] != height or processed_images.shape[2] != width:
+            processed_images = common_upscale(processed_images.movedim(-1, 1), width, height, "lanczos", "disabled").movedim(1, 0)
+        else:
+            processed_images = processed_images.permute(3, 0, 1, 2)  # C, T, H, W
+        
+        # Normalize to [-1, 1]
+        processed_images = processed_images * 2 - 1
+        
+        # Apply noise augmentation if specified
+        if noise_aug_strength > 0.0:
+            processed_images = add_noise_to_reference_video(processed_images, ratio=noise_aug_strength)
+
+        end_reference_images = None
+        if numberOfEndImages > 0:
+            end_reference_images = processed_images[:, -numberOfEndImages:].clone()
+
+        if base_frames > processed_images.shape[1]:
+            padding_frames = base_frames - processed_images.shape[1]
+            insert_index = processed_images.shape[1] - numberOfEndImages if numberOfEndImages > 0 else processed_images.shape[1]
+            zeros = torch.zeros(
+                processed_images.shape[0],
+                padding_frames,
+                height,
+                width,
+                dtype=processed_images.dtype,
+                device=processed_images.device,
+            )
+            processed_images = torch.cat(
+                [processed_images[:, :insert_index], zeros, processed_images[:, insert_index:]],
+                dim=1,
+            )
+
+        # Move to device for VAE encoding
+        concatenated = processed_images.to(device, dtype=vae.dtype)
+
+        mm.soft_empty_cache()
+        gc.collect()
+
+        # Encode with VAE
+        vae.to(device)
+        y = vae.encode([concatenated], device, end_=extra_stride, tiled=tiled_vae)[0]
+        vae.model.clear_cache()
+        del concatenated
+
+        # Apply strength multipliers
+        if numberOfStartImages > 0:
+            y[:, :1] *= start_latent_strength
+        if numberOfEndImages > 0:
+            y[:, -1:] *= end_latent_strength
+
+        # Calculate maximum sequence length
+        patches_per_frame = lat_h * lat_w // (PATCH_SIZE[1] * PATCH_SIZE[2])
+        frames_per_stride = (adjusted_num_frames - 1) // 4 + (2 if extra_stride else 1)
+        max_seq_len = frames_per_stride * patches_per_frame
+
+        if force_offload:
+            vae.model.to(offload_device)
+            mm.soft_empty_cache()
+            gc.collect()
+
+        numberOfImageEmbedFrames = y.shape[1]
+        print(f"WanVideoImageSequenceEncode: final adjusted_num_frames={adjusted_num_frames}, numberOfImageEmbedFrames={numberOfImageEmbedFrames}")
+
+        image_embeds = {
+            "image_embeds": y,
+            "clip_context": clip_embeds.get("clip_embeds", None) if clip_embeds is not None else None,
+            "negative_clip_context": clip_embeds.get("negative_clip_embeds", None) if clip_embeds is not None else None,
+            "max_seq_len": max_seq_len,
+            "num_frames": adjusted_num_frames,
+            "lat_h": lat_h,
+            "lat_w": lat_w,
+            "control_embeds": None,
+            "end_image": end_reference_images if numberOfEndImages > 0 else None,
+            "fun_or_fl2v_model": fun_or_fl2v_model,
+            "has_ref": False,
+            "add_cond_latents": None,
+            "mask": mask
+        }
+
+        return (image_embeds,)
+
 class WanVideoEmptyEmbeds:
     @classmethod
     def INPUT_TYPES(s):
@@ -3198,6 +3391,7 @@ class WanVideoScheduler: #WIP
     EXPERIMENTAL = True
 
     def process(self, scheduler, steps, start_step, end_step, shift, unique_id, sigmas=None):
+        print(f"WanVideoScheduler: Processing with scheduler={scheduler}, steps={steps}, start_step={start_step}, end_step={end_step}, shift={shift}, unique_id={unique_id}, sigmas={sigmas}")
         sample_scheduler, timesteps, start_idx, end_idx = get_scheduler(
             scheduler, 
             steps, 
@@ -6851,6 +7045,7 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoTextEncodeSingle": WanVideoTextEncodeSingle,
     "WanVideoClipVisionEncode": WanVideoClipVisionEncode,
     "WanVideoImageToVideoEncode": WanVideoImageToVideoEncode,
+    "WanVideoImageSequenceEncode": WanVideoImageSequenceEncode,
     "WanVideoEncode": WanVideoEncode,
     "WanVideoEncodeLatentBatch": WanVideoEncodeLatentBatch,
     "WanFaceRestoreArgs_VTS": WanFaceRestoreArgs_VTS,
@@ -6901,6 +7096,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoTextImageEncode": "WanVideo TextImageEncode (IP2V)",
     "WanVideoClipVisionEncode": "WanVideo ClipVision Encode",
     "WanVideoImageToVideoEncode": "WanVideo ImageToVideo Encode",
+    "WanVideoImageSequenceEncode": "WanVideo ImageSequence Encode",
     "WanVideoEncode": "WanVideo Encode",
     "WanVideoEncodeLatentBatch": "WanVideo Encode Latent Batch",
     "WanFaceRestoreArgs_VTS": "WanFace Restore Args VTS",
