@@ -139,8 +139,8 @@ class WanVideoImageClipEncode:
         return (image_embeds,)
     
 NODE_CLASS_MAPPINGS = {
-    "WanVideoImageClipEncode": WanVideoImageClipEncode,#deprecated
+    "VTSWanVideoImageClipEncode": WanVideoImageClipEncode,#deprecated
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoImageClipEncode": "WanVideo ImageClip Encode (Deprecated)",
+    "VTSWanVideoImageClipEncode": "VTS WanVideo ImageClip Encode (Deprecated)",
     }

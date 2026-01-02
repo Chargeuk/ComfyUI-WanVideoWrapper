@@ -176,9 +176,9 @@ class WanVideoAddS2VEmbeds:
 
     
 NODE_CLASS_MAPPINGS = {
-    "WanVideoAddS2VEmbeds": WanVideoAddS2VEmbeds,
+    "VTSWanVideoAddS2VEmbeds": WanVideoAddS2VEmbeds,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoAddS2VEmbeds": "WanVideo Add S2V Embeds",
+    "VTSWanVideoAddS2VEmbeds": "VTS WanVideo Add S2V Embeds",
 }

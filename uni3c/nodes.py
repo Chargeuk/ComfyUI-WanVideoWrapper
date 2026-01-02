@@ -232,12 +232,12 @@ class WanVideoUni3C_embeds:
         return (uni3c_embeds,)
     
 NODE_CLASS_MAPPINGS = {
-    "WanVideoUni3C_ControlnetLoader": WanVideoUni3C_ControlnetLoader,
-    "WanVideoUni3C_embeds": WanVideoUni3C_embeds,
-    }
+    "VTSWanVideoUni3C_ControlnetLoader": WanVideoUni3C_ControlnetLoader,
+    "VTSWanVideoUni3C_embeds": WanVideoUni3C_embeds,
+}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoUni3C_ControlnetLoader": "WanVideo Uni3C Controlnet Loader",
-    "WanVideoUni3C_embeds": "WanVideo Uni3C Embeds",
-    }
+    "VTSWanVideoUni3C_ControlnetLoader": "VTS WanVideo Uni3C Controlnet Loader",
+    "VTSWanVideoUni3C_embeds": "VTS WanVideo Uni3C Embeds",
+}
 
     

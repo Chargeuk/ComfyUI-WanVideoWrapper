@@ -355,14 +355,14 @@ or a .txt file with RealEstate camera intrinsics and coordinates, in a 3D plot.
         plt.legend(loc='right', bbox_to_anchor=(1.8, 0.5), handles=list_handle)
 
 NODE_CLASS_MAPPINGS = {
-    "WanVideoReCamMasterCameraEmbed": WanVideoReCamMasterCameraEmbed,
-    "ReCamMasterPoseVisualizer": ReCamMasterPoseVisualizer,
-    "WanVideoReCamMasterGenerateOrbitCamera": WanVideoReCamMasterGenerateOrbitCamera,
-    "WanVideoReCamMasterDefaultCamera": WanVideoReCamMasterDefaultCamera,
+    "VTSWanVideoReCamMasterCameraEmbed": WanVideoReCamMasterCameraEmbed,
+    "VTSReCamMasterPoseVisualizer": ReCamMasterPoseVisualizer,
+    "VTSWanVideoReCamMasterGenerateOrbitCamera": WanVideoReCamMasterGenerateOrbitCamera,
+    "VTSWanVideoReCamMasterDefaultCamera": WanVideoReCamMasterDefaultCamera,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoReCamMasterCameraEmbed": "WanVideo ReCamMaster Camera Embed",
-    "ReCamMasterPoseVisualizer": "ReCamMaster Pose Visualizer",
-    "WanVideoReCamMasterGenerateOrbitCamera": "WanVideo ReCamMaster Generate Orbit Camera",
-    "WanVideoReCamMasterDefaultCamera": "WanVideo ReCamMaster Default Camera",
+    "VTSWanVideoReCamMasterCameraEmbed": "VTS WanVideo ReCamMaster Camera Embed",
+    "VTSReCamMasterPoseVisualizer": "VTS ReCamMaster Pose Visualizer",
+    "VTSWanVideoReCamMasterGenerateOrbitCamera": "VTS WanVideo ReCamMaster Generate Orbit Camera",
+    "VTSWanVideoReCamMasterDefaultCamera": "VTS WanVideo ReCamMaster Default Camera",
     }

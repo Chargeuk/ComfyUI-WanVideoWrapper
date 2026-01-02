@@ -227,16 +227,16 @@ class DrawNLFPoses:
         return (control_conditions,)
 
 NODE_CLASS_MAPPINGS = {
-    "DownloadAndLoadNLFModel": DownloadAndLoadNLFModel,
-    "NLFPredict": NLFPredict,
-    "DrawNLFPoses": DrawNLFPoses,
-    "LoadVQVAE": LoadVQVAE,
-    "MTVCrafterEncodePoses": MTVCrafterEncodePoses
+    "VTSDownloadAndLoadNLFModel": DownloadAndLoadNLFModel,
+    "VTSNLFPredict": NLFPredict,
+    "VTSDrawNLFPoses": DrawNLFPoses,
+    "VTSLoadVQVAE": LoadVQVAE,
+    "VTSMTVCrafterEncodePoses": MTVCrafterEncodePoses
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DownloadAndLoadNLFModel": "(Download)Load NLF Model",
-    "NLFPredict": "NLF Predict",
-    "DrawNLFPoses": "Draw NLF Poses",
-    "LoadVQVAE": "Load VQVAE",
-    "MTVCrafterEncodePoses": "MTV Crafter Encode Poses"
+    "VTSDownloadAndLoadNLFModel": "VTS (Download)Load NLF Model",
+    "VTSNLFPredict": "VTS NLF Predict",
+    "VTSDrawNLFPoses": "VTS Draw NLF Poses",
+    "VTSLoadVQVAE": "VTS Load VQVAE",
+    "VTSMTVCrafterEncodePoses": "VTS MTV Crafter Encode Poses"
 }

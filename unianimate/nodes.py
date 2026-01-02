@@ -833,13 +833,11 @@ class WanVideoUniAnimatePoseInput:
 
 
 NODE_CLASS_MAPPINGS = {
-    "WanVideoUniAnimatePoseInput": WanVideoUniAnimatePoseInput,
-    "WanVideoUniAnimateDWPoseDetector": WanVideoUniAnimateDWPoseDetector,
- 
-    }
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoUniAnimatePoseInput": "WanVideo UniAnimate Pose Input",
-    "WanVideoUniAnimateDWPoseDetector": "WanVideo UniAnimate DWPose Detector",
-    }
+    "VTSWanVideoUniAnimatePoseInput": WanVideoUniAnimatePoseInput,
+    "VTSWanVideoUniAnimateDWPoseDetector": WanVideoUniAnimateDWPoseDetector,
 
-    
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "VTSWanVideoUniAnimatePoseInput": "VTS WanVideo UniAnimate Pose Input",
+    "VTSWanVideoUniAnimateDWPoseDetector": "VTS WanVideo UniAnimate DWPose Detector",
+}

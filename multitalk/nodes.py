@@ -591,21 +591,21 @@ class WanVideoImageToVideoMultiTalk:
         return (image_embeds, output_path)
     
 NODE_CLASS_MAPPINGS = {
-    "MultiTalkModelLoader": MultiTalkModelLoader,
-    "MultiTalkWav2VecEmbeds": MultiTalkWav2VecEmbeds,
-    "MultiTalkEmbedsSaver": MultiTalkEmbedsSaver,
-    "MultiTalkEmbedsLoader": MultiTalkEmbedsLoader,
-    "WanVideoImageToVideoMultiTalk": WanVideoImageToVideoMultiTalk,
-    "Wav2VecModelLoader": Wav2VecModelLoader,
-    "MultiTalkSilentEmbeds": MultiTalkSilentEmbeds,
+    "VTSMultiTalkModelLoader": MultiTalkModelLoader,
+    "VTSMultiTalkWav2VecEmbeds": MultiTalkWav2VecEmbeds,
+    "VTSMultiTalkEmbedsSaver": MultiTalkEmbedsSaver,
+    "VTSMultiTalkEmbedsLoader": MultiTalkEmbedsLoader,
+    "VTSWanVideoImageToVideoMultiTalk": WanVideoImageToVideoMultiTalk,
+    "VTSWav2VecModelLoader": Wav2VecModelLoader,
+    "VTSMultiTalkSilentEmbeds": MultiTalkSilentEmbeds,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MultiTalkModelLoader": "Multi/InfiniteTalk Model Loader",
-    "MultiTalkWav2VecEmbeds": "Multi/InfiniteTalk Wav2vec2 Embeds",
-    "MultiTalkEmbedsSaver": "Multi/InfiniteTalk Embeds Saver",
-    "MultiTalkEmbedsLoader": "Multi/InfiniteTalk Embeds Loader",
-    "WanVideoImageToVideoMultiTalk": "WanVideo Long I2V Multi/InfiniteTalk",
-    "Wav2VecModelLoader": "Wav2vec2 Model Loader",
-    "MultiTalkSilentEmbeds": "MultiTalk Silent Embeds",
+    "VTSMultiTalkModelLoader": "VTS Multi/InfiniteTalk Model Loader",
+    "VTSMultiTalkWav2VecEmbeds": "VTS Multi/InfiniteTalk Wav2vec2 Embeds",
+    "VTSMultiTalkEmbedsSaver": "VTS Multi/InfiniteTalk Embeds Saver",
+    "VTSMultiTalkEmbedsLoader": "VTS Multi/InfiniteTalk Embeds Loader",
+    "VTSWanVideoImageToVideoMultiTalk": "VTS WanVideo Long I2V Multi/InfiniteTalk",
+    "VTSWav2VecModelLoader": "VTS Wav2vec2 Model Loader",
+    "VTSMultiTalkSilentEmbeds": "VTS MultiTalk Silent Embeds",
 }

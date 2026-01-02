@@ -239,12 +239,12 @@ class WanVideoPromptExtenderSelect:
         return (extender_settings,)
     
 NODE_CLASS_MAPPINGS = {
-    "QwenLoader": QwenLoader,
-    "WanVideoPromptExtender": WanVideoPromptExtender,
-    "WanVideoPromptExtenderSelect": WanVideoPromptExtenderSelect
+    "VTSQwenLoader": QwenLoader,
+    "VTSWanVideoPromptExtender": WanVideoPromptExtender,
+    "VTSWanVideoPromptExtenderSelect": WanVideoPromptExtenderSelect
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "QwenLoader": "Qwen Loader",
-    "WanVideoPromptExtender": "Wan Video Prompt Extender",
-    "WanVideoPromptExtenderSelect": "Wan Video Prompt Extender Select"
+    "VTSQwenLoader": "VTS Qwen Loader",
+    "VTSWanVideoPromptExtender": "VTS Wan Video Prompt Extender",
+    "VTSWanVideoPromptExtenderSelect": "VTS Wan Video Prompt Extender Select"
     }

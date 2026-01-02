@@ -280,14 +280,14 @@ class FantasyPortraitModelLoader:
 
 
 NODE_CLASS_MAPPINGS = {
-    "FantasyPortraitModelLoader": FantasyPortraitModelLoader,
-    "FantasyPortraitFaceDetector": FantasyPortraitFaceDetector,
-    "WanVideoAddFantasyPortrait": WanVideoAddFantasyPortrait,
-    "LandmarksToImage": LandmarksToImage,
-    }
+    "VTSFantasyPortraitModelLoader": FantasyPortraitModelLoader,
+    "VTSFantasyPortraitFaceDetector": FantasyPortraitFaceDetector,
+    "VTSWanVideoAddFantasyPortrait": WanVideoAddFantasyPortrait,
+    "VTSLandmarksToImage": LandmarksToImage,
+}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "FantasyPortraitModelLoader": "FantasyPortrait Model Loader",
-    "FantasyPortraitFaceDetector": "FantasyPortrait Face Detector",
-    "WanVideoAddFantasyPortrait": "WanVideo Add Fantasy Portrait",
-    "LandmarksToImage": "Landmarks to Image",
-    }
+    "VTSFantasyPortraitModelLoader": "VTS FantasyPortrait Model Loader",
+    "VTSFantasyPortraitFaceDetector": "VTS FantasyPortrait Face Detector",
+    "VTSWanVideoAddFantasyPortrait": "VTS WanVideo Add Fantasy Portrait",
+    "VTSLandmarksToImage": "VTS Landmarks to Image",
+}

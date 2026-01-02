@@ -179,8 +179,8 @@ class WanVideoFunCameraEmbeds:
         return (embeds,)
 
 NODE_CLASS_MAPPINGS = {
-    "WanVideoFunCameraEmbeds": WanVideoFunCameraEmbeds,
+    "VTSWanVideoFunCameraEmbeds": WanVideoFunCameraEmbeds,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoFunCameraEmbeds": "WanVideo FunCamera Embeds",
+    "VTSWanVideoFunCameraEmbeds": "VTS WanVideo FunCamera Embeds",
     }

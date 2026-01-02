@@ -2001,10 +2001,10 @@ class WanVideoLoopingDiffusionForcingSampler:
         return s
 
 NODE_CLASS_MAPPINGS = {
-    "WanVideoDiffusionForcingSampler": WanVideoDiffusionForcingSampler,
-    "WanVideoLoopingDiffusionForcingSampler": WanVideoLoopingDiffusionForcingSampler,
+    "VTSWanVideoDiffusionForcingSampler": WanVideoDiffusionForcingSampler,
+    "VTSWanVideoLoopingDiffusionForcingSampler": WanVideoLoopingDiffusionForcingSampler,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoDiffusionForcingSampler": "WanVideo Diffusion Forcing Sampler",
-    "WanVideoLoopingDiffusionForcingSampler": "WanVideo Looping Diffusion Forcing Sampler",
+    "VTSWanVideoDiffusionForcingSampler": "VTS WanVideo Diffusion Forcing Sampler",
+    "VTSWanVideoLoopingDiffusionForcingSampler": "VTS WanVideo Looping Diffusion Forcing Sampler",
     }

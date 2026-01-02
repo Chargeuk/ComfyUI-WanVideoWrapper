@@ -318,12 +318,12 @@ class WanVideoATI_comfy:
         return (model_clone,)
         
 NODE_CLASS_MAPPINGS = {
-    "WanVideoATITracks": WanVideoATITracks,
-    "WanVideoATITracksVisualize": WanVideoATITracksVisualize,
-    "WanVideoATI_comfy": WanVideoATI_comfy,
+    "VTSWanVideoATITracks": WanVideoATITracks,
+    "VTSWanVideoATITracksVisualize": WanVideoATITracksVisualize,
+    "VTSWanVideoATI_comfy": WanVideoATI_comfy,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoATITracks": "WanVideo ATI Tracks",
-    "WanVideoATITracksVisualize": "WanVideo ATI Tracks Visualize",
-    "WanVideoATI_comfy": "WanVideo ATI Comfy",
+    "VTSWanVideoATITracks": "VTS WanVideo ATI Tracks",
+    "VTSWanVideoATITracksVisualize": "VTS WanVideo ATI Tracks Visualize",
+    "VTSWanVideoATI_comfy": "VTS WanVideo ATI Comfy",
     }

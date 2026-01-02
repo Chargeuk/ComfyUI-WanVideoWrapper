@@ -202,12 +202,12 @@ class FantasyTalkingWav2VecEmbeds:
 
 
 NODE_CLASS_MAPPINGS = {
-    "DownloadAndLoadWav2VecModel": DownloadAndLoadWav2VecModel,
-    "FantasyTalkingModelLoader": FantasyTalkingModelLoader,
-    "FantasyTalkingWav2VecEmbeds": FantasyTalkingWav2VecEmbeds,
+    "VTSDownloadAndLoadWav2VecModel": DownloadAndLoadWav2VecModel,
+    "VTSFantasyTalkingModelLoader": FantasyTalkingModelLoader,
+    "VTSFantasyTalkingWav2VecEmbeds": FantasyTalkingWav2VecEmbeds,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DownloadAndLoadWav2VecModel": "(Down)load Wav2Vec Model",
-    "FantasyTalkingModelLoader": "FantasyTalking Model Loader",
-    "FantasyTalkingWav2VecEmbeds": "FantasyTalking Wav2Vec Embeds",
+    "VTSDownloadAndLoadWav2VecModel": "VTS (Down)load Wav2Vec Model",
+    "VTSFantasyTalkingModelLoader": "VTS FantasyTalking Model Loader",
+    "VTSFantasyTalkingWav2VecEmbeds": "VTS FantasyTalking Wav2Vec Embeds",
     }

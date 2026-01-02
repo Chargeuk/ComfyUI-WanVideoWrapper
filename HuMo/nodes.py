@@ -255,11 +255,11 @@ class HuMoEmbeds:
 
 
 NODE_CLASS_MAPPINGS = {
-    "WhisperModelLoader": WhisperModelLoader,
-    "HuMoEmbeds": HuMoEmbeds,
+    "VTSWhisperModelLoader": WhisperModelLoader,
+    "VTSHuMoEmbeds": HuMoEmbeds,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WhisperModelLoader": "Whisper Model Loader",
-    "HuMoEmbeds": "HuMo Embeds",
+    "VTSWhisperModelLoader": "VTS Whisper Model Loader",
+    "VTSHuMoEmbeds": "VTS HuMo Embeds",
 }

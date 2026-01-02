@@ -162,12 +162,12 @@ class WanVideoControlnetApply:
         return (patcher,)
     
 NODE_CLASS_MAPPINGS = {
-    "WanVideoControlnetLoader": WanVideoControlnetLoader,
-    "WanVideoControlnet": WanVideoControlnetApply,
-    }
+    "VTSWanVideoControlnetLoader": WanVideoControlnetLoader,
+    "VTSWanVideoControlnet": WanVideoControlnetApply,
+}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoControlnetLoader": "WanVideo Controlnet Loader",
-    "WanVideoControlnet": "WanVideo Controlnet Apply",
-    }
+    "VTSWanVideoControlnetLoader": "VTS WanVideo Controlnet Loader",
+    "VTSWanVideoControlnet": "VTS WanVideo Controlnet Apply",
+}
 
     

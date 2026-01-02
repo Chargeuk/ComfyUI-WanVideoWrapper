@@ -129,12 +129,12 @@ class WanVideoEasyCache:
 
     
 NODE_CLASS_MAPPINGS = {
-    "WanVideoTeaCache": WanVideoTeaCache,
-    "WanVideoMagCache": WanVideoMagCache,
-    "WanVideoEasyCache": WanVideoEasyCache,
+    "VTSWanVideoTeaCache": WanVideoTeaCache,
+    "VTSWanVideoMagCache": WanVideoMagCache,
+    "VTSWanVideoEasyCache": WanVideoEasyCache,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoTeaCache": "WaWanVideo TeaCache",
-    "WanVideoMagCache": "WanVideo MagCache",
-    "WanVideoEasyCache": "WanVideo EasyCache"
+    "VTSWanVideoTeaCache": "VTS WanVideo TeaCache",
+    "VTSWanVideoMagCache": "VTS WanVideo MagCache",
+    "VTSWanVideoEasyCache": "VTS WanVideo EasyCache"
     }
