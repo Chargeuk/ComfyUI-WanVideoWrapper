@@ -3,15 +3,121 @@ import torch
 import logging
 import math
 from tqdm import tqdm
-from copy import deepcopy
+from pathlib import Path
+import gc
 import types, collections
 from comfy.utils import ProgressBar, copy_to_param, set_attr_param
-from comfy.model_patcher import get_key_weight, string_to_seed
+from comfy.model_patcher import get_key_weight
 from comfy.lora import calculate_weight
-from comfy.model_management import cast_to_device
+
+try:
+    from comfy.utils import string_to_seed
+except Exception:
+    from comfy.model_patcher import string_to_seed
+
 from comfy.float import stochastic_rounding
+from .custom_linear import remove_lora_from_module
+import folder_paths
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
+
+import comfy.model_management as mm
+device = mm.get_torch_device()
+offload_device = mm.unet_offload_device()
+
+try:
+    from .gguf.gguf import GGUFParameter
+except Exception:
+    pass
+
+COLOR_CODES = {
+    "reset": "\033[0m",
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "magenta": "\033[35m",
+    "cyan": "\033[36m",
+    "white": "\033[37m",
+}
+
+def color_text(text, color):
+    try:
+        return f"{COLOR_CODES.get(color, COLOR_CODES['reset'])}{text}{COLOR_CODES['reset']}"
+    except Exception:
+        return text
+
+class MetaParameter(torch.nn.Parameter):
+    def __new__(cls, dtype, quant_type=None):
+        data = torch.empty(0, dtype=dtype)
+        self = torch.nn.Parameter(data, requires_grad=False)
+        self.quant_type = quant_type
+        return self
+
+def offload_transformer(transformer, remove_lora=True):
+    transformer.teacache_state.clear_all()
+    transformer.magcache_state.clear_all()
+    transformer.easycache_state.clear_all()
+
+    if transformer.patched_linear:
+        for name, param in transformer.named_parameters():
+            if "loras" in name or "controlnet" in name:
+                continue
+            module = transformer
+            subnames = name.split('.')
+            for subname in subnames[:-1]:
+                module = getattr(module, subname)
+            attr_name = subnames[-1]
+            if param.data.is_floating_point():
+                meta_param = torch.nn.Parameter(torch.empty_like(param.data, device='meta'), requires_grad=False)
+                setattr(module, attr_name, meta_param)
+            elif isinstance(param.data, GGUFParameter):
+                quant_type = getattr(param, 'quant_type', None)
+                setattr(module, attr_name, MetaParameter(param.data.dtype, quant_type))
+            else:
+                pass
+        if remove_lora:
+            remove_lora_from_module(transformer)
+    else:
+        transformer.to(offload_device)
+
+    for block in transformer.blocks:
+        block.kv_cache = None
+        if transformer.audio_model is not None and hasattr(block, 'audio_block'):
+            block.audio_block = None
+
+    mm.soft_empty_cache()
+    gc.collect()
+
+
+def init_blockswap(transformer, block_swap_args, model):
+    if not transformer.patched_linear:
+        if block_swap_args is not None:
+            for name, param in transformer.named_parameters():
+                if "block" not in name or "control_adapter" in name or "face" in name:
+                    param.data = param.data.to(device)
+                elif block_swap_args["offload_txt_emb"] and "txt_emb" in name:
+                    param.data = param.data.to(offload_device)
+                elif block_swap_args["offload_img_emb"] and "img_emb" in name:
+                    param.data = param.data.to(offload_device)
+
+            transformer.block_swap(
+                block_swap_args["blocks_to_swap"] - 1 ,
+                block_swap_args["offload_txt_emb"],
+                block_swap_args["offload_img_emb"],
+                vace_blocks_to_swap = block_swap_args.get("vace_blocks_to_swap", None),
+            )
+        elif model["auto_cpu_offload"]:
+            for module in transformer.modules():
+                if hasattr(module, "offload"):
+                    module.offload()
+                if hasattr(module, "onload"):
+                    module.onload()
+            for block in transformer.blocks:
+                block.modulation = torch.nn.Parameter(block.modulation.to(device))
+            transformer.head.modulation = torch.nn.Parameter(transformer.head.modulation.to(device))
+        else:
+            transformer.to(device)
 
 def check_device_same(first_device, second_device):
     if first_device.type != second_device.type:
@@ -89,9 +195,9 @@ def set_module_tensor_to_device(module, tensor_name, device, value=None, dtype=N
             device = device_quantization
         if is_buffer:
             module._buffers[tensor_name] = new_value
-        elif value is not None or not check_device_same(torch.device(device), module._parameters[tensor_name].device):
+        elif value is not None or not check_device_same(device, module._parameters[tensor_name].device):
             param_cls = type(module._parameters[tensor_name])
-            new_value = param_cls(new_value, requires_grad=False).to(device)
+            new_value = param_cls(new_value, requires_grad=False)
             module._parameters[tensor_name] = new_value
 
     #if device != "cpu":
@@ -106,13 +212,11 @@ def check_diffusers_version():
     except importlib.metadata.PackageNotFoundError:
         raise AssertionError("diffusers is not installed.")
 
-def print_memory(device):
-    memory = torch.cuda.memory_allocated(device) / 1024**3
+def print_memory(device, process="Sampling"):
     max_memory = torch.cuda.max_memory_allocated(device) / 1024**3
     max_reserved = torch.cuda.max_memory_reserved(device) / 1024**3
-    log.info(f"Allocated memory: {memory=:.3f} GB")
-    log.info(f"Max allocated memory: {max_memory=:.3f} GB")
-    log.info(f"Max reserved memory: {max_reserved=:.3f} GB")
+    log.info(f"[{process}] Max allocated memory: {max_memory=:.3f} GB")
+    log.info(f"[{process}] Max reserved memory: {max_reserved=:.3f} GB")
     #memory_summary = torch.cuda.memory_summary(device=device, abbreviated=False)
     #log.info(f"Memory Summary:\n{memory_summary}")
 
@@ -123,6 +227,18 @@ def get_module_memory_mb(module):
             memory += param.nelement() * param.element_size()
     return memory / (1024 * 1024)  # Convert to MB
 
+def get_module_memory_mb_per_device(module):
+    memory_per_device = {}
+    memory = 0
+    for param in module.parameters():
+        if param.data is not None:
+            device = str(param.device)
+            memory += param.nelement() * param.element_size()
+            memory_per_device[device] = memory_per_device.get(device, 0) + memory
+
+    memory_per_device = {dev: mem / (1024 * 1024) for dev, mem in memory_per_device.items()}
+    return memory_per_device
+
 def get_tensor_memory(tensor):
     memory_bytes = tensor.element_size() * tensor.nelement()
     return f"{memory_bytes / (1024 * 1024):.2f} MB"
@@ -130,7 +246,7 @@ def get_tensor_memory(tensor):
 def patch_weight_to_device(self, key, device_to=None, inplace_update=False, backup_keys=False, scale_weight=None):
     if key not in self.patches:
         return
-    
+
     weight, set_func, convert_func = get_key_weight(self.model, key)
     inplace_update = self.weight_inplace_update or inplace_update
 
@@ -138,7 +254,7 @@ def patch_weight_to_device(self, key, device_to=None, inplace_update=False, back
         self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
 
     if device_to is not None:
-        temp_weight = cast_to_device(weight, device_to, torch.float32, copy=True)
+        temp_weight = mm.cast_to_device(weight, device_to, torch.float32, copy=True)
     else:
         temp_weight = weight.to(torch.float32, copy=True)
     if convert_func is not None:
@@ -148,7 +264,7 @@ def patch_weight_to_device(self, key, device_to=None, inplace_update=False, back
         temp_weight = temp_weight * scale_weight.to(temp_weight.device, temp_weight.dtype)
 
     out_weight = calculate_weight(self.patches[key], temp_weight, key)
-    
+
     if set_func is None:
         out_weight = stochastic_rounding(out_weight, weight.dtype, seed=string_to_seed(key))
         if inplace_update:
@@ -158,7 +274,8 @@ def patch_weight_to_device(self, key, device_to=None, inplace_update=False, back
     else:
         set_func(out_weight, inplace_update=inplace_update, seed=string_to_seed(key))
 
-def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, dtype=None, base_dtype=None, state_dict=None, low_mem_load=False, control_lora=False, scale_weights={}):
+def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, dtype=None, 
+               base_dtype=None, state_dict=None, low_mem_load=False, control_lora=False, scale_weights={}):
         model.patch_weight_to_device = types.MethodType(patch_weight_to_device, model)
         to_load = []
         for n, m in model.model.named_modules():
@@ -192,7 +309,7 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                     key = f"{name.replace('diffusion_model.', '')}.{param}"
                     try:
                         set_module_tensor_to_device(model.model.diffusion_model, key, device=transformer_load_device, dtype=dtype_to_use, value=state_dict[key])
-                    except:
+                    except Exception:
                         continue
                 key = f"{name}.{param}"
                 if scale_weights is not None:
@@ -206,7 +323,7 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                 if low_mem_load:
                     try:
                         set_module_tensor_to_device(model.model.diffusion_model, key, device=transformer_load_device, dtype=dtype_to_use, value=model.model.diffusion_model.state_dict()[key])
-                    except:
+                    except Exception:
                         continue
             m.comfy_patched_weights = True
             cnt += 1
@@ -225,7 +342,7 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                     param_fp32.mul_(scale.to(param.device, torch.float32))
                     param.copy_(param_fp32.to(param.dtype))
             model.scale_weights_applied = True
-      
+
         model.current_weight_patches_uuid = model.patches_uuid
         if low_mem_load:
             for name, param in model.model.diffusion_model.named_parameters():
@@ -235,7 +352,7 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                         dtype_to_use = torch.float32
                     try:
                         set_module_tensor_to_device(model.model.diffusion_model, name, device=transformer_load_device, dtype=dtype_to_use, value=state_dict[name])
-                    except:
+                    except Exception:
                         continue
         return model
 
@@ -247,11 +364,11 @@ def split_tiles(embeds, num_split):
     for x in embeds:
         x = x.unsqueeze(0)
         h, w = H // num_split, W // num_split
-        x_split = torch.cat([x[:, i*h:(i+1)*h, j*w:(j+1)*w, :] for i in range(num_split) for j in range(num_split)], dim=0)    
+        x_split = torch.cat([x[:, i*h:(i+1)*h, j*w:(j+1)*w, :] for i in range(num_split) for j in range(num_split)], dim=0)
         out.append(x_split)
-    
+
     x_split = torch.stack(out, dim=0)
-    
+
     return x_split
 
 def merge_hiddenstates(x, tiles):
@@ -271,19 +388,19 @@ def merge_hiddenstates(x, tiles):
         patch_embeds = embeds[:, 1:, :]  # Shape: [num_tiles, tile_size^2, embeds[-1]]
         reshaped = patch_embeds.reshape(grid_size, grid_size, tile_size, tile_size, embeds.shape[-1])
 
-        merged = torch.cat([torch.cat([reshaped[i, j] for j in range(grid_size)], dim=1) 
+        merged = torch.cat([torch.cat([reshaped[i, j] for j in range(grid_size)], dim=1)
                             for i in range(grid_size)], dim=0)
-        
+
         merged = merged.unsqueeze(0)  # Shape: [1, grid_size*tile_size, grid_size*tile_size, embeds[-1]]
-        
+
         # Pool to original size
         pooled = torch.nn.functional.adaptive_avg_pool2d(merged.permute(0, 3, 1, 2), (tile_size, tile_size)).permute(0, 2, 3, 1)
         flattened = pooled.reshape(1, tile_size*tile_size, embeds.shape[-1])
-        
+
         # Add back the class token
         with_class = torch.cat([avg_class_token, flattened], dim=1)  # Shape: original shape
         out.append(with_class)
-    
+
     out = torch.cat(out, dim=0)
 
     return out
@@ -384,7 +501,7 @@ def is_image_black(image, threshold=1e-3):
     return torch.all(image < threshold).item()
 
 def add_noise_to_reference_video(image, ratio=None):
-    sigma = torch.ones((image.shape[0],)).to(image.device, image.dtype) * ratio 
+    sigma = torch.ones((image.shape[0],)).to(image.device, image.dtype) * ratio
     image_noise = torch.randn_like(image) * sigma[:, None, None, None]
     image_noise = torch.where(image==-1, torch.zeros_like(image), image_noise)
     image = image + image_noise
@@ -400,7 +517,7 @@ def optimized_scale(positive_flat, negative_flat):
 
     # st_star = v_cond^T * v_uncond / ||v_uncond||^2
     st_star = dot_product / squared_norm
-    
+
     return st_star
 
 def find_closest_valid_dim(fixed_dim, var_dim, block_size):
@@ -468,7 +585,7 @@ def setup_radial_attention(transformer, transformer_options, latent, seq_len, la
             block.dense_attention_mode = dense_attention_mode
             block.dense_timesteps = dense_timesteps
             block.self_attn.decay_factor = decay_factor
-                    
+
     log.info(f"Radial attention mode enabled.")
     log.info(f"dense_attention_mode: {dense_attention_mode}, dense_timesteps: {dense_timesteps}, decay_factor: {decay_factor}")
     log.info(f"dense_blocks: {[i for i, block in enumerate(transformer.blocks) if getattr(block, 'dense_block', False)]})")
@@ -499,12 +616,19 @@ def dict_to_device(tensor_dict, device, dtype=None):
 def compile_model(transformer, compile_args=None):
     if compile_args is None:
         return transformer
-    torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
-    try:
-        if hasattr(torch, '_dynamo') and hasattr(torch._dynamo, 'config'):
+    if hasattr(torch, '_dynamo') and hasattr(torch._dynamo, 'config'):
+        torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
+        torch._dynamo.config.force_parameter_static_shapes = compile_args["force_parameter_static_shapes"]
+        try:
+            if hasattr(torch._dynamo.config, 'allow_unspec_int_on_nn_module'):
+                torch._dynamo.config.allow_unspec_int_on_nn_module = True
+        except Exception as e:
+            log.warning(f"Could not set allow_unspec_int_on_nn_module: {e}")
+        try:
             torch._dynamo.config.recompile_limit = compile_args["dynamo_recompile_limit"]
-    except Exception as e:
-        log.warning(f"Could not set recompile_limit: {e}")
+        except Exception as e:
+            log.warning(f"Could not set recompile_limit: {e}")
+
     if compile_args["compile_transformer_blocks_only"]:
         for i, block in enumerate(transformer.blocks):
             if hasattr(block, "_orig_mod"):
@@ -568,3 +692,87 @@ def tensor_pingpong_pad(video, target_len):
     if in_dims == 4:
         padded_video = padded_video.squeeze(0)
     return padded_video
+
+
+def check_duplicate_nodes():
+    """Check ComfyUI custom_nodes directory for duplicate installations"""
+    custom_nodes_dir = Path(folder_paths.folder_names_and_paths["custom_nodes"][0][0])
+    current_path = Path(__file__).parent
+
+    wanvideo_dirs = []
+
+    # Check all directories in custom_nodes
+    for path in custom_nodes_dir.iterdir():
+        if (path.is_dir() and
+            path != current_path and
+            not path.name.endswith('.disabled') and
+            'wanvideo' in path.name.lower() and
+            'wrapper' in path.name.lower()):
+            wanvideo_dirs.append(str(path))
+
+    return wanvideo_dirs
+
+#https://github.com/temporalscorerescaling/TSR/
+def temporal_score_rescaling(model_output, sample, timestep, k=1.0, tsr_sigma=0.1):
+    t = (timestep / 1000)
+    if t == 0.0:
+        ratio = k
+    else:
+        snr_t = (1 - t)**2 / t**2
+        ratio = (snr_t * tsr_sigma**2 + 1) / (snr_t * tsr_sigma**2 / k + 1)
+
+    if not t == 1.0:
+        model_output = (ratio * ((1-t) * model_output + sample) - sample) / (1 - t)
+    return model_output
+
+def match_and_blend_colors(
+    source_chunk: torch.Tensor,  # (C, T, H, W), range [-1, 1]
+    reference_image: torch.Tensor,  # (C, 1, H, W), range [-1, 1]
+    strength: float,
+) -> torch.Tensor:
+    import kornia
+    if strength == 0.0:
+        return source_chunk
+    source_chunk = source_chunk.unsqueeze(0)  # (1, C, T, H, W)
+
+    # shapes
+    B, C, T, H, W = source_chunk.shape
+    input_dtype = source_chunk.dtype
+
+    # [-1,1] -> [0,1]
+    src_01 = (source_chunk + 1.0) * 0.5
+    ref_01 = (reference_image + 1.0) * 0.5
+
+    src32 = src_01.to(torch.float32)
+    ref32 = ref_01.to(torch.float32)
+
+    # (B, C, T, H, W) -> (B*T, C, H, W)
+    src_bt = src32.permute(0, 2, 1, 3, 4).contiguous().view(B * T, C, H, W)
+    ref_bchw = ref32[:, :, 0, :, :].contiguous()
+
+    # RGB->Lab
+    src_lab = kornia.color.rgb_to_lab(src_bt)  # (B*T, C, H, W)
+    ref_lab = kornia.color.rgb_to_lab(ref_bchw)  # (B,   C, H, W)
+
+    src_lab_flat = src_lab.view(B * T, C, -1)  # (B*T, C, HW)
+    ref_lab_flat = ref_lab.view(B, C, -1)  # (B,   C, HW)
+    src_std, src_mean = torch.std_mean(src_lab_flat, dim=-1, keepdim=True, unbiased=False)
+    ref_std, ref_mean = torch.std_mean(ref_lab_flat, dim=-1, keepdim=True, unbiased=False)
+    src_std = src_std.clamp_min_(1e-6)
+
+    ref_mean_bt = ref_mean.repeat_interleave(T, dim=0)  # (B*T, C, 1)
+    ref_std_bt = ref_std.repeat_interleave(T, dim=0)  # (B*T, C, 1)
+
+    corrected_lab_flat = (src_lab_flat - src_mean) * (ref_std_bt / src_std) + ref_mean_bt
+    corrected_lab = corrected_lab_flat.view(B * T, C, H, W)
+
+    # Lab->RGB
+    corrected_rgb_01 = kornia.color.lab_to_rgb(corrected_lab)  # (B*T, C, H, W)
+
+    blended_rgb_01 = (1.0 - strength) * src_bt + strength * corrected_rgb_01
+
+    # (B, C, T, H, W)
+    blended_rgb_01 = blended_rgb_01.view(B, T, C, H, W).permute(0, 2, 1, 3, 4).contiguous()
+
+    # [0,1] -> [-1,1]
+    return (blended_rgb_01 * 2.0 - 1.0)[0].to(dtype=input_dtype)

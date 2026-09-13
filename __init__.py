@@ -1,93 +1,75 @@
-from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-from .recammaster.nodes import NODE_CLASS_MAPPINGS as RECAM_MASTER_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as RECAM_MASTER_NODE_DISPLAY_NAME_MAPPINGS
-from .skyreels.nodes import NODE_CLASS_MAPPINGS as SKYREELS_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as SKYREELS_NODE_DISPLAY_NAME_MAPPINGS
-from .fantasytalking.nodes import NODE_CLASS_MAPPINGS as FANTASYTALKING_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as FANTASYTALKING_NODE_DISPLAY_NAME_MAPPINGS
-from .nodes_sampler import NODE_CLASS_MAPPINGS as SAMPLER_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as SAMPLER_NODE_DISPLAY_NAME_MAPPINGS
-from .fun_camera.nodes import NODE_CLASS_MAPPINGS as FUN_CAMERA_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as FUN_CAMERA_NODE_DISPLAY_NAME_MAPPINGS
-from .uni3c.nodes import NODE_CLASS_MAPPINGS as UNI3C_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as UNI3C_NODE_DISPLAY_NAME_MAPPINGS
-from .controlnet.nodes import NODE_CLASS_MAPPINGS as CONTROLNET_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as CONTROLNET_NODE_DISPLAY_NAME_MAPPINGS
-from .ATI.nodes import NODE_CLASS_MAPPINGS as ATI_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as ATI_NODE_DISPLAY_NAME_MAPPINGS
-from .multitalk.nodes import NODE_CLASS_MAPPINGS as MULTITALK_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as MULTITALK_NODE_DISPLAY_NAME_MAPPINGS
-from .nodes_model_loading import NODE_CLASS_MAPPINGS as MODEL_LOADING_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as MODEL_LOADING_NODE_DISPLAY_NAME_MAPPINGS
-from .nodes_utility import NODE_CLASS_MAPPINGS as UTILITY_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as UTILITY_NODE_DISPLAY_NAME_MAPPINGS
-from .cache_methods.nodes_cache import NODE_CLASS_MAPPINGS as NODE_CACHE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as NODE_CACHE_DISPLAY_NAME_MAPPINGS
-from .nodes_deprecated import NODE_CLASS_MAPPINGS as DEPRECATED_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as DEPRECATED_NODE_DISPLAY_NAME_MAPPINGS
-from .s2v.nodes import NODE_CLASS_MAPPINGS as S2V_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as S2V_NODE_DISPLAY_NAME_MAPPINGS
-
 try:
-    from .qwen.qwen import NODE_CLASS_MAPPINGS as QWEN_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as QWEN_NODE_DISPLAY_NAME_MAPPINGS
-except Exception as e:
-    print(f"Qwen nodes not available due to error in importing them: {e}")
-    QWEN_NODE_CLASS_MAPPINGS = {}
-    QWEN_NODE_DISPLAY_NAME_MAPPINGS = {}
-   
+    from .utils import check_duplicate_nodes, log, color_text
+    duplicate_dirs = check_duplicate_nodes()
+    if duplicate_dirs:
+        warning_msg = f"WARNING:  Found {len(duplicate_dirs)} other WanVideoWrapper directories:\n"
+        for dir_path in duplicate_dirs:
+            warning_msg += f"  - {color_text(dir_path, 'yellow')}\n"
+        log.warning(color_text(warning_msg + "Please remove duplicates to avoid possible conflicts.", "red"))
+except Exception:
+    pass
 
-try:
-    from .fantasyportrait.nodes import NODE_CLASS_MAPPINGS as FANTASYPORTRAIT_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as FANTASYPORTRAIT_NODE_DISPLAY_NAME_MAPPINGS
-except Exception as e:
-    print(f"FantasyPortrait nodes not available due to error in importing them: {e}")
-    FANTASYPORTRAIT_NODE_CLASS_MAPPINGS = {}
-    FANTASYPORTRAIT_NODE_DISPLAY_NAME_MAPPINGS = {}
+from .utils import log
 
-try:
-    from .unianimate.nodes import NODE_CLASS_MAPPINGS as UNIANIMATE_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as UNIANIMATE_NODE_DISPLAY_NAME_MAPPINGS
-except Exception as e:
-    print(f"UniAnimate nodes not available due to error in importing them: {e}")
-    UNIANIMATE_NODE_CLASS_MAPPINGS = {}
-    UNIANIMATE_NODE_DISPLAY_NAME_MAPPINGS = {}
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
 
-try:
-    from .MTV.nodes import NODE_CLASS_MAPPINGS as MTV_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as MTV_NODE_DISPLAY_NAME_MAPPINGS
-except Exception as e:
-    print(f"MTV nodes not available due to error in importing them: {e}")
-    MTV_NODE_CLASS_MAPPINGS = {}
-    MTV_NODE_DISPLAY_NAME_MAPPINGS = {}
+# Required modules (will raise on import failure)
+REQUIRED_MODULES = [
+    (".nodes", "Main"),
+    (".nodes_sampler", "Sampler"),
+    (".nodes_model_loading", "ModelLoading"),
+    (".nodes_utility", "Utility"),
+    (".cache_methods.nodes_cache", "Cache"),
+]
 
-try:
-    from .HuMo.nodes import NODE_CLASS_MAPPINGS as HUMO_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as HUMO_NODE_DISPLAY_NAME_MAPPINGS
-except Exception as e:
-    print(f"HuMo nodes not available due to error in importing them: {e}")
-    HUMO_NODE_CLASS_MAPPINGS = {}
-    HUMO_NODE_DISPLAY_NAME_MAPPINGS = {}
+# Optional modules (will warn on import failure)
+OPTIONAL_MODULES = [
+    (".nodes_deprecated", "Deprecated"),
+    (".s2v.nodes", "S2V"),
+    (".FlashVSR.flashvsr_nodes", "FlashVSR"),
+    (".mocha.nodes", "Mocha"),
+    (".fun_camera.nodes", "FunCamera"),
+    (".uni3c.nodes", "Uni3C"),
+    (".controlnet.nodes", "ControlNet"),
+    (".ATI.nodes", "ATI"),
+    (".multitalk.nodes", "MultiTalk"),
+    (".recammaster.nodes", "RecamMaster"),
+    (".skyreels.nodes", "SkyReels"),
+    (".fantasytalking.nodes", "FantasyTalking"),
+    (".qwen.qwen", "Qwen"),
+    (".fantasyportrait.nodes", "FantasyPortrait"),
+    (".unianimate.nodes", "UniAnimate"),
+    (".MTV.nodes", "MTV"),
+    (".HuMo.nodes", "HuMo"),
+    (".lynx.nodes", "Lynx"),
+    (".Ovi.nodes_ovi", "Ovi"),
+    (".steadydancer.nodes", "SteadyDancer"),
+    (".onetoall.nodes", "OneToAll"),
+    (".WanMove.nodes", "WanMove"),
+    (".SCAIL.nodes", "SCAIL"),
+    (".LongCat.nodes", "LongCat"),
+    (".LongVie2.nodes", "LongVie2"),
+]
 
-NODE_CLASS_MAPPINGS.update(RECAM_MASTER_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(UNIANIMATE_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(SKYREELS_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(FANTASYTALKING_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(FANTASYPORTRAIT_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(FUN_CAMERA_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(UNI3C_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(CONTROLNET_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(ATI_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(MULTITALK_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(MODEL_LOADING_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(UTILITY_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(NODE_CACHE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(DEPRECATED_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(QWEN_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(MTV_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(S2V_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(HUMO_NODE_CLASS_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(SAMPLER_NODE_CLASS_MAPPINGS)
+def register_nodes(module_path: str, name: str, optional: bool) -> None:
+    """Import and register nodes from a module."""
+    try:
+        import importlib
+        module = importlib.import_module(module_path, package=__package__)
+        NODE_CLASS_MAPPINGS.update(getattr(module, "NODE_CLASS_MAPPINGS", {}))
+        NODE_DISPLAY_NAME_MAPPINGS.update(getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}))
+    except Exception as e:
+        if optional:
+            log.warning(f"WanVideoWrapper WARNING: {name} nodes not available: {e}")
+        else:
+            raise
 
-NODE_DISPLAY_NAME_MAPPINGS.update(RECAM_MASTER_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(UNIANIMATE_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(SKYREELS_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(FANTASYTALKING_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(FANTASYPORTRAIT_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(FUN_CAMERA_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(UNI3C_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(CONTROLNET_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(ATI_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(MULTITALK_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(MODEL_LOADING_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(UTILITY_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(NODE_CACHE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(DEPRECATED_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(QWEN_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(MTV_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(S2V_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(HUMO_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(SAMPLER_NODE_DISPLAY_NAME_MAPPINGS)
+# Register all node modules
+for module_path, name in REQUIRED_MODULES:
+    register_nodes(module_path, name, optional=False)
+
+for module_path, name in OPTIONAL_MODULES:
+    register_nodes(module_path, name, optional=True)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

@@ -5,9 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from comfy.utils import ProgressBar
+from ..utils import print_memory, log
+from comfy import model_management as mm
+device = mm.get_torch_device()
+import comfy.ops
+ops = comfy.ops.disable_weight_init
 
 CACHE_T = 2
-
 
 def check_is_instance(model, module_class):
     if isinstance(model, module_class):
@@ -17,7 +21,7 @@ def check_is_instance(model, module_class):
     return False
 
 
-class CausalConv3d(nn.Conv3d):
+class CausalConv3d(ops.Conv3d):
     """
     Causal 3d convolusion.
     """
@@ -253,10 +257,11 @@ class Resample38(Resample):
 
 class ResidualBlock(nn.Module):
 
-    def __init__(self, in_dim, out_dim, dropout=0.0):
+    def __init__(self, in_dim, out_dim, dropout=0.0, cpu_cache=False):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
+        self.cpu_cache = cpu_cache
 
         # layers
         self.residual = nn.Sequential(
@@ -268,6 +273,12 @@ class ResidualBlock(nn.Module):
             if in_dim != out_dim else nn.Identity()
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
+        if self.cpu_cache:
+            return self._forward_cpu_cache(x, feat_cache, feat_idx)
+        else:
+            return self._forward(x, feat_cache, feat_idx)
+
+    def _forward(self, x, feat_cache=None, feat_idx=[0]):
         h = self.shortcut(x)
         for layer in self.residual:
             if check_is_instance(layer, CausalConv3d) and feat_cache is not None:
@@ -282,6 +293,26 @@ class ResidualBlock(nn.Module):
                                         dim=2)
                 x = layer(x, feat_cache[idx])
                 feat_cache[idx] = cache_x
+                feat_idx[0] += 1
+            else:
+                x = layer(x)
+        return x + h
+
+    def _forward_cpu_cache(self, x, feat_cache=None, feat_idx=[0]):
+        h = self.shortcut(x)
+        for layer in self.residual:
+            if check_is_instance(layer, CausalConv3d) and feat_cache is not None:
+                idx = feat_idx[0]
+                cache_x = x[:, :, -CACHE_T:, :, :].clone()
+                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
+                    cached_frame = feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device)
+                    cache_x = torch.cat([cached_frame, cache_x], dim=2)
+
+                prev_cache = feat_cache[idx].to(x.device) if feat_cache[idx] is not None else None
+
+                x = layer(x, prev_cache)
+
+                feat_cache[idx] = cache_x.to("cpu", non_blocking=True)
                 feat_idx[0] += 1
             else:
                 x = layer(x)
@@ -505,7 +536,9 @@ class Encoder3d(nn.Module):
                  num_res_blocks=2,
                  attn_scales=[],
                  temperal_downsample=[True, True, False],
-                 dropout=0.0):
+                 dropout=0.0,
+                 pruning_rate=0.0,
+                 cpu_cache=False):
         super().__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -513,9 +546,11 @@ class Encoder3d(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
         self.temperal_downsample = temperal_downsample
+        self.cpu_cache = cpu_cache
 
         # dimensions
         dims = [dim * u for u in [1] + dim_mult]
+        dims = [int(d * (1 - pruning_rate)) for d in dims]
         scale = 1.0
 
         # init block
@@ -526,7 +561,7 @@ class Encoder3d(nn.Module):
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
             # residual (+attention) blocks
             for _ in range(num_res_blocks):
-                downsamples.append(ResidualBlock(in_dim, out_dim, dropout))
+                downsamples.append(ResidualBlock(in_dim, out_dim, dropout, cpu_cache=cpu_cache))
                 if scale in attn_scales:
                     downsamples.append(AttentionBlock(out_dim))
                 in_dim = out_dim
@@ -540,9 +575,9 @@ class Encoder3d(nn.Module):
         self.downsamples = nn.Sequential(*downsamples)
 
         # middle blocks
-        self.middle = nn.Sequential(ResidualBlock(out_dim, out_dim, dropout),
+        self.middle = nn.Sequential(ResidualBlock(out_dim, out_dim, dropout, cpu_cache=cpu_cache),
                                     AttentionBlock(out_dim),
-                                    ResidualBlock(out_dim, out_dim, dropout))
+                                    ResidualBlock(out_dim, out_dim, dropout, cpu_cache=cpu_cache))
 
         # output blocks
         self.head = nn.Sequential(RMS_norm(out_dim, images=False), nn.SiLU(),
@@ -608,7 +643,9 @@ class Encoder3d_38(nn.Module):
                  num_res_blocks=2,
                  attn_scales=[],
                  temperal_downsample=[False, True, True],
-                 dropout=0.0):
+                 dropout=0.0,
+                 pruning_rate=0.0,
+                 cpu_cache=False):
         super().__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -616,9 +653,11 @@ class Encoder3d_38(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
         self.temperal_downsample = temperal_downsample
+        self.cpu_cache = cpu_cache
 
         # dimensions
         dims = [dim * u for u in [1] + dim_mult]
+        dims = [int(d * (1 - pruning_rate)) for d in dims]
         scale = 1.0
 
         # init block
@@ -645,9 +684,9 @@ class Encoder3d_38(nn.Module):
 
         # middle blocks
         self.middle = nn.Sequential(
-            ResidualBlock(out_dim, out_dim, dropout),
+            ResidualBlock(out_dim, out_dim, dropout, cpu_cache=cpu_cache),
             AttentionBlock(out_dim),
-            ResidualBlock(out_dim, out_dim, dropout),
+            ResidualBlock(out_dim, out_dim, dropout, cpu_cache=cpu_cache),
         )
 
         # # output blocks
@@ -724,7 +763,9 @@ class Decoder3d(nn.Module):
                  num_res_blocks=2,
                  attn_scales=[],
                  temperal_upsample=[False, True, True],
-                 dropout=0.0):
+                 dropout=0.0,
+                 pruning_rate=0.0,
+                 cpu_cache=False):
         super().__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -732,18 +773,20 @@ class Decoder3d(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
         self.temperal_upsample = temperal_upsample
+        self.cpu_cache = cpu_cache
 
         # dimensions
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
+        dims = [int(d * (1 - pruning_rate)) for d in dims]
         scale = 1.0 / 2**(len(dim_mult) - 2)
 
         # init block
         self.conv1 = CausalConv3d(z_dim, dims[0], 3, padding=1)
 
         # middle blocks
-        self.middle = nn.Sequential(ResidualBlock(dims[0], dims[0], dropout),
+        self.middle = nn.Sequential(ResidualBlock(dims[0], dims[0], dropout, cpu_cache=cpu_cache),
                                     AttentionBlock(dims[0]),
-                                    ResidualBlock(dims[0], dims[0], dropout))
+                                    ResidualBlock(dims[0], dims[0], dropout, cpu_cache=cpu_cache))
 
         # upsample blocks
         upsamples = []
@@ -752,7 +795,7 @@ class Decoder3d(nn.Module):
             if i == 1 or i == 2 or i == 3:
                 in_dim = in_dim // 2
             for _ in range(num_res_blocks + 1):
-                upsamples.append(ResidualBlock(in_dim, out_dim, dropout))
+                upsamples.append(ResidualBlock(in_dim, out_dim, dropout, cpu_cache=cpu_cache))
                 if scale in attn_scales:
                     upsamples.append(AttentionBlock(out_dim))
                 in_dim = out_dim
@@ -830,7 +873,9 @@ class Decoder3d_38(nn.Module):
                  num_res_blocks=2,
                  attn_scales=[],
                  temperal_upsample=[False, True, True],
-                 dropout=0.0):
+                 dropout=0.0,
+                 pruning_rate=0.0,
+                 cpu_cache=False):
         super().__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -841,14 +886,15 @@ class Decoder3d_38(nn.Module):
 
         # dimensions
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
+        dims = [int(d * (1 - pruning_rate)) for d in dims]
 
         # init block
         self.conv1 = CausalConv3d(z_dim, dims[0], 3, padding=1)
 
         # middle blocks
-        self.middle = nn.Sequential(ResidualBlock(dims[0], dims[0], dropout),
+        self.middle = nn.Sequential(ResidualBlock(dims[0], dims[0], dropout, cpu_cache=cpu_cache),
                                     AttentionBlock(dims[0]),
-                                    ResidualBlock(dims[0], dims[0], dropout))
+                                    ResidualBlock(dims[0], dims[0], dropout, cpu_cache=cpu_cache))
 
         # upsample blocks
         upsamples = []
@@ -941,7 +987,10 @@ class VideoVAE_(nn.Module):
                  temperal_downsample=[False, True, True],
                  dropout=0.0,
                  mean=None,
-                 inv_std=None):
+                 inv_std=None,
+                 pruning_rate=0.0,
+                 cpu_cache=False,
+                 verbose=False):
         super().__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -952,14 +1001,15 @@ class VideoVAE_(nn.Module):
         self.temperal_upsample = temperal_downsample[::-1]
         self.mean = mean
         self.inv_std = inv_std
+        self.verbose = verbose
 
         # modules
         self.encoder = Encoder3d(dim, z_dim * 2, dim_mult, num_res_blocks,
-                                 attn_scales, self.temperal_downsample, dropout)
+                                 attn_scales, self.temperal_downsample, dropout, pruning_rate, cpu_cache=cpu_cache)
         self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
         self.conv2 = CausalConv3d(z_dim, z_dim, 1)
         self.decoder = Decoder3d(dim, z_dim, dim_mult, num_res_blocks,
-                                 attn_scales, self.temperal_upsample, dropout)
+                                 attn_scales, self.temperal_upsample, dropout, pruning_rate, cpu_cache=cpu_cache)
 
     def forward(self, x):
         mu, log_var = self.encode(x)
@@ -969,9 +1019,12 @@ class VideoVAE_(nn.Module):
 
 
     #modification originally by @raindrop313 https://github.com/raindrop313/ComfyUI-WanVideoStartEndFrames
-    def encode_2(self, x):
+    def encode_2(self, x, pbar=True, sample=False):
         t = x.shape[2]
         iter_ = 2 + (t - 2) // 4
+
+        if pbar:
+            pbar = ProgressBar(iter_)
 
         for i in range(iter_):
             self._enc_conv_idx = [0]
@@ -994,17 +1047,24 @@ class VideoVAE_(nn.Module):
         out_tail = out[:, :, -1, :, :].unsqueeze(2)
         mu = torch.cat([self.conv1(out_head), self.conv1(out_tail)], dim=2).chunk(2, dim=1)[0]
         mu = (mu - self.mean.to(mu)) * self.inv_std.to(mu)
+        if pbar:
+            pbar.update_absolute(0)
 
         return mu
 
 
-    def encode(self, x, pbar=True):
+    def encode(self, x, pbar=True, sample=False):
         t = x.shape[2]
         iter_ = 1 + (t - 1) // 4
+        input_shape = x.shape
         if pbar:
             pbar = ProgressBar(iter_)
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:
+            pass
 
-        for i in range(iter_):
+        for i in tqdm(range(iter_), desc="WanVAE encoding frames", disable=not pbar):
             self._enc_conv_idx = [0]
             if i == 0:
                 out = self.encoder(x[:, :, :1, :, :],
@@ -1018,20 +1078,31 @@ class VideoVAE_(nn.Module):
             if pbar:
                 pbar.update(1)
         self.clear_cache()
-        mu = self.conv1(out).chunk(2, dim=1)[0]
+        mu, log_var = self.conv1(out).chunk(2, dim=1)
         mu = (mu - self.mean.to(mu)) * self.inv_std.to(mu)
         if pbar:
             pbar.update_absolute(0)
-        
+
+        if sample:
+            std = torch.exp(0.5 * log_var.clamp(-30.0, 20.0))
+            eps = torch.randn_like(std)
+            return mu + std * eps
+        if self.verbose:
+            try:
+                log.info(f"WanVAE encoded input:{input_shape} to {out.shape}")
+                print_memory(device, process="WanVAE encode")
+                torch.cuda.reset_peak_memory_stats(device)
+            except Exception:
+                pass
         return mu
 
 
     #modification originally by @raindrop313 https://github.com/raindrop313/ComfyUI-WanVideoStartEndFrames
     def decode_2(self, z):
         # z: [b,c,t,h,w]
-        
+
         z = z / self.inv_std.to(z) + self.mean.to(z)
-      
+
         iter_ = z.shape[2]
         z_head=z[:,:,:-1,:,:]
         z_tail=z[:,:,-1,:,:].unsqueeze(2)
@@ -1046,12 +1117,12 @@ class VideoVAE_(nn.Module):
                 out_ = self.decoder(x[:, :, -1, :, :].unsqueeze(2),
                                     feat_cache=None,
                                     feat_idx=self._conv_idx)
-                out = torch.cat([out, out_], 2) # may add tensor offload
+                out = torch.cat([out, out_], 2)
             else:
                 out_ = self.decoder(x[:, :, i:i + 1, :, :],
                                     feat_cache=self._feat_map,
                                     feat_idx=self._conv_idx)
-                out = torch.cat([out, out_], 2) # may add tensor offload
+                out = torch.cat([out, out_], 2)
         self.clear_cache()
         return out
 
@@ -1060,11 +1131,16 @@ class VideoVAE_(nn.Module):
     def decode(self, z, pbar=True):
         # z: [b,c,t,h,w]
         z = z / self.inv_std.to(z) + self.mean.to(z)
+        input_shape = z.shape
         iter_ = z.shape[2]
         if pbar:
             pbar = ProgressBar(iter_)
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:
+            pass
         x = self.conv2(z)
-        for i in range(iter_):
+        for i in tqdm(range(iter_), desc="WanVAE decoding frames", disable=not pbar):
             self._conv_idx = [0]
             if i == 0:
                 out = self.decoder(x[:, :, i:i + 1, :, :],
@@ -1074,13 +1150,20 @@ class VideoVAE_(nn.Module):
                 out_ = self.decoder(x[:, :, i:i + 1, :, :],
                                     feat_cache=self._feat_map,
                                     feat_idx=self._conv_idx)
-                out = torch.cat([out, out_], 2) # may add tensor offload
+                out = torch.cat([out, out_], 2)
 
             if pbar:
                 pbar.update(1)
         if pbar:
             pbar.update_absolute(0)
         self.clear_cache()
+        if self.verbose:
+            try:
+                log.info(f"WanVAE decoded input:{input_shape} to {out.shape}")
+                print_memory(device, process="WanVAE decode")
+                torch.cuda.reset_peak_memory_stats(device)
+            except Exception:
+                pass
         return out
 
     def reparameterize(self, mu, log_var):
@@ -1107,11 +1190,12 @@ class VideoVAE_(nn.Module):
 
 class WanVideoVAE(nn.Module):
 
-    def __init__(self, z_dim=16, dtype=torch.float32):
+    def __init__(self, z_dim=16, dtype=torch.float32, pruning_rate=0.0, cpu_cache=False, verbose=False):
         super().__init__()
 
         self.dtype = dtype
-
+        self.cpu_cache = cpu_cache
+        self.verbose = verbose
         mean = [
             -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
             0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921
@@ -1125,7 +1209,7 @@ class WanVideoVAE(nn.Module):
         self.z_dim = z_dim
 
         # init model
-        self.model = VideoVAE_(z_dim=z_dim, mean=self.mean, inv_std=self.inv_std).eval().requires_grad_(False)
+        self.model = VideoVAE_(z_dim=z_dim, mean=self.mean, inv_std=self.inv_std, pruning_rate=pruning_rate, cpu_cache=self.cpu_cache, verbose=self.verbose).eval().requires_grad_(False)
         self.upsampling_factor = 8
 
 
@@ -1151,7 +1235,7 @@ class WanVideoVAE(nn.Module):
         return mask
 
 
-    def tiled_decode(self, hidden_states, device, tile_size, tile_stride, pbar=True):
+    def tiled_decode(self, hidden_states, device, tile_size, tile_stride, end_=False, pbar=True):
         _, _, T, H, W = hidden_states.shape
         size_h, size_w = tile_size
         stride_h, stride_w = tile_stride
@@ -1168,14 +1252,20 @@ class WanVideoVAE(nn.Module):
         data_device = "cpu"
         computation_device = device
 
-        out_T = T * 4 - 3
-        weight = torch.zeros((1, 1, out_T, H * self.upsampling_factor, W * self.upsampling_factor), dtype=hidden_states.dtype, device=data_device)
-        values = torch.zeros((1, 3, out_T, H * self.upsampling_factor, W * self.upsampling_factor), dtype=hidden_states.dtype, device=data_device)
+        weight, values = None, None
         if pbar:
             pbar = ProgressBar(len(tasks))
         for h, h_, w, w_ in tqdm(tasks, desc="VAE decoding"):
             hidden_states_batch = hidden_states[:, :, :, h:h_, w:w_].to(computation_device)
-            hidden_states_batch = self.model.decode(hidden_states_batch).to(data_device)
+            if end_:
+                hidden_states_batch = self.model.decode_2(hidden_states_batch).to(data_device)
+            else:
+                hidden_states_batch = self.model.decode(hidden_states_batch).to(data_device)
+
+            if weight is None:
+                weight = torch.zeros((1, 1, hidden_states_batch.shape[2], H * self.upsampling_factor, W * self.upsampling_factor), dtype=hidden_states.dtype, device=data_device)
+            if values is None:
+                values = torch.zeros((1, 3, hidden_states_batch.shape[2], H * self.upsampling_factor, W * self.upsampling_factor), dtype=hidden_states.dtype, device=data_device)
 
             mask = self.build_mask(
                 hidden_states_batch,
@@ -1208,7 +1298,7 @@ class WanVideoVAE(nn.Module):
 
     def tiled_encode(self, video, device, tile_size, tile_stride, end_=False, pbar=True):
         _, _, T, H, W = video.shape
-        
+
         if tile_size is None and tile_stride is None:
             size_h, size_w = H //2, W // 2
             stride_h, stride_w = size_h // 2, size_w // 2
@@ -1271,21 +1361,20 @@ class WanVideoVAE(nn.Module):
         return values
 
 
-    def single_encode(self, video, device, pbar=True):
+    def single_encode(self, video, device, pbar=True, sample=False):
         video = video.to(device)
-        x = self.model.encode(video, pbar=pbar)
+        x = self.model.encode(video, pbar=pbar, sample=sample)
         return x.float()
-
 
     def single_decode(self, hidden_state, device, pbar=True):
         hidden_state = hidden_state.to(device)
         video = self.model.decode(hidden_state, pbar=pbar)
         return video
 
-    def double_encode(self, video, device):
+    def double_encode(self, video, device, pbar=True, sample=False):
         print('double_encode')
         video = video.to(device)
-        x = self.model.encode_2(video)
+        x = self.model.encode_2(video, pbar=pbar, sample=sample)
         return x.float()
 
     def double_decode(self, hidden_state, device):
@@ -1294,7 +1383,7 @@ class WanVideoVAE(nn.Module):
         video = self.model.decode_2(hidden_state)
         return video
 
-    def encode(self, videos, device, tiled=False,end_=False, tile_size=None, tile_stride=None, pbar=True):
+    def encode(self, videos, device, tiled=False,end_=False, tile_size=None, tile_stride=None, pbar=True, sample=False):
         self.model.clear_cache()
         videos = [video.to("cpu") for video in videos]
         hidden_states = []
@@ -1304,9 +1393,9 @@ class WanVideoVAE(nn.Module):
                 hidden_state = self.tiled_encode(video, device, tile_size, tile_stride, end_=end_, pbar=pbar)
             else:
                 if end_:
-                    hidden_state = self.double_encode(video, device)
+                    hidden_state = self.double_encode(video, device, pbar=pbar, sample=sample)
                 else:
-                    hidden_state = self.single_encode(video, device, pbar=pbar)
+                    hidden_state = self.single_encode(video, device, pbar=pbar, sample=sample)
             hidden_state = hidden_state.squeeze(0)
             hidden_states.append(hidden_state)
         hidden_states = torch.stack(hidden_states)
@@ -1320,7 +1409,7 @@ class WanVideoVAE(nn.Module):
         for hidden_state in hidden_states:
             hidden_state = hidden_state.unsqueeze(0)
             if tiled:
-                video = self.tiled_decode(hidden_state, device, tile_size, tile_stride, pbar=pbar)
+                video = self.tiled_decode(hidden_state, device, tile_size, tile_stride, end_=end_, pbar=pbar)
             else:
                 if end_:
                     video = self.double_decode(hidden_state, device)
@@ -1344,7 +1433,10 @@ class VideoVAE38_(VideoVAE_):
                  dropout=0.0,
                  dtype=torch.bfloat16,
                  mean=None,
-                 inv_std=None):
+                 inv_std=None,
+                 pruning_rate=0.0,
+                 cpu_cache=False,
+                 verbose=False):
         super(VideoVAE_, self).__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -1356,24 +1448,30 @@ class VideoVAE38_(VideoVAE_):
         self.dtype = dtype
         self.mean = mean
         self.inv_std = inv_std
+        self.cpu_cache = cpu_cache
+        self.verbose = verbose
 
         # modules
         self.encoder = Encoder3d_38(dim, z_dim * 2, dim_mult, num_res_blocks,
-                                    attn_scales, self.temperal_downsample, dropout)
+                                    attn_scales, self.temperal_downsample, dropout, pruning_rate, cpu_cache=cpu_cache)
         self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
         self.conv2 = CausalConv3d(z_dim, z_dim, 1)
         self.decoder = Decoder3d_38(dec_dim, z_dim, dim_mult, num_res_blocks,
-                                    attn_scales, self.temperal_upsample, dropout)
+                                    attn_scales, self.temperal_upsample, dropout, pruning_rate, cpu_cache=cpu_cache)
 
-
-    def encode(self, x, pbar=True):
+    def encode(self, x, pbar=True, sample=False):
+        input_shape = x.shape
         self.clear_cache()
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:
+            pass
         x = patchify(x, patch_size=2)
         t = x.shape[2]
         iter_ = 1 + (t - 1) // 4
         if pbar:
             pbar = ProgressBar(iter_)
-        for i in range(iter_):
+        for i in tqdm(range(iter_), desc="WanVAE encoding frames", disable=not pbar):
             self._enc_conv_idx = [0]
             if i == 0:
                 out = self.encoder(x[:, :, :1, :, :],
@@ -1389,18 +1487,30 @@ class VideoVAE38_(VideoVAE_):
         mu = self.conv1(out).chunk(2, dim=1)[0]
         mu = (mu - self.mean.to(mu)) * self.inv_std.to(mu)
         self.clear_cache()
+        if self.verbose:
+            try:
+                log.info(f"WanVAE decoded input:{input_shape} to {out.shape}")
+                print_memory(device, process="WanVAE decode")
+                torch.cuda.reset_peak_memory_stats(device)
+            except Exception:
+                pass
         return mu
 
 
     def decode(self, z, pbar=True):
         self.clear_cache()
+        input_shape = z.shape
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:
+            pass
         z = z / self.inv_std.to(z) + self.mean.to(z)
-       
+
         iter_ = z.shape[2]
         if pbar:
             pbar = ProgressBar(iter_)
         x = self.conv2(z)
-        for i in range(iter_):
+        for i in tqdm(range(iter_), desc="WanVAE decoding frames", disable=not pbar):
             self._conv_idx = [0]
             if i == 0:
                 out = self.decoder(x[:, :, i:i + 1, :, :],
@@ -1416,12 +1526,19 @@ class VideoVAE38_(VideoVAE_):
                 pbar.update(1)
         out = unpatchify(out, patch_size=2)
         self.clear_cache()
+        if self.verbose:
+            try:
+                log.info(f"WanVAE decoded input:{input_shape} to {out.shape}")
+                print_memory(device, process="WanVAE decode")
+                torch.cuda.reset_peak_memory_stats(device)
+            except Exception:
+                pass
         return out
 
 
 class WanVideoVAE38(WanVideoVAE):
 
-    def __init__(self, z_dim=48, dim=160, dtype=torch.bfloat16):
+    def __init__(self, z_dim=48, dim=160, dtype=torch.bfloat16, pruning_rate=0.0, cpu_cache=False, verbose=False):
         super(WanVideoVAE, self).__init__()
 
         mean = [
@@ -1444,7 +1561,9 @@ class WanVideoVAE38(WanVideoVAE):
         self.inv_std = (1.0 / torch.tensor(std)).view(1, z_dim, 1, 1, 1)
         self.dtype = dtype
         self.z_dim = z_dim
+        self.cpu_cache = cpu_cache
+        self.verbose = verbose
 
         # init model
-        self.model = VideoVAE38_(z_dim=z_dim, dim=dim, dtype=dtype, mean=self.mean, inv_std=self.inv_std).eval().requires_grad_(False)
+        self.model = VideoVAE38_(z_dim=z_dim, dim=dim, dtype=dtype, mean=self.mean, inv_std=self.inv_std, pruning_rate=pruning_rate, cpu_cache=cpu_cache, verbose=verbose).eval().requires_grad_(False)
         self.upsampling_factor = 16

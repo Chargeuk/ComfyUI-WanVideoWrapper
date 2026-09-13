@@ -7,6 +7,8 @@ from ..utils import log, set_module_tensor_to_device
 import os
 import json
 import datetime
+import scipy.signal as ss
+import numpy as np
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 folder_paths.add_model_folder_path("wav2vec2", os.path.join(folder_paths.models_dir, "wav2vec2"))
@@ -126,7 +128,7 @@ class MultiTalkModelLoader:
 def loudness_norm(audio_array, sr=16000, lufs=-23):
     try:
         import pyloudnorm
-    except:
+    except Exception:
         raise ImportError("pyloudnorm package is not installed")
     meter = pyloudnorm.Meter(sr)
     loudness = meter.integrated_loudness(audio_array)
@@ -134,6 +136,15 @@ def loudness_norm(audio_array, sr=16000, lufs=-23):
         return audio_array
     normalized_audio = pyloudnorm.normalize.loudness(audio_array, loudness, lufs)
     return normalized_audio
+
+def _add_noise_floor(audio, noise_db=-45):
+        noise_amp = 10 ** (noise_db / 20)
+        noise = np.random.randn(len(audio)) * noise_amp
+        return audio + noise
+
+def _smooth_transients(audio, sr=16000):
+        b, a = ss.butter(3, 3000 / (sr/2))
+        return ss.lfilter(b, a, audio)
     
 class MultiTalkWav2VecEmbeds:
     @classmethod
@@ -153,6 +164,8 @@ class MultiTalkWav2VecEmbeds:
                 "audio_3": ("AUDIO",),
                 "audio_4": ("AUDIO",),
                 "ref_target_masks": ("MASK", {"tooltip": "Per-speaker semantic mask(s) in pixel space. Supply one mask per speaker (plus optional background) to guide mouth assignment"}),
+                "add_noise_floor": ("BOOLEAN", {"default": False, "tooltip": "Add a low-level noise floor to the audio to reduce silent gaps"}),
+                "smooth_transients": ("BOOLEAN", {"default": False, "tooltip": "Apply a low-pass filter to the audio to smooth out transients"}),
             }
         }
 
@@ -161,7 +174,8 @@ class MultiTalkWav2VecEmbeds:
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
 
-    def process(self, wav2vec_model, normalize_loudness, fps, num_frames, audio_1, audio_scale, audio_cfg_scale, multi_audio_type, audio_2=None, audio_3=None, audio_4=None, ref_target_masks=None):
+    def process(self, wav2vec_model, normalize_loudness, fps, num_frames, audio_1, audio_scale, audio_cfg_scale, multi_audio_type, audio_2=None, audio_3=None, audio_4=None,
+                ref_target_masks=None, add_noise_floor=False, smooth_transients=False):
         model_type = wav2vec_model["model_type"]
         if not "tencent" in model_type.lower():
             raise ValueError("Only tencent wav2vec2 models supported by MultiTalk")
@@ -207,6 +221,10 @@ class MultiTalkWav2VecEmbeds:
 
             if normalize_loudness:
                 audio_segment = loudness_norm(audio_segment, sr=sr)
+            if add_noise_floor:
+                audio_segment = _add_noise_floor(audio_segment, noise_db=-45)
+            if smooth_transients:
+                audio_segment = _smooth_transients(audio_segment, sr=sr)
 
             audio_feature = np.squeeze(
                 wav2vec2_feature_extractor(audio_segment, sampling_rate=sr).input_values
@@ -443,13 +461,100 @@ class WanVideoImageToVideoMultiTalk:
         }
 
         return (image_embeds, output_path)
-    
+
+class WanVideoImageToVideoSkyreelsv3_audio:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "vae": ("WANVAE",),
+            "width": ("INT", {"default": 832, "min": 64, "max": 2048, "step": 8, "tooltip": "Width of the generation"}),
+            "height": ("INT", {"default": 480, "min": 64, "max": 29048, "step": 8, "tooltip": "Height of the generation"}),
+            "frame_window_size": ("INT", {"default": 81, "min": 1, "max": 10000, "step": 4, "tooltip": "The number of frames to process at once, should be a value the model is generally good at."}),
+            "motion_frame": ("INT", {"default": 5, "min": 1, "max": 10000, "step": 1, "tooltip": "Driven frame length used in the long video generation. Basically the overlap length."}),
+            "drop_frames": ("INT", {"default": 12, "min": 0, "max": 10000, "step": 1, "tooltip": "Additional frames to drop when advancing the audio window. Higher values = less overlap = faster generation but potentially less smooth transitions."}),
+            "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE encoding for reduced memory use"}),
+            "force_offload": ("BOOLEAN", {"default": False, "tooltip": "Whether to force offload the model within the loop for VAE operations, enable if you encounter memory issues."}),
+            "colormatch": (
+            [
+                'disabled',
+                'reinhard_torch',
+                'mkl',
+                'hm',
+                'reinhard',
+                'mvgd',
+                'hm-mvgd-hm',
+                'hm-mkl-hm',
+            ], {
+               "default": 'disabled', "tooltip": "Color matching method to use between the windows"
+            },),
+            },
+            "optional": {
+                "start_image": ("IMAGE", {"tooltip": "Images to encode"}),
+                "reference_video": ("IMAGE", {"tooltip": "Optional: Pre-generated reference video to use for keyframes instead of extracting from first generation. Should be color-matched to source image."}),
+                "clip_embeds": ("WANVIDIMAGE_CLIPEMBEDS", {"tooltip": "Clip vision encoded image"}),
+                "output_path": ("STRING", {"default": "", "tooltip": "If set, will save each window's resulting frames to this folder, also DISABLES returning the final video tensor to save memory"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "STRING",)
+    RETURN_NAMES = ("image_embeds", "output_path")
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Enables Multi/InfiniteTalk long video generation sampling method, the video is created in windows with overlapping frames. Not compatible or necessary to be used with context windows and many other features besides Multi/InfiniteTalk."
+
+    def process(self, vae, width, height, frame_window_size, motion_frame, drop_frames, force_offload, colormatch, start_image=None,
+                tiled_vae=False, clip_embeds=None, mode="multitalk", output_path="", reference_video=None):
+
+        H, W = height, width
+        num_frames = ((frame_window_size - 1) // 4) * 4 + 1
+
+        # Resize and rearrange the input image dimensions
+        if start_image is not None:
+            resized_start_image = common_upscale(start_image.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
+            resized_start_image = resized_start_image * 2 - 1
+            resized_start_image = resized_start_image.unsqueeze(0)
+
+        target_shape = (16, (num_frames - 1) // 4 + 1, height // 8, width // 8)
+
+        if output_path:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(output_path, f"{timestamp}_{mode}_output")
+            os.makedirs(output_path, exist_ok=True)
+
+        processed_reference_video = None
+        if reference_video is not None:
+            processed_reference_video = common_upscale(reference_video.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
+            processed_reference_video = processed_reference_video * 2 - 1
+
+        image_embeds = {
+            "multitalk_sampling": True,
+            "multitalk_start_image": resized_start_image if start_image is not None else None,
+            "frame_window_size": num_frames,
+            "motion_frame": motion_frame,
+            "drop_frames": drop_frames,
+            "use_pseudo_frames": True,
+            "reference_video": processed_reference_video,
+            "target_h": H,
+            "target_w": W,
+            "tiled_vae": tiled_vae,
+            "force_offload": force_offload,
+            "vae": vae,
+            "target_shape": target_shape,
+            "clip_context": clip_embeds.get("clip_embeds", None) if clip_embeds is not None else None,
+            "colormatch": colormatch,
+            "multitalk_mode": "skyreelsv3",
+            "output_path": output_path
+        }
+
+        return (image_embeds, output_path)
+
 NODE_CLASS_MAPPINGS = {
     "MultiTalkModelLoader": MultiTalkModelLoader,
     "MultiTalkWav2VecEmbeds": MultiTalkWav2VecEmbeds,
     "WanVideoImageToVideoMultiTalk": WanVideoImageToVideoMultiTalk,
     "Wav2VecModelLoader": Wav2VecModelLoader,
     "MultiTalkSilentEmbeds": MultiTalkSilentEmbeds,
+    "WanVideoImageToVideoSkyreelsv3_audio": WanVideoImageToVideoSkyreelsv3_audio,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -458,4 +563,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoImageToVideoMultiTalk": "WanVideo Long I2V Multi/InfiniteTalk",
     "Wav2VecModelLoader": "Wav2vec2 Model Loader",
     "MultiTalkSilentEmbeds": "MultiTalk Silent Embeds",
+    "WanVideoImageToVideoSkyreelsv3_audio": "WanVideo Long SkyReelsV3 A2V",
 }

@@ -1,10 +1,8 @@
 import os, gc, math
 import torch
 import torch.nn.functional as F
-import numpy as np
 import hashlib
-
-from .wanvideo.schedulers import get_scheduler, scheduler_list
+from tqdm import tqdm
 
 from .utils import(log, clip_encode_image_tiled, add_noise_to_reference_video, set_module_tensor_to_device)
 from .taehv import TAEHV
@@ -329,7 +327,7 @@ class WanVideoTextEncode:
             try:
                 log.info(f"Moving video model to {offload_device}")
                 model_to_offload.model.to(offload_device)
-            except:
+            except Exception:
                 pass
 
         encoder = t5["model"]
@@ -369,10 +367,18 @@ class WanVideoTextEncode:
             cast_dtype = encoder.dtype
 
         params_to_keep = {'norm', 'pos_embedding', 'token_embedding'}
-        for name, param in encoder.model.named_parameters():
+        if hasattr(encoder, 'state_dict'):
+            model_state_dict = encoder.state_dict
+        else:
+            model_state_dict = encoder.model.state_dict()
+
+        params_list = list(encoder.model.named_parameters())
+        pbar = tqdm(params_list, desc="Loading T5 parameters", leave=True)
+        for name, param in pbar:
             dtype_to_use = dtype if any(keyword in name for keyword in params_to_keep) else cast_dtype
-            value = encoder.state_dict[name] if hasattr(encoder, 'state_dict') else encoder.model.state_dict()[name]
+            value = model_state_dict[name]
             set_module_tensor_to_device(encoder.model, name, device=device_to, dtype=dtype_to_use, value=value)
+        del model_state_dict
         if hasattr(encoder, 'state_dict'):
             del encoder.state_dict
             mm.soft_empty_cache()
@@ -496,7 +502,7 @@ class WanVideoTextEncodeSingle:
                     log.info(f"Moving video model to {offload_device}")
                     model_to_offload.model.to(offload_device)
                     mm.soft_empty_cache()
-            except:
+            except Exception:
                 pass
 
             encoder = t5["model"]
@@ -553,6 +559,9 @@ class WanVideoApplyNAG:
             "nag_tau": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 10.0, "step": 0.1}),
             "nag_alpha": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
+            "optional": {
+                "inplace": ("BOOLEAN", {"default": True, "tooltip": "If true, modifies tensors in place to save memory. Leads to different numerical results which may change the output slightly."}),
+            }
         }
 
     RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", )
@@ -561,7 +570,7 @@ class WanVideoApplyNAG:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Adds NAG prompt embeds to original prompt embeds: 'https://github.com/ChenDarYen/Normalized-Attention-Guidance'"
 
-    def process(self, original_text_embeds, nag_text_embeds, nag_scale, nag_tau, nag_alpha):
+    def process(self, original_text_embeds, nag_text_embeds, nag_scale, nag_tau, nag_alpha, inplace=True):
         prompt_embeds_dict_copy = original_text_embeds.copy()
         prompt_embeds_dict_copy.update({
                 "nag_prompt_embeds": nag_text_embeds["prompt_embeds"],
@@ -569,6 +578,7 @@ class WanVideoApplyNAG:
                     "nag_scale": nag_scale,
                     "nag_tau": nag_tau,
                     "nag_alpha": nag_alpha,
+                    "inplace": inplace,
                 }
             })
         return (prompt_embeds_dict_copy,)
@@ -765,6 +775,98 @@ class WanVideoAddStandInLatent:
         updated = dict(embeds)
         updated["standin_input"] = new_entry
         return (updated,)
+    
+class WanVideoAddBindweaveEmbeds:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "embeds": ("WANVIDIMAGE_EMBEDS",),
+                    "reference_latents": ("LATENT", {"tooltip": "Reference image to encode"}),
+                }, 
+                "optional": {
+                    "ref_masks": ("MASK", {"tooltip": "Reference mask to encode"}),
+                    "qwenvl_embeds_pos": ("QWENVL_EMBEDS", {"tooltip": "Qwen-VL image embeddings for the reference image"}),
+                    "qwenvl_embeds_neg": ("QWENVL_EMBEDS", {"tooltip": "Qwen-VL image embeddings for the reference image"}),
+                }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "LATENT", "MASK",)
+    RETURN_NAMES = ("image_embeds", "image_embed_preview", "mask_preview",)
+    FUNCTION = "add"
+    CATEGORY = "WanVideoWrapper"
+
+    def add(self, embeds, reference_latents, ref_masks=None, qwenvl_embeds_pos=None, qwenvl_embeds_neg=None):
+        updated = dict(embeds)
+        image_embeds = embeds["image_embeds"]
+        max_refs = 4
+        num_refs = reference_latents["samples"].shape[0]
+        pad = torch.zeros(image_embeds.shape[0], max_refs-num_refs, image_embeds.shape[2], image_embeds.shape[3], device=image_embeds.device, dtype=image_embeds.dtype)
+        if num_refs < max_refs:
+            image_embeds = torch.cat([pad, image_embeds], dim=1)
+        ref_latents = [ref_latent for ref_latent in reference_latents["samples"]]
+        image_embeds = torch.cat([*ref_latents, image_embeds], dim=1)
+        
+        mask = embeds.get("mask", None)
+        if mask is not None:
+            mask_pad = torch.zeros(mask.shape[0], max_refs-num_refs, mask.shape[2], mask.shape[3], device=mask.device, dtype=mask.dtype)
+            if num_refs < max_refs:
+                mask = torch.cat([mask_pad, mask], dim=1)
+            if ref_masks is not None:
+                ref_mask_ = common_upscale(ref_masks.unsqueeze(1), mask.shape[3], mask.shape[2], "nearest", "disabled").movedim(0,1)
+                ref_mask_ = torch.cat([ref_mask_, torch.zeros(3, ref_mask_.shape[1], ref_mask_.shape[2], ref_mask_.shape[3], device=ref_mask_.device, dtype=ref_mask_.dtype)])
+                mask = torch.cat([ref_mask_, mask], dim=1)
+            else:
+                mask = torch.cat([torch.ones(mask.shape[0], num_refs, mask.shape[2], mask.shape[3], device=mask.device, dtype=mask.dtype), mask], dim=1)
+
+            updated["mask"] = mask
+
+        clip_embeds = updated.get("clip_context", None)
+        if clip_embeds is not None:
+            B, T, C = clip_embeds.shape
+            target_len = max_refs * 257  # 4 * 257 = 1028
+            if T < target_len:
+                pad = torch.zeros(B, target_len - T, C, device=clip_embeds.device, dtype=clip_embeds.dtype)
+                padded_embeds = torch.cat([clip_embeds, pad], dim=1)
+                log.info(f"Padded clip embeds from {clip_embeds.shape} to {padded_embeds.shape} for Bindweave")
+                updated["clip_context"] = padded_embeds
+            else:
+                updated["clip_context"] = clip_embeds
+
+        updated["image_embeds"] = image_embeds
+        updated["qwenvl_embeds_pos"] = qwenvl_embeds_pos
+        updated["qwenvl_embeds_neg"] = qwenvl_embeds_neg
+        return (updated, {"samples": image_embeds.unsqueeze(0)}, mask[0].float())
+    
+class TextImageEncodeQwenVL():
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "clip": ("CLIP",),
+                    "prompt": ("STRING", {"default": "", "multiline": True}),
+                }, 
+                "optional": {
+                    "image": ("IMAGE", ),
+                }
+        }
+
+    RETURN_TYPES = ("QWENVL_EMBEDS",)
+    RETURN_NAMES = ("qwenvl_embeds",)
+    FUNCTION = "add"
+    CATEGORY = "WanVideoWrapper"
+
+    def add(cls, clip, prompt, image=None):
+        if image is None:
+            input_images = []
+            llama_template = None
+        else:
+            input_images = [image[:, :, :, :3]]
+
+            llama_template = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
+
+        tokens = clip.tokenize(prompt, images=input_images, llama_template=llama_template)
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        print("Qwen-VL embeds shape:", conditioning[0][0].shape)
+        return (conditioning[0][0],)
 
 class WanVideoAddMTVMotion:
     @classmethod
@@ -799,6 +901,86 @@ class WanVideoAddMTVMotion:
         updated["mtv_crafter_motion"] = new_entry
         return (updated,)
 
+class WanVideoAddStoryMemLatents:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "vae": ("WANVAE",),
+                    "embeds": ("WANVIDIMAGE_EMBEDS",),
+                    "memory_images": ("IMAGE",),
+                    "rope_negative_offset": ("BOOLEAN", {"default": False, "tooltip": "Use positive RoPE frequency offset for the memory latents"}),
+                    "rope_negative_offset_frames": ("INT", {"default": 5, "min": 0, "max": 100, "step": 1, "tooltip": "RoPE frequency offset for the memory latents"}),
+                }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
+    RETURN_NAMES = ("image_embeds",)
+    FUNCTION = "add"
+    CATEGORY = "WanVideoWrapper"
+
+    def add(self, vae, embeds, memory_images, rope_negative_offset, rope_negative_offset_frames):
+        updated = dict(embeds)
+        story_mem_latents, = WanVideoEncodeLatentBatch().encode(vae, memory_images)
+        updated["story_mem_latents"] = story_mem_latents["samples"].squeeze(2).permute(1, 0, 2, 3)  # [C, T, H, W]
+        updated["rope_negative_offset_frames"] = rope_negative_offset_frames if rope_negative_offset else 0
+        return (updated,)
+
+
+class WanVideoSVIProEmbeds:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "anchor_samples": ("LATENT", {"tooltip": "Initial start image encoded"}),
+                    "num_frames": ("INT", {"default": 81, "min": 1, "max": 10000, "step": 4, "tooltip": "Number of frames to encode"}),
+                },
+                "optional": {
+                    "prev_samples": ("LATENT", {"tooltip": "Last latent from previous generation"}),
+                    "motion_latent_count": ("INT", {"default": 1, "min": 0, "max": 100, "step": 1, "tooltip": "Number of latents used to continue"}),
+                }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
+    RETURN_NAMES = ("image_embeds",)
+    FUNCTION = "add"
+    CATEGORY = "WanVideoWrapper"
+
+    def add(self, anchor_samples, num_frames, prev_samples=None, motion_latent_count=1):
+
+        anchor_latent = anchor_samples["samples"][0].clone()
+
+        C, T, H, W = anchor_latent.shape
+
+        total_latents = (num_frames - 1) // 4 + 1
+        device = anchor_latent.device
+        dtype = anchor_latent.dtype
+
+        if prev_samples is None or motion_latent_count == 0:
+            padding_size = total_latents - anchor_latent.shape[1]
+            padding = torch.zeros(C, padding_size, H, W, dtype=dtype, device=device)
+            y = torch.concat([anchor_latent, padding], dim=1)
+        else:
+            prev_latent = prev_samples["samples"][0].clone()
+            motion_latent = prev_latent[:, -motion_latent_count:]
+            padding_size = total_latents - anchor_latent.shape[1] - motion_latent.shape[1]
+            padding = torch.zeros(C, padding_size, H, W, dtype=dtype, device=device)
+            y = torch.concat([anchor_latent, motion_latent, padding], dim=1)
+
+        msk = torch.ones(1, num_frames, H, W, device=device, dtype=dtype)
+        msk[:, 1:] = 0
+        msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
+        msk = msk.view(1, msk.shape[1] // 4, 4, H, W)
+        msk = msk.transpose(1, 2)[0]
+
+        image_embeds = {
+            "image_embeds": y,
+            "num_frames": num_frames,
+            "lat_h": H,
+            "lat_w": W,
+            "mask": msk
+        }
+
+        return (image_embeds,)
+
 #region I2V encode
 class WanVideoImageToVideoEncode:
     @classmethod
@@ -823,6 +1005,8 @@ class WanVideoImageToVideoEncode:
                 "extra_latents": ("LATENT", {"tooltip": "Extra latents to add to the input front, used for Skyreels A2 reference images"}),
                 "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE encoding for reduced memory use"}),
                 "add_cond_latents": ("ADD_COND_LATENTS", {"advanced": True, "tooltip": "Additional cond latents WIP"}),
+                "augment_empty_frames": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "EXPERIMENTAL: Augment empty frames with the difference to the start image to force more motion"}),
+                "empty_frame_pad_image": ("IMAGE", {"tooltip": "Use this image to pad empty frames instead of gray, used with SVI-shot and SVI 2.0 LoRAs"}),
             }
         }
 
@@ -832,18 +1016,14 @@ class WanVideoImageToVideoEncode:
     CATEGORY = "WanVideoWrapper"
 
     def process(self, width, height, num_frames, force_offload, noise_aug_strength, 
-                start_latent_strength, end_latent_strength, start_image=None, end_image=None, control_embeds=None, fun_or_fl2v_model=False, 
-                temporal_mask=None, extra_latents=None, clip_embeds=None, tiled_vae=False, add_cond_latents=None, vae=None):
-        
-        if start_image is None and end_image is None and add_cond_latents is None:
-            return WanVideoEmptyEmbeds().process(
-                num_frames, width, height, control_embeds=control_embeds, extra_latents=extra_latents,
-            )
+                start_latent_strength, end_latent_strength, start_image=None, end_image=None, control_embeds=None, fun_or_fl2v_model=False,
+                temporal_mask=None, extra_latents=None, clip_embeds=None, tiled_vae=False, add_cond_latents=None, vae=None, augment_empty_frames=0.0, empty_frame_pad_image=None):
+
         if vae is None:
             raise ValueError("VAE is required for image encoding.")
         H = height
         W = width
-           
+
         lat_h = H // vae.upsampling_factor
         lat_w = W // vae.upsampling_factor
 
@@ -868,6 +1048,8 @@ class WanVideoImageToVideoEncode:
                 mask = torch.cat([mask, torch.zeros(base_frames - mask.shape[0], lat_h, lat_w, device=device)])
             mask = mask.unsqueeze(0).to(device, vae.dtype)
 
+        pixel_mask = mask.clone()
+
         # Repeat first frame and optionally end frame
         start_mask_repeated = torch.repeat_interleave(mask[:, 0:1], repeats=4, dim=1) # T, C, H, W
         if end_image is not None and not fun_or_fl2v_model:
@@ -890,7 +1072,7 @@ class WanVideoImageToVideoEncode:
             resized_start_image = resized_start_image * 2 - 1
             if noise_aug_strength > 0.0:
                 resized_start_image = add_noise_to_reference_video(resized_start_image, ratio=noise_aug_strength)
-        
+
         if end_image is not None:
             end_image = end_image[..., :3]
             if end_image.shape[1] != H or end_image.shape[2] != W:
@@ -900,30 +1082,46 @@ class WanVideoImageToVideoEncode:
             resized_end_image = resized_end_image * 2 - 1
             if noise_aug_strength > 0.0:
                 resized_end_image = add_noise_to_reference_video(resized_end_image, ratio=noise_aug_strength)
-            
+
         # Concatenate image with zero frames and encode
-        if temporal_mask is None:
-            if start_image is not None and end_image is None:
-                zero_frames = torch.zeros(3, num_frames-start_image.shape[0], H, W, device=device, dtype=vae.dtype)
-                concatenated = torch.cat([resized_start_image.to(device, dtype=vae.dtype), zero_frames], dim=1)
-                del resized_start_image, zero_frames
-            elif start_image is None and end_image is not None:
-                zero_frames = torch.zeros(3, num_frames-end_image.shape[0], H, W, device=device, dtype=vae.dtype)
-                concatenated = torch.cat([zero_frames, resized_end_image.to(device, dtype=vae.dtype)], dim=1)
-                del zero_frames
-            elif start_image is None and end_image is None:
-                concatenated = torch.zeros(3, num_frames, H, W, device=device, dtype=vae.dtype)
-            else:
-                if fun_or_fl2v_model:
-                    zero_frames = torch.zeros(3, num_frames-(start_image.shape[0]+end_image.shape[0]), H, W, device=device, dtype=vae.dtype)
-                else:
-                    zero_frames = torch.zeros(3, num_frames-1, H, W, device=device, dtype=vae.dtype)
-                concatenated = torch.cat([resized_start_image.to(device, dtype=vae.dtype), zero_frames, resized_end_image.to(device, dtype=vae.dtype)], dim=1)
-                del resized_start_image, zero_frames
+        if start_image is not None and end_image is None:
+            zero_frames = torch.zeros(3, num_frames-start_image.shape[0], H, W, device=device, dtype=vae.dtype)
+            concatenated = torch.cat([resized_start_image.to(device, dtype=vae.dtype), zero_frames], dim=1)
+            del resized_start_image, zero_frames
+        elif start_image is None and end_image is not None:
+            zero_frames = torch.zeros(3, num_frames-end_image.shape[0], H, W, device=device, dtype=vae.dtype)
+            concatenated = torch.cat([zero_frames, resized_end_image.to(device, dtype=vae.dtype)], dim=1)
+            del zero_frames
+        elif start_image is None and end_image is None:
+            concatenated = torch.zeros(3, num_frames, H, W, device=device, dtype=vae.dtype)
         else:
-            temporal_mask = common_upscale(temporal_mask.unsqueeze(1), W, H, "nearest", "disabled").squeeze(1)
-            concatenated = resized_start_image[:,:num_frames].to(vae.dtype) * temporal_mask[:num_frames].unsqueeze(0).to(vae.dtype)
-            del resized_start_image, temporal_mask
+            if fun_or_fl2v_model:
+                zero_frames = torch.zeros(3, num_frames-(start_image.shape[0]+end_image.shape[0]), H, W, device=device, dtype=vae.dtype)
+            else:
+                zero_frames = torch.zeros(3, num_frames-1, H, W, device=device, dtype=vae.dtype)
+            concatenated = torch.cat([resized_start_image.to(device, dtype=vae.dtype), zero_frames, resized_end_image.to(device, dtype=vae.dtype)], dim=1)
+            del resized_start_image, zero_frames
+
+        if empty_frame_pad_image is not None:
+            pad_img = empty_frame_pad_image.clone()[..., :3]
+            if pad_img.shape[1] != H or pad_img.shape[2] != W:
+                pad_img = common_upscale(pad_img.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(1, -1)
+            pad_img = (pad_img.movedim(-1, 0) * 2 - 1).to(device, dtype=vae.dtype)
+
+            num_pad_frames = pad_img.shape[1]
+            num_target_frames = concatenated.shape[1]
+            if num_pad_frames < num_target_frames:
+                pad_img = torch.cat([pad_img, pad_img[:, -1:].expand(-1, num_target_frames - num_pad_frames, -1, -1)], dim=1)
+            else:
+                pad_img = pad_img[:, :num_target_frames]
+
+            frame_is_empty = (pixel_mask[0].mean(dim=(-2, -1)) < 0.5)[:concatenated.shape[1]].clone()
+            if start_image is not None:
+                frame_is_empty[:start_image.shape[0]] = False
+            if end_image is not None:
+                frame_is_empty[-end_image.shape[0]:] = False
+
+            concatenated[:, frame_is_empty] = pad_img[:, frame_is_empty]
 
         mm.soft_empty_cache()
         gc.collect()
@@ -941,6 +1139,9 @@ class WanVideoImageToVideoEncode:
             has_ref = True
         y[:, :1] *= start_latent_strength
         y[:, -1:] *= end_latent_strength
+        if augment_empty_frames > 0.0:
+            frame_is_empty = (mask[0].mean(dim=(-2, -1)) < 0.5).view(1, -1, 1, 1)
+            y = y[:, :1] + (y - y[:, :1]) * ((augment_empty_frames+1) * frame_is_empty + ~frame_is_empty)
 
         # Calculate maximum sequence length
         patches_per_frame = lat_h * lat_w // (PATCH_SIZE[1] * PATCH_SIZE[2])
@@ -949,14 +1150,14 @@ class WanVideoImageToVideoEncode:
 
         if add_cond_latents is not None:
             add_cond_latents["ref_latent_neg"] = vae.encode(torch.zeros(1, 3, 1, H, W, device=device, dtype=vae.dtype), device)
-        
+
         if force_offload:
             vae.model.to(offload_device)
             mm.soft_empty_cache()
             gc.collect()
 
         image_embeds = {
-            "image_embeds": y,
+            "image_embeds": y.cpu(),
             "clip_context": clip_embeds.get("clip_embeds", None) if clip_embeds is not None else None,
             "negative_clip_context": clip_embeds.get("negative_clip_embeds", None) if clip_embeds is not None else None,
             "max_seq_len": max_seq_len,
@@ -968,11 +1169,11 @@ class WanVideoImageToVideoEncode:
             "fun_or_fl2v_model": fun_or_fl2v_model,
             "has_ref": has_ref,
             "add_cond_latents": add_cond_latents,
-            "mask": mask
+            "mask": mask.cpu()
         }
 
         return (image_embeds,)
-    
+
 # region WanAnimate
 class WanVideoAnimateEmbeds:
     @classmethod
@@ -983,15 +1184,15 @@ class WanVideoAnimateEmbeds:
             "height": ("INT", {"default": 480, "min": 64, "max": 8096, "step": 8, "tooltip": "Height of the image to encode"}),
             "num_frames": ("INT", {"default": 81, "min": 1, "max": 10000, "step": 4, "tooltip": "Number of frames to encode"}),
             "force_offload": ("BOOLEAN", {"default": True}),
-            "frame_window_size": ("INT", {"default": 77, "min": 1, "max": 1000, "step": 1, "tooltip": "Number of frames to use for temporal attention window"}),
+            "frame_window_size": ("INT", {"default": 77, "min": 1, "max": 10000, "step": 1, "tooltip": "Number of frames to use for temporal attention window"}),
             "colormatch": (
-            [   
+            [
                 'disabled',
                 'mkl',
-                'hm', 
-                'reinhard', 
-                'mvgd', 
-                'hm-mvgd-hm', 
+                'hm',
+                'reinhard',
+                'mvgd',
+                'hm-mvgd-hm',
                 'hm-mkl-hm',
             ], {
                "default": 'disabled', "tooltip": "Color matching method to use between the windows"
@@ -1006,6 +1207,7 @@ class WanVideoAnimateEmbeds:
                 "face_images": ("IMAGE", {"tooltip": "end frame"}),
                 "bg_images": ("IMAGE", {"tooltip": "background images"}),
                 "mask": ("MASK", {"tooltip": "mask"}),
+                "start_ref_image": ("IMAGE", {"tooltip": "start ref image"}),
                 "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE encoding for reduced memory use"}),
             }
         }
@@ -1016,10 +1218,10 @@ class WanVideoAnimateEmbeds:
     CATEGORY = "WanVideoWrapper"
 
     def process(self, vae, width, height, num_frames, force_offload, frame_window_size, colormatch, pose_strength, face_strength,
-                ref_images=None, pose_images=None, face_images=None, clip_embeds=None, tiled_vae=False, bg_images=None, mask=None):
-
-        H = height
-        W = width
+                ref_images=None, pose_images=None, face_images=None, clip_embeds=None, tiled_vae=False, bg_images=None, mask=None, start_ref_image=None):
+        
+        W = (width // 16) * 16
+        H = (height // 16) * 16
 
         lat_h = H // vae.upsampling_factor
         lat_w = W // vae.upsampling_factor
@@ -1027,7 +1229,7 @@ class WanVideoAnimateEmbeds:
         num_refs = ref_images.shape[0] if ref_images is not None else 0
         num_frames = ((num_frames - 1) // 4) * 4 + 1
 
-        looping = num_frames > frame_window_size
+        looping = num_frames > frame_window_size or start_ref_image is not None
 
         if num_frames < frame_window_size:
             frame_window_size = num_frames
@@ -1044,7 +1246,7 @@ class WanVideoAnimateEmbeds:
         gc.collect()
         vae.to(device)
         # Resize and rearrange the input image dimensions
-        pose_latents = ref_latents = ref_latent = None
+        pose_latents = ref_latent = None
         if pose_images is not None:
             pose_images = pose_images[..., :3]
             if pose_images.shape[1] != H or pose_images.shape[2] != W:
@@ -1125,6 +1327,12 @@ class WanVideoAnimateEmbeds:
             resized_face_images = (resized_face_images * 2 - 1).unsqueeze(0)
             resized_face_images = resized_face_images.to(offload_device, dtype=vae.dtype)
 
+        if start_ref_image is not None:
+            if start_ref_image.shape[1] != H or start_ref_image.shape[2] != W:
+                resized_start_ref_image = common_upscale(start_ref_image.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
+            else:
+                resized_start_ref_image = start_ref_image.permute(3, 0, 1, 2) # C, T, H, W
+            resized_start_ref_image = resized_start_ref_image[:3] * 2 - 1
 
         seq_len = math.ceil((target_shape[2] * target_shape[3]) / 4 * target_shape[1])
         
@@ -1141,8 +1349,10 @@ class WanVideoAnimateEmbeds:
             "pose_images": resized_pose_images if pose_images is not None and looping else None,
             "bg_images": resized_bg_images if bg_images is not None and looping else None,
             "ref_masks": bg_mask if mask is not None and looping else None,
+            "is_masked": mask is not None,
             "ref_latent": ref_latent,
             "ref_image": resized_ref_images if ref_images is not None else None,
+            "start_ref_image": resized_start_ref_image if start_ref_image is not None else None,
             "face_pixels": resized_face_images if face_images is not None else None,
             "num_frames": num_frames,
             "target_shape": target_shape,
@@ -1157,6 +1367,46 @@ class WanVideoAnimateEmbeds:
         }
 
         return (image_embeds,)
+
+# region UniLumos
+class WanVideoUniLumosEmbeds:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "width": ("INT", {"default": 832, "min": 64, "max": 8096, "step": 8, "tooltip": "Width of the image to encode"}),
+            "height": ("INT", {"default": 480, "min": 64, "max": 8096, "step": 8, "tooltip": "Height of the image to encode"}),
+            "num_frames": ("INT", {"default": 81, "min": 1, "max": 10000, "step": 4, "tooltip": "Number of frames to encode"}),
+            },
+            "optional": {
+                "foreground_latents": ("LATENT", {"tooltip": "Video foreground latents"}),
+                "background_latents": ("LATENT", {"tooltip": "Video background latents"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", )
+    RETURN_NAMES = ("image_embeds",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+
+    def process(self, num_frames, width, height, foreground_latents=None, background_latents=None):
+        target_shape = (16, (num_frames - 1) // VAE_STRIDE[0] + 1,
+                        height // VAE_STRIDE[1],
+                        width // VAE_STRIDE[2])
+        
+        embeds = {
+            "target_shape": target_shape,
+            "num_frames": num_frames,
+        }
+        if foreground_latents is not None:
+            embeds["foreground_latents"] = foreground_latents["samples"][0]
+        else:
+            embeds["foreground_latents"] = torch.zeros(target_shape[0], target_shape[1], target_shape[2], target_shape[3], device=torch.device("cpu"), dtype=torch.float32)
+        if background_latents is not None:
+            embeds["background_latents"] = background_latents["samples"][0]
+        else:
+            embeds["background_latents"] = torch.zeros(target_shape[0], target_shape[1], target_shape[2], target_shape[3], device=torch.device("cpu"), dtype=torch.float32)
+
+        return (embeds,)
     
 class WanVideoEmptyEmbeds:
     @classmethod
@@ -1228,6 +1478,25 @@ class WanVideoAddExtraLatent:
         # Return a new dict with updated extra_latents
         updated = dict(embeds)
         updated["extra_latents"] = extra_latents_list
+        return (updated,)
+    
+class WanVideoAddLucyEditLatents:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "embeds": ("WANVIDIMAGE_EMBEDS",),
+                    "extra_latents": ("LATENT",),
+                }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
+    RETURN_NAMES = ("image_embeds",)
+    FUNCTION = "add"
+    CATEGORY = "WanVideoWrapper"
+
+    def add(self, embeds, extra_latents):
+        updated = dict(embeds)
+        updated["extra_channel_latents"] = extra_latents["samples"]
         return (updated,)
 
 class WanVideoMiniMaxRemoverEmbeds:
@@ -1658,33 +1927,7 @@ class WanVideoContextOptions:
         }
 
         return (context_options,)
-    
-    
-class WanVideoFlowEdit:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-                "source_embeds": ("WANVIDEOTEXTEMBEDS", ),
-                "skip_steps": ("INT", {"default": 4, "min": 0}),
-                "drift_steps": ("INT", {"default": 0, "min": 0}),
-                "drift_flow_shift": ("FLOAT", {"default": 3.0, "min": 1.0, "max": 30.0, "step": 0.01}),
-                "source_cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
-                "drift_cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
-            },
-            "optional": {
-                "source_image_embeds": ("WANVIDIMAGE_EMBEDS", ),
-            }
-        }
 
-    RETURN_TYPES = ("FLOWEDITARGS", )
-    RETURN_NAMES = ("flowedit_args",)
-    FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
-    DESCRIPTION = "Flowedit options for WanVideo"
-
-    def process(self, **kwargs):
-        return (kwargs,)
-    
 class WanVideoLoopArgs:
     @classmethod
     def INPUT_TYPES(s):
@@ -1718,7 +1961,10 @@ class WanVideoExperimentalArgs:
                 "fresca_freq_cutoff": ("INT", {"default": 20, "min": 0, "max": 10000, "step": 1}),
                 "use_tcfg": ("BOOLEAN", {"default": False, "tooltip": "https://arxiv.org/abs/2503.18137 TCFG: Tangential Damping Classifier-free Guidance. CFG artifacts reduction."}),
                 "raag_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Alpha value for RAAG, 1.0 is default, 0.0 is disabled."}),
-                "bidirectional_sampling": ("BOOLEAN", {"default": False, "tooltip": "Enable bidirectional sampling, based on https://github.com/ff2416/WanFM"})
+                "bidirectional_sampling": ("BOOLEAN", {"default": False, "tooltip": "Enable bidirectional sampling, based on https://github.com/ff2416/WanFM"}),
+                "temporal_score_rescaling": ("BOOLEAN", {"default": False, "tooltip": "Enable temporal score rescaling: https://github.com/temporalscorerescaling/TSR/"}),
+                "tsr_k": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 100.0, "step": 0.01, "tooltip": "The sampling temperature"}),
+                "tsr_sigma": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How early TSR steer the sampling process"}),
             },
         }
 
@@ -1753,101 +1999,6 @@ class WanVideoFreeInitArgs:
 
     def process(self, **kwargs):
         return (kwargs,)
-    
-class WanVideoScheduler: #WIP
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-                "scheduler": (scheduler_list, {"default": "unipc"}),
-                "steps": ("INT", {"default": 30, "min": 1, "tooltip": "Number of steps for the scheduler"}),
-                "shift": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
-                "start_step": ("INT", {"default": 0, "min": 0, "tooltip": "Starting step for the scheduler"}),
-                "end_step": ("INT", {"default": -1, "min": -1, "tooltip": "Ending step for the scheduler"})
-            },
-            "optional": {
-                "sigmas": ("SIGMAS", ),
-            },
-            "hidden": {
-                "unique_id": "UNIQUE_ID",
-            },
-        }
-
-    RETURN_TYPES = ("SIGMAS", "INT", "FLOAT", scheduler_list, "INT", "INT",)
-    RETURN_NAMES = ("sigmas", "steps", "shift", "scheduler", "start_step", "end_step")
-    FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
-    EXPERIMENTAL = True
-
-    def process(self, scheduler, steps, start_step, end_step, shift, unique_id, sigmas=None):
-        sample_scheduler, timesteps, start_idx, end_idx = get_scheduler(
-            scheduler, 
-            steps, 
-            start_step, end_step, shift, 
-            device, 
-            sigmas=sigmas,
-            log_timesteps=True)
-        
-        scheduler_dict = {
-            "sample_scheduler": sample_scheduler,
-            "timesteps": timesteps,
-        }
-
-        try:
-            from server import PromptServer
-            import io
-            import base64
-            import matplotlib.pyplot as plt
-        except:
-            PromptServer = None
-        if unique_id and PromptServer is not None:
-            try:
-                # Plot sigmas and save to a buffer
-                sigmas_np = sample_scheduler.full_sigmas.cpu().numpy()
-                if not np.isclose(sigmas_np[-1], 0.0, atol=1e-6):
-                    sigmas_np = np.append(sigmas_np, 0.0)
-                buf = io.BytesIO()
-                fig = plt.figure(facecolor='#353535')
-                ax = fig.add_subplot(111)
-                ax.set_facecolor('#353535')  # Set axes background color
-                x_values = range(0, len(sigmas_np))
-                ax.plot(x_values, sigmas_np)
-                # Annotate each sigma value
-                ax.scatter(x_values, sigmas_np, color='white', s=20, zorder=3)  # Small dots at each sigma
-                for x, y in zip(x_values, sigmas_np):
-                    if len(sigmas_np) <= 10:  # Only annotate if few steps
-                        ax.annotate(f"{y:.3f}", (x, y), textcoords="offset points", xytext=(10, 1), ha='center', color='orange', fontsize=12)
-                ax.set_xticks(x_values)
-                ax.set_title("Sigmas", color='white')           # Title font color
-                ax.set_xlabel("Step", color='white')            # X label font color
-                ax.set_ylabel("Sigma Value", color='white')     # Y label font color
-                ax.tick_params(axis='x', colors='white', labelsize=10)        # X tick color
-                ax.tick_params(axis='y', colors='white', labelsize=10)        # Y tick color
-                # Add split point if end_step is defined
-                end_idx += 1
-                if end_idx != -1 and 0 <= end_idx < len(sigmas_np) - 1:
-                    ax.axvline(end_idx, color='red', linestyle='--', linewidth=2, label='end_step split')
-                # Add split point if start_step is defined
-                if start_idx > 0 and 0 <= start_idx < len(sigmas_np):
-                    ax.axvline(start_idx, color='green', linestyle='--', linewidth=2, label='start_step split')
-                if (end_idx != -1 and 0 <= end_idx < len(sigmas_np)) or (start_idx > 0 and 0 <= start_idx < len(sigmas_np)):
-                    ax.legend()
-                if start_idx < end_idx and 0 <= start_idx < len(sigmas_np) and 0 < end_idx < len(sigmas_np):
-                    ax.axvspan(start_idx, end_idx, color='lightblue', alpha=0.1, label='Sampled Range')
-                plt.tight_layout()
-                plt.savefig(buf, format='png')
-                plt.close(fig)
-                buf.seek(0)
-                img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-                buf.close()
-
-                # Send as HTML img tag with base64 data
-                html_img = f"<img src='data:image/png;base64,{img_base64}' alt='Sigmas Plot' style='max-width:100%; height:100%; overflow:hidden; display:block;'>"
-                PromptServer.instance.send_progress_text(html_img, unique_id)
-            except Exception as e:
-                print("Failed to send sigmas plot:", e)
-                pass
-
-        return (sigmas, steps, shift, scheduler_dict, start_step, end_step)
 
 rope_functions = ["default", "comfy", "comfy_chunked"]
 class WanVideoRoPEFunction:
@@ -1878,6 +2029,53 @@ class WanVideoRoPEFunction:
             return (rope_func_dict,)
         return (rope_function,)
 
+#region TTM
+class WanVideoAddTTMLatents:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "embeds": ("WANVIDIMAGE_EMBEDS",),
+            "reference_latents": ("LATENT", {"tooltip": "Latents used as reference for TTM"}),
+            "mask": ("MASK", {"tooltip": "Mask used for TTM"}),
+            "start_step": ("INT", {"default": 0, "min": -1, "max": 1000, "step": 1, "tooltip": "Start step for whole denoising process"}),
+            "end_step": ("INT", {"default": 1, "min": 1, "max": 1000, "step": 1, "tooltip": "The step to stop applying TTM"}),
+            },
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", )
+    RETURN_NAMES = ("image_embeds", )
+    FUNCTION = "add"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "https://github.com/time-to-move/TTM"
+
+    def add(self, embeds, reference_latents, mask, start_step, end_step):
+
+        if end_step < max(0, start_step):
+            raise ValueError(f"`end_step` ({end_step}) must be >= `start_step` ({start_step}).")
+
+        mask_sampled = mask[::4]
+        mask_sampled = mask_sampled.unsqueeze(1).unsqueeze(0)  # [1, T, 1, H, W]
+
+        vae_upscale_factor = 8
+        if reference_latents["samples"].shape[1] == 48:
+            vae_upscale_factor = 16
+
+        # Upsample spatially to latent resolution
+        H_latent = mask_sampled.shape[-2] // vae_upscale_factor
+        W_latent = mask_sampled.shape[-1] // vae_upscale_factor
+        mask_latent = F.interpolate(
+            mask_sampled.float(),
+            size=(mask_sampled.shape[2], H_latent, W_latent),
+            mode="nearest"
+        )
+
+        updated = dict(embeds)
+        updated["ttm_reference_latents"] = reference_latents["samples"].squeeze(0)
+        updated["ttm_mask"] = mask_latent.squeeze(0).movedim(1, 0)  # [T, 1, H, W]
+        updated["ttm_start_step"] = start_step
+        updated["ttm_end_step"] = end_step
+
+        return (updated,)
 
 #region VideoDecode
 class WanVideoDecode:
@@ -1899,7 +2097,7 @@ class WanVideoDecode:
                     "tile_stride_y": ("INT", {"default": 128, "min": 32, "max": 2040, "step": 8, "tooltip": "Tile stride height in pixels. Smaller values use less VRAM but will introduce more seams."}),
                     },
                     "optional": {
-                        "normalization": (["default", "minmax"], {"advanced": True}),
+                        "normalization": (["default", "minmax", "none"], {"advanced": True}),
                     }
                 }
 
@@ -1923,11 +2121,13 @@ class WanVideoDecode:
             video.clamp_(-1.0, 1.0)
             video.add_(1.0).div_(2.0)
             return video.cpu().float(),
-        latents = samples["samples"]
+        latents = samples["samples"].clone()
         end_image = samples.get("end_image", None)
         has_ref = samples.get("has_ref", False)
         drop_last = samples.get("drop_last", False)
         is_looped = samples.get("looped", False)
+
+        flashvsr_LQ_images = samples.get("flashvsr_LQ_images", None)
 
         vae.to(device)
 
@@ -1940,25 +2140,24 @@ class WanVideoDecode:
         if drop_last:
             latents = latents[:, :, :-1]
 
-        if type(vae).__name__ == "TAEHV":      
-            images = vae.decode_video(latents.permute(0, 2, 1, 3, 4))[0].permute(1, 0, 2, 3)
+        if type(vae).__name__ == "TAEHV":
+            images = vae.decode_video(latents.permute(0, 2, 1, 3, 4), cond=flashvsr_LQ_images.to(vae.dtype) if flashvsr_LQ_images is not None else None)[0].permute(1, 0, 2, 3)
             images = torch.clamp(images, 0.0, 1.0)
             images = images.permute(1, 2, 3, 0).cpu().float()
             return (images,)
         else:
-            if end_image is not None:
-                enable_vae_tiling = False
             images = vae.decode(latents, device=device, end_=(end_image is not None), tiled=enable_vae_tiling, tile_size=(tile_x//8, tile_y//8), tile_stride=(tile_stride_x//8, tile_stride_y//8))[0]
-            
-        
+
+
         images = images.cpu().float()
 
-        if normalization == "minmax":
-            images.sub_(images.min()).div_(images.max() - images.min())
-        else:  
-            images.clamp_(-1.0, 1.0)
-            images.add_(1.0).div_(2.0)
-        
+        if normalization != "none":
+            if normalization == "minmax":
+                images.sub_(images.min()).div_(images.max() - images.min())
+            else:
+                images.clamp_(-1.0, 1.0)
+                images.add_(1.0).div_(2.0)
+
         if is_looped:
             temp_latents = torch.cat([latents[:, :, -3:]] + [latents[:, :, :2]], dim=2)
             temp_images = vae.decode(temp_latents, device=device, end_=(end_image is not None), tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))[0]
@@ -1969,7 +2168,7 @@ class WanVideoDecode:
         if end_image is not None: 
             images = images[:, 0:-1]
 
-        
+
         vae.to(offload_device)
         mm.soft_empty_cache()
 
@@ -1998,7 +2197,7 @@ class WanVideoEncodeLatentBatch:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Encodes a batch of images individually to create a latent video batch where each video is a single frame, useful for I2V init purposes, for example as multiple context window inits"
 
-    def encode(self, vae, images, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, latent_strength=1.0):
+    def encode(self, vae, images, enable_vae_tiling=False, tile_x=272, tile_y=272, tile_stride_x=144, tile_stride_y=128, latent_strength=1.0):
         vae.to(device)
 
         images = images.clone()
@@ -2020,7 +2219,7 @@ class WanVideoEncodeLatentBatch:
                 latent = vae.encode(img.unsqueeze(0).unsqueeze(0).permute(0, 4, 1, 2, 3), device=device, tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))
             else:
                 latent = vae.encode(img.unsqueeze(0).unsqueeze(0).permute(0, 4, 1, 2, 3), device=device, tiled=enable_vae_tiling)
-            
+
             if latent_strength != 1.0:
                 latent *= latent_strength
             latent_list.append(latent.squeeze(0).cpu())
@@ -2080,17 +2279,46 @@ class WanVideoEncode:
             latents = latents.permute(0, 2, 1, 3, 4)
         else:
             latents = vae.encode(image * 2.0 - 1.0, device=device, tiled=enable_vae_tiling, tile_size=(tile_x//vae.upsampling_factor, tile_y//vae.upsampling_factor), tile_stride=(tile_stride_x//vae.upsampling_factor, tile_stride_y//vae.upsampling_factor))
-            
+
             vae.to(offload_device)
         if latent_strength != 1.0:
             latents *= latent_strength
 
+        latents = latents.cpu()
+
         log.info(f"WanVideoEncode: Encoded latents shape {latents.shape}")
         mm.soft_empty_cache()
- 
+
         return ({"samples": latents, "noise_mask": mask},)
 
+class WanVideoFlowEdit:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                "source_embeds": ("WANVIDEOTEXTEMBEDS", ),
+                "skip_steps": ("INT", {"default": 4, "min": 0}),
+                "drift_steps": ("INT", {"default": 0, "min": 0}),
+                "drift_flow_shift": ("FLOAT", {"default": 3.0, "min": 1.0, "max": 30.0, "step": 0.01}),
+                "source_cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
+                "drift_cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
+            },
+            "optional": {
+                "source_image_embeds": ("WANVIDIMAGE_EMBEDS", ),
+            }
+        }
+
+    RETURN_TYPES = ("FLOWEDITARGS", )
+    RETURN_NAMES = ("flowedit_args",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Flowedit options for WanVideo"
+
+    def process(self, **kwargs):
+        return (kwargs,)
+
+
 NODE_CLASS_MAPPINGS = {
+    "WanVideoFlowEdit": WanVideoFlowEdit,
     "WanVideoDecode": WanVideoDecode,
     "WanVideoTextEncode": WanVideoTextEncode,
     "WanVideoTextEncodeSingle": WanVideoTextEncodeSingle,
@@ -2102,7 +2330,6 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoEnhanceAVideo": WanVideoEnhanceAVideo,
     "WanVideoContextOptions": WanVideoContextOptions,
     "WanVideoTextEmbedBridge": WanVideoTextEmbedBridge,
-    "WanVideoFlowEdit": WanVideoFlowEdit,
     "WanVideoControlEmbeds": WanVideoControlEmbeds,
     "WanVideoSLG": WanVideoSLG,
     "WanVideoLoopArgs": WanVideoLoopArgs,
@@ -2118,16 +2345,23 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoBlockList": WanVideoBlockList,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
     "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
-    "WanVideoScheduler": WanVideoScheduler,
     "WanVideoAddStandInLatent": WanVideoAddStandInLatent,
     "WanVideoAddControlEmbeds": WanVideoAddControlEmbeds,
     "WanVideoAddMTVMotion": WanVideoAddMTVMotion,
     "WanVideoRoPEFunction": WanVideoRoPEFunction,
     "WanVideoAddPusaNoise": WanVideoAddPusaNoise,
     "WanVideoAnimateEmbeds": WanVideoAnimateEmbeds,
+    "WanVideoAddLucyEditLatents": WanVideoAddLucyEditLatents,
+    "WanVideoAddBindweaveEmbeds": WanVideoAddBindweaveEmbeds,
+    "TextImageEncodeQwenVL": TextImageEncodeQwenVL,
+    "WanVideoUniLumosEmbeds": WanVideoUniLumosEmbeds,
+    "WanVideoAddTTMLatents": WanVideoAddTTMLatents,
+    "WanVideoAddStoryMemLatents": WanVideoAddStoryMemLatents,
+    "WanVideoSVIProEmbeds": WanVideoSVIProEmbeds,
     }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "WanVideoFlowEdit": "WanVideo FlowEdit",
     "WanVideoDecode": "WanVideo Decode",
     "WanVideoTextEncode": "WanVideo TextEncode",
     "WanVideoTextEncodeSingle": "WanVideo TextEncodeSingle",
@@ -2140,7 +2374,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoEnhanceAVideo": "WanVideo Enhance-A-Video",
     "WanVideoContextOptions": "WanVideo Context Options",
     "WanVideoTextEmbedBridge": "WanVideo TextEmbed Bridge",
-    "WanVideoFlowEdit": "WanVideo FlowEdit",
     "WanVideoControlEmbeds": "WanVideo Control Embeds",
     "WanVideoSLG": "WanVideo SLG",
     "WanVideoLoopArgs": "WanVideo Loop Args",
@@ -2162,4 +2395,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoRoPEFunction": "WanVideo RoPE Function",
     "WanVideoAddPusaNoise": "WanVideo Add Pusa Noise",
     "WanVideoAnimateEmbeds": "WanVideo Animate Embeds",
+    "WanVideoAddLucyEditLatents": "WanVideo Add LucyEdit Latents",
+    "WanVideoAddBindweaveEmbeds": "WanVideo Add Bindweave Embeds",
+    "WanVideoUniLumosEmbeds": "WanVideo UniLumos Embeds",
+    "WanVideoAddTTMLatents": "WanVideo Add TTMLatents",
+    "WanVideoAddStoryMemLatents": "WanVideo Add StoryMem Latents",
+    "WanVideoSVIProEmbeds": "WanVideo SVIPro Embeds",
 }
